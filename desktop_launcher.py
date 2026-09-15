@@ -4,12 +4,17 @@ import contextlib
 import json
 import multiprocessing
 import os
+import signal
 import socket
 import sys
 import threading
 import time
 import urllib.request
 from pathlib import Path
+
+# Cold start of the packaged app measured ~80 s on arm64 (TF + streamlit
+# imports from the onedir bundle); leave generous headroom for slower Macs.
+_SERVER_READY_TIMEOUT_S = 180.0
 
 
 def _resource_path(rel_path: str) -> Path:
@@ -24,7 +29,7 @@ def _find_free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def _wait_http_ready(url: str, timeout_s: float = 25.0) -> None:
+def _wait_http_ready(url: str, timeout_s: float = _SERVER_READY_TIMEOUT_S) -> None:
     deadline = time.time() + timeout_s
     last_err: Exception | None = None
     while time.time() < deadline:
@@ -84,10 +89,28 @@ def _debug_post(hypothesis_id: str, location: str, msg: str, data: dict | None =
         pass
 
 
+def _exit_when_parent_dies() -> None:
+    # daemon=True only reaps the child on a clean parent exit; Force Quit
+    # (SIGKILL), crashes and pkill leave the streamlit server running as an
+    # orphan holding ~1 GB of TF memory. When the parent dies the child gets
+    # reparented (ppid changes), so poll for that and self-exit.
+    parent_pid = os.getppid()
+
+    def _watch() -> None:
+        while True:
+            if os.getppid() != parent_pid:
+                os._exit(1)
+            time.sleep(1.0)
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def _run_streamlit_server(port: int, log_path: str) -> None:
     import traceback
 
     from streamlit.web import bootstrap
+
+    _exit_when_parent_dies()
 
     app_py = _resource_path("app.py")
     os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
@@ -233,8 +256,12 @@ def main() -> None:
     log_path = str(log_file)
     proc = multiprocessing.Process(target=_run_streamlit_server, args=(port, log_path), daemon=True)
     proc.start()
+    # Catch SIGTERM (pkill, shutdown) so the streamlit child is reaped even
+    # outside the window-close path. SIGKILL (Force Quit) cannot be caught;
+    # the child-side watchdog in _exit_when_parent_dies covers that case.
+    signal.signal(signal.SIGTERM, lambda *_: _shutdown_and_exit(proc))
     try:
-        deadline = time.time() + 25.0
+        deadline = time.time() + _SERVER_READY_TIMEOUT_S
         last_err: Exception | None = None
         while time.time() < deadline:
             if not proc.is_alive():
