@@ -252,6 +252,9 @@ def _run_headless(port: int, proc: multiprocessing.Process) -> None:
     # reads stdout line-by-line). Everything the Streamlit server prints goes to
     # the log file, so this is the only line on our stdout.
     print(json.dumps({"type": "aioscout:ready", "port": int(port), "pid": os.getpid()}), flush=True)
+    # If the embedding app is SIGKILLed we never see a signal — watch for
+    # reparenting and self-exit (same watchdog the streamlit child uses).
+    _exit_when_parent_dies()
     try:
         proc.join()  # blocks until the Streamlit child exits
     except KeyboardInterrupt:
