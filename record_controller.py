@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import zipfile
 import urllib.request
 from dataclasses import dataclass, replace
@@ -38,6 +39,25 @@ from image_preprocess import (
     preprocess_for_label,
     prepare_inference_inputs,
 )
+
+_APP_NAME = "TFLiteTraining"
+
+
+def _app_data_dir() -> Path:
+    """Same resolution logic as app.py/desktop_launcher.py (kept in sync)."""
+    import os
+
+    env_override = os.getenv("TFLITE_TRAINING_DATA_DIR")
+    if env_override:
+        return Path(env_override).expanduser().resolve()
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return (base / _APP_NAME).resolve()
+
 
 # #region debug-point B:record-controller-device
 def _dbg_device_frame_timeout(hypothesis_id: str, location: str, msg: str, data: dict) -> None:
@@ -571,6 +591,7 @@ class RecordController:
             "/upload",
             "/train/start",
             "/export/run",
+            "/blockcoding-export",
             "/dataset/export",
             "/project/save",
             "/project/open",
@@ -592,6 +613,18 @@ class RecordController:
             return
         raw = req.rfile.read(content_len)
         payload = json.loads(raw.decode("utf-8"))
+        if path == "/blockcoding-export":
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            try:
+                result = self._blockcoding_export(session_id=session_id)
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {"ok": "1", **result}, cors=True)
+            return
         if path == "/train/start":
             session_id = str(payload.get("session") or "").strip()
             cfg = payload.get("cfg") or {}
@@ -1176,6 +1209,39 @@ class RecordController:
 
     def _train_result_path(self, dataset_root: Path) -> Path:
         return dataset_root.parent / "tm_train_latest.json"
+
+    def _blockcoding_export(self, session_id: str) -> Dict[str, Any]:
+        """Copy the latest trained model into the block-coding outbox.
+
+        The AIoScout desktop app watches <app data>/blockcoding_outbox/ and
+        imports each complete sub-directory into its persistent model library,
+        which the block-coding editor picks up for AI Vision blocks. Output is
+        model.tflite + labels.txt (one label per line — the format the mixly
+        server's convertTfliteToHeader expects).
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        latest = self._train_result_path(cfg.dataset_root)
+        if not latest.exists():
+            raise RuntimeError("no trained model yet — train first, then export")
+        meta = json.loads(latest.read_text(encoding="utf-8"))
+        tflite_path = Path(str(meta.get("tflite_path") or "")).expanduser().resolve()
+        if not tflite_path.exists():
+            raise RuntimeError("missing .tflite file")
+        labels = [str(x).strip() for x in (meta.get("labels") or []) if str(x).strip()]
+
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        outbox = _app_data_dir() / "blockcoding_outbox" / f"{stamp}_{uuid.uuid4().hex[:6]}"
+        outbox.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(tflite_path, outbox / "model.tflite")
+        (outbox / "labels.txt").write_text(("\n".join(labels) + "\n") if labels else "", encoding="utf-8")
+        return {
+            "outbox_dir": str(outbox),
+            "labels": labels,
+            "model_bytes": tflite_path.stat().st_size,
+        }
 
     def _export_run(self, session_id: str, export_dir: Path, model_name: str, array_name: str, overwrite: bool = False) -> Path:
         with self._lock:

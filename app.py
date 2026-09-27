@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import shutil
 import time
@@ -314,7 +315,9 @@ def _init_session() -> None:
     if "tm_serial_port" not in st.session_state:
         st.session_state.tm_serial_port = ""
     if "tm_serial_baud" not in st.session_state:
-        st.session_state.tm_serial_baud = 115200
+        # The ESP32-P4 camera firmware streams at 921600 baud (see repo
+        # CLAUDE.md) — make that the default so a fresh session just works.
+        st.session_state.tm_serial_baud = 921600
     if "tm_serial_sync" not in st.session_state:
         st.session_state.tm_serial_sync = "AA 55 AA"
     if "tm_serial_frame_side" not in st.session_state:
@@ -931,23 +934,17 @@ def _render_new_project() -> None:
                 st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
                 train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
                 if isinstance(train_cfg_state, dict):
-                    prev_cfg = st.session_state.train_cfg
-                    st.session_state.train_cfg = TrainConfig(
-                        img_size=int(train_cfg_state.get("img_size", getattr(prev_cfg, "img_size", 96))),
-                        color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
-                        batch_size=int(train_cfg_state.get("batch_size", getattr(prev_cfg, "batch_size", 16))),
-                        epochs=int(train_cfg_state.get("epochs", getattr(prev_cfg, "epochs", 10))),
-                        validation_split=float(train_cfg_state.get("validation_split", getattr(prev_cfg, "validation_split", 0.2))),
-                        seed=int(getattr(prev_cfg, "seed", 42)),
-                        optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
-                        learning_rate=float(train_cfg_state.get("learning_rate", getattr(prev_cfg, "learning_rate", 0.001))),
-                        conv1_filters=int(train_cfg_state.get("conv1_filters", getattr(prev_cfg, "conv1_filters", 8))),
-                        conv2_filters=int(train_cfg_state.get("conv2_filters", getattr(prev_cfg, "conv2_filters", 16))),
-                        dense_units=int(train_cfg_state.get("dense_units", getattr(prev_cfg, "dense_units", 32))),
-                        representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
-                        preprocess_mode=str(train_cfg_state.get("preprocess_mode", getattr(prev_cfg, "preprocess_mode", "auto_by_label"))),
-                        manual_roi=train_cfg_state.get("manual_roi", getattr(prev_cfg, "manual_roi", None)),
-                    )
+                    # Start from the current defaults and overlay whatever the
+                    # project actually stored — fields absent from an old
+                    # project keep today's defaults instead of silently
+                    # downgrading to stale hardcoded literals.
+                    defaults = dataclasses.asdict(st.session_state.train_cfg)
+                    known = {k: v for k, v in train_cfg_state.items() if k in defaults}
+                    try:
+                        st.session_state.train_cfg = TrainConfig(**{**defaults, **known})
+                    except TypeError:
+                        # Project carried unexpected keys — fall back to the defaults.
+                        st.session_state.train_cfg = TrainConfig()
                 st.session_state.project_type = "image"
                 _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
                 st.rerun()
@@ -1794,6 +1791,10 @@ def _render_tm_old_frontend_html(
       opacity: 0.55;
       cursor: not-allowed;
     }}
+    .exportbtn.blockcoding {{
+      background: #eef1ff;
+    }}
+    .exportbtn.blockcoding svg {{ stroke: #5b5ba8; }}
     .exportbtn svg {{ width: 16px; height: 16px; stroke: var(--muted); fill: none; stroke-width: 2; }}
     .footer {{
       position: fixed;
@@ -2573,6 +2574,7 @@ def _render_tm_old_frontend_html(
       <div class="card preview-card" id="previewCard">
         <div class="card-head">
           <h3>Preview</h3>
+          <button class="exportbtn blockcoding" id="exportBlockBtn" title="Send the trained model to the Block Coding editor"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="12" height="12" rx="0"/><path d="M9 21h12V9"/></svg><span>Export to Block Coding</span></button>
           <button class="exportbtn" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><span>Export Model</span></button>
         </div>
         <div class="preview-controls">
@@ -2934,7 +2936,7 @@ let sourceSettingsOpen = false;
 let previewIntervalMs = 80;
 let currentSerialPort = STATE.current_serial_port || '';
 let currentWebcamIndex = Number(STATE.current_webcam_index || 0);
-let currentSerialBaud = Number(STATE.current_serial_baud || 115200);
+let currentSerialBaud = Number(STATE.current_serial_baud || 921600);
 let currentSerialSync = String(STATE.current_serial_sync || 'AA 55 AA');
 let currentSerialFrameSide = Number(STATE.current_serial_frame_side || 96);
 let previewInputOn = false;
@@ -2974,8 +2976,8 @@ const exportDirStorageKey = `tm-export-dir-${{STATE.session}}`;
 const exportNameStorageKey = `tm-export-name-${{STATE.session}}`;
 const exportArrayStorageKey = `tm-export-array-${{STATE.session}}`;
 let exportDir = '';
-let exportModelName = 'tm';
-let exportArrayName = '';
+let exportModelName = 'model';
+let exportArrayName = 'g_model';
 function readOpenSourceStorage() {{
   try {{
     const raw = window.localStorage.getItem(openSourceStorageKey);
@@ -3865,8 +3867,8 @@ function restoreExportSettings() {{
 }}
 function persistExportSettings() {{
   try {{
-    window.localStorage.setItem(exportNameStorageKey, String(exportModelName || 'tm'));
-    window.localStorage.setItem(exportArrayStorageKey, String(exportArrayName || ''));
+    window.localStorage.setItem(exportNameStorageKey, String(exportModelName || 'model'));
+    window.localStorage.setItem(exportArrayStorageKey, String(exportArrayName || 'g_model'));
   }} catch (e) {{}}
 }}
 restoreExportSettings();
@@ -4652,7 +4654,7 @@ async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arr
   const payload = {{
     session: STATE.session,
     export_dir: String(exportDirValue || '').trim(),
-    model_name: String(modelNameValue || 'tm'),
+    model_name: String(modelNameValue || 'model'),
     array_name: String(arrayNameValue || '')
   }};
   let res = await fetch(`${{baseUrl}}/export/run`, {{
@@ -4768,6 +4770,8 @@ async function startTrain() {{
           toast('Training complete.');
           const exportBtn = document.getElementById('exportBtn');
           if (exportBtn) exportBtn.disabled = false;
+          const exportBlockBtn = document.getElementById('exportBlockBtn');
+          if (exportBlockBtn) exportBlockBtn.disabled = false;
         }}
         break;
       }}
@@ -5128,7 +5132,7 @@ function buildSourceSettingsMarkup(className) {{
   `;
 }}
 async function changeSerialBaud(className, value) {{
-  const nextBaud = Number(value || currentSerialBaud || 115200);
+  const nextBaud = Number(value || currentSerialBaud || 921600);
   currentSerialBaud = nextBaud;
   STATE.current_serial_baud = currentSerialBaud;
   sourceSwitchInFlight = true;
@@ -5532,7 +5536,7 @@ async function setDevicePortGlobal(value) {{
   }}
 }}
 async function setSerialBaudGlobal(value) {{
-  currentSerialBaud = Number(value || currentSerialBaud || 115200);
+  currentSerialBaud = Number(value || currentSerialBaud || 921600);
   STATE.current_serial_baud = currentSerialBaud;
   try {{
     const res = await fetch(`${{baseUrl}}/live/config?session=${{encodeURIComponent(STATE.session)}}&serial_baud=${{encodeURIComponent(String(currentSerialBaud))}}`);
@@ -5591,11 +5595,11 @@ function buildPreviewSettingsMarkup() {{
   const exportFields = `
     <label>
       Export Name
-      <input id="previewExportName" value="${{String(exportModelName || 'tm')}}" placeholder="person_detect"/>
+      <input id="previewExportName" value="${{String(exportModelName || 'model')}}" placeholder="person_detect"/>
     </label>
     <label>
       Array Name (optional)
-      <input id="previewExportArray" value="${{String(exportArrayName || '')}}" placeholder="g_person_detect_model_data"/>
+      <input id="previewExportArray" value="${{String(exportArrayName || 'g_model')}}" placeholder="g_person_detect_model_data"/>
     </label>
     <label>
       Input Source
@@ -5718,8 +5722,8 @@ function renderPreviewSettings() {{
       const nameEl = document.getElementById('previewExportName');
       const arrayEl = document.getElementById('previewExportArray');
       const sourceEl = document.getElementById('previewInputSource');
-      exportModelName = String(nameEl ? nameEl.value : exportModelName || 'tm').trim() || 'tm';
-      exportArrayName = String(arrayEl ? arrayEl.value : exportArrayName || '').trim();
+      exportModelName = String(nameEl ? nameEl.value : exportModelName || 'model').trim() || 'model';
+      exportArrayName = String(arrayEl ? arrayEl.value : exportArrayName || 'g_model').trim();
       const nextSource = String(sourceEl ? sourceEl.value : previewSource || 'webcam');
       previewSource = nextSource === 'device' ? 'device' : (nextSource === 'upload' ? 'upload' : 'webcam');
       persistPreviewState();
@@ -6407,8 +6411,8 @@ function render() {{
       if (!exportDir) return;
       const runData = await exportRunWithOverwriteConfirm(
         exportDir,
-        String(exportModelName || 'tm'),
-        String(exportArrayName || '')
+        String(exportModelName || 'model'),
+        String(exportArrayName || 'g_model')
       );
       if (!runData || runData.canceled === '1') return;
       toast(`Exported to: ${{String(runData.export_dir || exportDir)}}`);
@@ -6418,6 +6422,31 @@ function render() {{
       exportBtn.disabled = !STATE.export_enabled;
     }}
   }};
+  const exportBlockBtn = document.getElementById('exportBlockBtn');
+  if (exportBlockBtn) {{
+    exportBlockBtn.disabled = !STATE.export_enabled;
+    exportBlockBtn.onclick = async () => {{
+      if (!STATE.export_enabled) return;
+      exportBlockBtn.disabled = true;
+      try {{
+        const res = await fetch(`${{baseUrl}}/blockcoding-export`, {{
+          method: 'POST',
+          headers: {{'Content-Type':'application/json'}},
+          body: JSON.stringify({{session: STATE.session}})
+        }});
+        const data = await res.json().catch(() => ({{ok:'0'}}));
+        if (!res.ok || data.ok !== '1') {{
+          throw new Error(data && data.error ? data.error : 'Export to Block Coding failed.');
+        }}
+        const labelCount = Array.isArray(data.labels) ? data.labels.length : 0;
+        toast(`Model sent to Block Coding (${{labelCount}} classes)`);
+      }} catch (e) {{
+        toast(String(e && e.message ? e.message : e));
+      }} finally {{
+        exportBlockBtn.disabled = !STATE.export_enabled;
+      }}
+    }};
+  }}
   renderPreviewCard();
   renderTrainStatus();
   bindPreviewControls();
