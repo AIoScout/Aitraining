@@ -1339,20 +1339,25 @@ def _render_tm_old_frontend_html(
       }}
     }}
     html, body {{
-      height: 100%;
+      min-height: 100%;
+      height: auto;
       margin: 0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
       color: var(--text);
       background: transparent;
+      overflow: visible;
     }}
+    html {{ height: 100%; }}
+    body {{ display: block; }}
     .wrap {{
       position: relative;
       background: var(--bg);
       border-radius: 12px;
       padding: 80px 18px 92px 18px;
       min-height: 620px;
-      overflow-x: clip;
-      overflow-y: clip;
+      width: 100%;
+      box-sizing: border-box;
+      overflow: visible;
     }}
     .topnav {{
       position: absolute;
@@ -2762,9 +2767,27 @@ let frameHeightRaf = 0;
 let layoutResyncTimers = [];
 let mountReflowTimers = [];
 let homeNavigateTimer = 0;
+let wrapResizeObserver = null;
+function ensureWrapResizeObserver() {{
+  if (wrapResizeObserver) return;
+  try {{
+    const wrap = document.querySelector('.wrap');
+    if (!wrap) return;
+    const ResizeObserverCtor = (window.ResizeObserver || null);
+    if (!ResizeObserverCtor) return;
+    wrapResizeObserver = new ResizeObserverCtor(() => {{
+      queueFrameHeightSync();
+      try {{ updateFlow(); }} catch (e) {{}}
+    }});
+    wrapResizeObserver.observe(wrap);
+    const layout = document.querySelector('.layout');
+    if (layout) wrapResizeObserver.observe(layout);
+  }} catch (e) {{}}
+}}
 function syncFrameHeight() {{
   if (window.__tmNavigatingAway) return;
   initStreamlitFrame();
+  ensureWrapResizeObserver();
   let nextHeight = 0;
   let nextWidth = 0;
   let metrics = {{}};
@@ -2772,24 +2795,49 @@ function syncFrameHeight() {{
     const body = document.body;
     const doc = document.documentElement;
     const wrap = document.querySelector('.wrap');
-    nextHeight = Math.max(
-      body ? body.scrollHeight : 0,
-      body ? body.offsetHeight : 0,
-      doc ? doc.scrollHeight : 0,
-      doc ? doc.offsetHeight : 0,
-      doc ? doc.clientHeight : 0,
+    const layout = document.querySelector('.layout');
+    const WRAP_PAD_TOP = 80;
+    const WRAP_PAD_BOT = 92;
+    const WRAP_MIN = 620;
+    let naturalH = 0;
+    if (wrap) {{
+      const layoutH = Math.max(
+        layout ? Number(layout.scrollHeight) || 0 : 0,
+        layout ? Number(layout.offsetHeight) || 0 : 0,
+        layout ? Number(layout.getBoundingClientRect && layout.getBoundingClientRect().height) || 0 : 0,
+      );
+      naturalH = Math.max(layoutH + WRAP_PAD_TOP + WRAP_PAD_BOT, WRAP_MIN);
+    }}
+    const legacyH = Math.max(
+      wrap ? Math.ceil(wrap.scrollHeight) : 0,
+      wrap ? Math.ceil(wrap.offsetHeight) : 0,
+      wrap ? Math.ceil(wrap.getBoundingClientRect && wrap.getBoundingClientRect().height) || 0 : 0,
+      body ? Math.ceil(body.scrollHeight) : 0,
+      body ? Math.ceil(body.offsetHeight) : 0,
+      doc ? Math.ceil(doc.scrollHeight) : 0,
+      doc ? Math.ceil(doc.offsetHeight) : 0,
+      0,
     );
+    if (naturalH > 0) {{
+      nextHeight = naturalH;
+      if (legacyH > naturalH && (legacyH - naturalH) <= 24) nextHeight = legacyH;
+    }} else {{
+      nextHeight = legacyH;
+    }}
+    nextHeight = Math.max(nextHeight, body ? body.scrollHeight : 0, doc ? doc.scrollHeight : 0);
     nextWidth = Math.max(
       body ? body.scrollWidth : 0,
       body ? body.offsetWidth : 0,
       doc ? doc.scrollWidth : 0,
       doc ? doc.offsetWidth : 0,
       doc ? doc.clientWidth : 0,
-      wrap ? Math.round(wrap.getBoundingClientRect().width) : 0,
+      wrap ? Math.round(wrap.getBoundingClientRect && wrap.getBoundingClientRect().width) || 0 : 0,
     );
     metrics = {{
       nextHeight,
       nextWidth,
+      naturalH,
+      legacyH,
       bodyScrollHeight: body ? body.scrollHeight : 0,
       bodyOffsetHeight: body ? body.offsetHeight : 0,
       bodyScrollWidth: body ? body.scrollWidth : 0,
@@ -2800,8 +2848,8 @@ function syncFrameHeight() {{
       docOffsetWidth: doc ? doc.offsetWidth : 0,
       docClientHeight: doc ? doc.clientHeight : 0,
       docClientWidth: doc ? doc.clientWidth : 0,
-      wrapWidth: wrap ? Math.round(wrap.getBoundingClientRect().width) : 0,
-      wrapHeight: wrap ? Math.round(wrap.getBoundingClientRect().height) : 0,
+      wrapWidth: wrap ? Math.round(wrap.getBoundingClientRect && wrap.getBoundingClientRect().width || 0) : 0,
+      wrapHeight: wrap ? Math.round(wrap.getBoundingClientRect && wrap.getBoundingClientRect().height || 0) : 0,
       windowInnerHeight: window.innerHeight || 0,
       windowInnerWidth: window.innerWidth || 0,
       classCount: Array.isArray(STATE.classes) ? STATE.classes.length : 0,
@@ -2810,22 +2858,34 @@ function syncFrameHeight() {{
   if (!nextHeight || !Number.isFinite(nextHeight)) return;
   try {{
     const frame = window.frameElement;
+    const sendW = (nextWidth && Number.isFinite(nextWidth)) ? Math.max(800, nextWidth) : 0;
     if (frame && frame.style) {{
       frame.style.height = `${{Math.ceil(nextHeight + 12)}}px`;
       frame.style.minHeight = `${{Math.ceil(nextHeight + 12)}}px`;
-      frame.style.width = '100%';
-      frame.style.maxWidth = '100%';
+      frame.style.maxHeight = '';
+      if (sendW > 0) {{
+        frame.style.width = `${{sendW}}px`;
+        frame.style.minWidth = `${{sendW}}px`;
+        frame.style.maxWidth = '';
+      }} else {{
+        frame.style.width = '100%';
+        frame.style.maxWidth = '100%';
+        frame.style.minWidth = '';
+      }}
       if (frame.parentElement && frame.parentElement.style) {{
-        frame.parentElement.style.width = '100%';
-        frame.parentElement.style.maxWidth = '100%';
+        frame.parentElement.style.width = frame.style.width;
+        frame.parentElement.style.maxWidth = '';
+        frame.parentElement.style.minWidth = frame.style.minWidth;
         frame.parentElement.style.height = `${{Math.ceil(nextHeight + 12)}}px`;
         frame.parentElement.style.minHeight = `${{Math.ceil(nextHeight + 12)}}px`;
+        frame.parentElement.style.maxHeight = '';
         frame.parentElement.style.overflow = 'hidden';
       }}
     }}
-    if (nextWidth && Number.isFinite(nextWidth) && document.body && document.body.style) {{
+    if (document.body && document.body.style) {{
       document.body.style.width = '100%';
       document.body.style.maxWidth = '100%';
+      document.body.style.minWidth = '';
     }}
   }} catch (e) {{}}
   // #region debug-point A:sync-frame-height
@@ -6177,6 +6237,7 @@ function renderAdvancedPanel() {{
   if (chev) chev.textContent = trainAdvancedOpen ? '▴' : '▾';
   if (trainAdvancedOpen) syncAdvancedInlineInputs();
   updateFlow();
+  scheduleLayoutResync();
 }}
 function toggleAdvancedInline() {{
   trainAdvancedOpen = !trainAdvancedOpen;

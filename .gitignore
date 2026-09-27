@@ -10,3 +10,4 @@ AItraining.code-workspace
 model.h
 model.cpp
 g_model.tflite
+/.venv
