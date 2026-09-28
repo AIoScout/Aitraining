@@ -59,13 +59,17 @@ coll = COLLECT(
     upx_exclude=[],
     name='TFLiteTraining',
 )
-app = BUNDLE(
-    coll,
-    name='TFLiteTraining.app',
-    icon=None,
-    bundle_identifier='ai.tflite.training',
-    info_plist={
-        'NSCameraUsageDescription': 'TFLiteTraining needs camera access to capture training samples.',
-        'NSHighResolutionCapable': True,
-    },
-)
+# The .app bundle is macOS-only — on Windows this would raise and abort the
+# build (the COLLECT onedir above is what Windows ships).
+import sys
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='TFLiteTraining.app',
+        icon=None,
+        bundle_identifier='ai.tflite.training',
+        info_plist={
+            'NSCameraUsageDescription': 'TFLiteTraining needs camera access to capture training samples.',
+            'NSHighResolutionCapable': True,
+        },
+    )
