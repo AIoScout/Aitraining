@@ -1768,15 +1768,6 @@ def _render_tm_old_frontend_html(
     }}
     .exportbtn.blockcoding svg {{ stroke: var(--blue); }}
     .exportbtn svg {{ width: 16px; height: 16px; stroke: var(--muted); fill: none; stroke-width: 2; }}
-    .footer {{
-      position: fixed;
-      right: 18px;
-      bottom: 12px;
-      font-size: 12px;
-      color: var(--text-faint);
-      pointer-events: none;
-      z-index: 1000;
-    }}
     .flow {{
       position: absolute;
       inset: 0;
@@ -2569,7 +2560,6 @@ def _render_tm_old_frontend_html(
     </div>
   </div>
 </div>
-<div class="footer">English | release-2-4-14 - 2.4.14</div>
 
 <script>
 (function() {{
