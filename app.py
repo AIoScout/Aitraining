@@ -903,50 +903,7 @@ def _render_new_project() -> None:
                 if not p:
                     st.warning("No file selected.")
                     st.stop()
-                manifest = _tmproj_read_manifest(p)
-                ptype = _tmproj_detect_project_type(p, manifest)
-                if ptype != "image":
-                    st.error(f"Unsupported project type: {ptype}")
-                    st.stop()
-                # #region debug-point A:home-open-project-click
-                _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project selected file", {"picked_path": str(p), "project_type": str(ptype), "session_before_fresh": str(st.session_state.get("session_id", ""))})
-                # #endregion
-                _begin_fresh_tm_session()
-                st.session_state.tm_return_target = "home"
-                controller = _get_record_controller()
-                controller.set_config(
-                    st.session_state.session_id,
-                    SessionConfig(
-                        dataset_root=_tm_dataset_dir(),
-                        serial_port=st.session_state.tm_serial_port,
-                        serial_baud=int(st.session_state.tm_serial_baud),
-                        serial_sync=str(st.session_state.tm_serial_sync),
-                        serial_frame_side=int(st.session_state.tm_serial_frame_side),
-                        webcam_index=int(st.session_state.tm_webcam_index),
-                        fps=float(st.session_state.tm_record_fps),
-                        crop_box=st.session_state.tm_record_crop_box,
-                    ),
-                )
-                state = controller._project_open(st.session_state.session_id, p)
-                # #region debug-point A:home-open-project-after-open
-                _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project restored state", {"session": str(st.session_state.session_id), "classes": list(state.get("classes") or []), "count_keys": list((state.get("counts") or {}).keys())})
-                # #endregion
-                st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
-                train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
-                if isinstance(train_cfg_state, dict):
-                    # Start from the current defaults and overlay whatever the
-                    # project actually stored — fields absent from an old
-                    # project keep today's defaults instead of silently
-                    # downgrading to stale hardcoded literals.
-                    defaults = dataclasses.asdict(st.session_state.train_cfg)
-                    known = {k: v for k, v in train_cfg_state.items() if k in defaults}
-                    try:
-                        st.session_state.train_cfg = TrainConfig(**{**defaults, **known})
-                    except TypeError:
-                        # Project carried unexpected keys — fall back to the defaults.
-                        st.session_state.train_cfg = TrainConfig()
-                st.session_state.project_type = "image"
-                _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
+                _open_tmproj_into_fresh_session(p)
                 st.rerun()
     with c2:
         st.markdown(
@@ -7569,11 +7526,83 @@ def _render_tm_preview_export_panel() -> None:
         st.success(f"Exported to: {export_dir}")
 
 
+def _open_tmproj_into_fresh_session(p: Path) -> None:
+    """Open a .tmproj file into a brand-new session and land in the workspace.
+
+    Shared by the home-screen "Open .tmproj" button and the default-template
+    auto-open in main().
+    """
+    manifest = _tmproj_read_manifest(p)
+    ptype = _tmproj_detect_project_type(p, manifest)
+    if ptype != "image":
+        st.error(f"Unsupported project type: {ptype}")
+        st.stop()
+    _begin_fresh_tm_session()
+    st.session_state.tm_return_target = "home"
+    controller = _get_record_controller()
+    controller.set_config(
+        st.session_state.session_id,
+        SessionConfig(
+            dataset_root=_tm_dataset_dir(),
+            serial_port=st.session_state.tm_serial_port,
+            serial_baud=int(st.session_state.tm_serial_baud),
+            serial_sync=str(st.session_state.tm_serial_sync),
+            serial_frame_side=int(st.session_state.tm_serial_frame_side),
+            webcam_index=int(st.session_state.tm_webcam_index),
+            fps=float(st.session_state.tm_record_fps),
+            crop_box=st.session_state.tm_record_crop_box,
+        ),
+    )
+    state = controller._project_open(st.session_state.session_id, p)
+    st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
+    train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
+    if isinstance(train_cfg_state, dict):
+        # Start from the current defaults and overlay whatever the
+        # project actually stored — fields absent from an old
+        # project keep today's defaults instead of silently
+        # downgrading to stale hardcoded literals.
+        defaults = dataclasses.asdict(st.session_state.train_cfg)
+        known = {k: v for k, v in train_cfg_state.items() if k in defaults}
+        try:
+            st.session_state.train_cfg = TrainConfig(**{**defaults, **known})
+        except TypeError:
+            # Project carried unexpected keys — fall back to the defaults.
+            st.session_state.train_cfg = TrainConfig()
+    st.session_state.project_type = "image"
+    _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
+
+
+def _default_project_template() -> Optional[Path]:
+    """The workshop starter project to open on a fresh session (None = off).
+
+    Enabled by default; disable with TFLITE_TRAINING_DEFAULT_TEMPLATE=0 or
+    point at another file with TFLITE_TRAINING_TEMPLATE=/path/to/x.tmproj.
+    """
+    if os.getenv("TFLITE_TRAINING_DEFAULT_TEMPLATE", "1") == "0":
+        return None
+    override = os.getenv("TFLITE_TRAINING_TEMPLATE")
+    if override:
+        p = Path(override).expanduser()
+        return p if p.exists() else None
+    base = Path(getattr(sys, "_MEIPASS", "")) if hasattr(sys, "_MEIPASS") else Path(__file__).resolve().parent
+    p = base / "templates" / "roadsign_workshop.tmproj"
+    return p if p.exists() else None
+
+
 def main() -> None:
     st.set_page_config(page_title="TF Lite Training", layout="wide")
     _init_session()
 
     if st.session_state.project_type is None:
+        # Fresh visit: open the default workshop template instead of the
+        # empty "Class 1 / Class 2" workspace (once per browser session —
+        # resetting to the home screen keeps showing the home screen).
+        if not st.session_state.get("tm_template_auto_opened", False):
+            st.session_state.tm_template_auto_opened = True
+            template = _default_project_template()
+            if template is not None:
+                _open_tmproj_into_fresh_session(template)
+                st.rerun()
         _render_new_project()
         return
 
