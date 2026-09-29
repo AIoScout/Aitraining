@@ -1321,7 +1321,10 @@ def _render_tm_old_frontend_html(
       height: 100%;
       width: 100%;
       box-sizing: border-box;
-      overflow: hidden;
+      /* The canvas fills the window; when classes make the content taller,
+         it scrolls INSIDE the canvas (and browser zoom rescales it). */
+      overflow-y: auto;
+      overflow-x: hidden;
     }}
     .topnav {{
       position: absolute;
