@@ -21,7 +21,7 @@ import streamlit.components.v1 as components
 
 from camera_permission import ensure_camera_access, get_camera_access_status
 from trainer import TrainConfig, new_run_dir, train_and_export
-from ui_styles import inject_teachable_style
+from ui_styles import inject_dark_mode_patch, inject_teachable_style, inject_workspace_fullcanvas
 
 from dataset_io import (
     IMAGE_EXTS,
@@ -821,6 +821,7 @@ def _render_new_project() -> None:
     _dbg_open_project_layout("B", "pre-fix", "app.py:_render_new_project", "[DEBUG] render new project page", {"session": str(st.session_state.get("session_id", "")), "project_type": str(st.session_state.get("project_type", "")), "query": dict(st.query_params) if hasattr(st, "query_params") else {}})
     # #endregion
     inject_teachable_style()
+    inject_dark_mode_patch()
     st.markdown(
         '''
 <div class="tm-hero">
@@ -1269,6 +1270,10 @@ def _render_tm_old_frontend_html(
       --overlay: rgba(32,33,36,0.56);
       --danger: #d93025;
       --danger-soft: #fff1f3;
+      --hover: rgba(0,0,0,0.05);
+      --chip: rgba(0,0,0,0.08);
+      --line-soft: rgba(0,0,0,0.07);
+      --text-faint: rgba(0,0,0,0.45);
       --radius: 12px;
     }}
     @media (prefers-color-scheme: dark) {{
@@ -1293,28 +1298,30 @@ def _render_tm_old_frontend_html(
         --overlay: rgba(0,0,0,0.62);
         --danger: #f28b82;
         --danger-soft: rgba(242,139,130,0.16);
+        --hover: rgba(255,255,255,0.07);
+        --chip: rgba(255,255,255,0.10);
+        --line-soft: rgba(255,255,255,0.08);
+        --text-faint: rgba(232,234,237,0.55);
       }}
     }}
     html, body {{
-      min-height: 100%;
-      height: auto;
+      height: 100%;
       margin: 0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
       color: var(--text);
       background: transparent;
-      overflow: visible;
+      overflow: hidden;
     }}
-    html {{ height: 100%; }}
-    body {{ display: block; }}
     .wrap {{
       position: relative;
       background: var(--bg);
       border-radius: 12px;
       padding: 80px 18px 92px 18px;
-      min-height: 620px;
+      min-height: 0;
+      height: 100%;
       width: 100%;
       box-sizing: border-box;
-      overflow: visible;
+      overflow: hidden;
     }}
     .topnav {{
       position: absolute;
@@ -1342,7 +1349,7 @@ def _render_tm_old_frontend_html(
       background: var(--card);
       box-shadow: var(--shadow);
       border-radius: 10px;
-      border: 1px solid rgba(0,0,0,0.06);
+      border: 1px solid var(--line-soft);
       padding: 8px;
       z-index: 1001;
       display: none;
@@ -1360,11 +1367,11 @@ def _render_tm_old_frontend_html(
       font-weight: 600;
       font-size: 13px;
     }}
-    .navmenu button:hover {{ background: rgba(0,0,0,0.05); }}
+    .navmenu button:hover {{ background: var(--hover); }}
     .navmenu .danger {{ color: #b42318; }}
     .navmenu .divider {{
       height: 1px;
-      background: rgba(0,0,0,0.08);
+      background: var(--chip);
       margin: 6px 0;
     }}
     .layout {{
@@ -1411,7 +1418,7 @@ def _render_tm_old_frontend_html(
         grid-template-columns: 1fr;
       }}
       .source-right {{
-        border-top: 1px solid rgba(0,0,0,0.08);
+        border-top: 1px solid var(--line-soft);
       }}
     }}
     .card {{
@@ -1427,7 +1434,7 @@ def _render_tm_old_frontend_html(
       justify-content: space-between;
       gap: 12px;
       padding: 12px 16px;
-      border-bottom: 1px solid rgba(0,0,0,0.08);
+      border-bottom: 1px solid var(--line-soft);
     }}
     .class-title {{
       display: inline-flex;
@@ -1448,13 +1455,13 @@ def _render_tm_old_frontend_html(
       align-items: center;
       justify-content: center;
     }}
-    .iconbtn:hover {{ background: rgba(0,0,0,0.05); color: var(--text); }}
+    .iconbtn:hover {{ background: var(--hover); color: var(--text); }}
     .more {{
       position: absolute;
       top: 8px;
       right: 8px;
     }}
-    .divider {{ height: 1px; background: rgba(0,0,0,0.08); margin: 0; }}
+    .divider {{ height: 1px; background: var(--chip); margin: 0; }}
     .subhead {{ font-size: 12px; color: var(--muted); margin: 0 0 10px 0; }}
     .btnrow {{
       display: flex;
@@ -1563,7 +1570,7 @@ def _render_tm_old_frontend_html(
     .out-bar {{
       height: 10px;
       border-radius: 999px;
-      background: rgba(0,0,0,0.08);
+      background: var(--chip);
       overflow: hidden;
       position: relative;
     }}
@@ -1580,12 +1587,12 @@ def _render_tm_old_frontend_html(
       top: 50%;
       transform: translateY(-50%);
       font-size: 10px;
-      color: rgba(0,0,0,0.55);
+      color: var(--muted);
       font-weight: 800;
       pointer-events: none;
     }}
     .addclass {{
-      border: 2px dashed rgba(0,0,0,0.15);
+      border: 2px dashed var(--input-border);
       background: transparent;
       border-radius: 10px;
       padding: 18px;
@@ -1610,8 +1617,8 @@ def _render_tm_old_frontend_html(
     .train-status {{
       width: 100%;
       border-radius: 6px;
-      background: rgba(0,0,0,0.06);
-      color: rgba(0,0,0,0.55);
+      background: var(--hover);
+      color: var(--muted);
       padding: 10px 10px;
       font-weight: 700;
       text-align: center;
@@ -1626,7 +1633,7 @@ def _render_tm_old_frontend_html(
     .train-adv-panel {{
       margin-top: 10px;
       padding-top: 8px;
-      border-top: 1px solid rgba(0,0,0,0.08);
+      border-top: 1px solid var(--line-soft);
       display: none;
     }}
     .train-adv-grid {{
@@ -1639,7 +1646,7 @@ def _render_tm_old_frontend_html(
       gap: 12px;
       align-items: center;
       font-size: 13px;
-      color: rgba(0,0,0,0.62);
+      color: var(--muted);
       font-weight: 600;
     }}
     .train-adv-row span {{
@@ -1666,8 +1673,8 @@ def _render_tm_old_frontend_html(
       width: 100%;
       border: 0;
       border-radius: 6px;
-      background: rgba(0,0,0,0.08);
-      color: rgba(0,0,0,0.38);
+      background: var(--chip);
+      color: var(--text-faint);
       padding: 12px 10px;
       font-weight: 700;
       cursor: not-allowed;
@@ -1687,7 +1694,7 @@ def _render_tm_old_frontend_html(
       width: 100%;
       height: 8px;
       border-radius: 999px;
-      background: rgba(0,0,0,0.08);
+      background: var(--chip);
       overflow: hidden;
     }}
     .train-progress-fill {{
@@ -1715,7 +1722,7 @@ def _render_tm_old_frontend_html(
       padding: 6px 8px;
       border-radius: 6px;
     }}
-    .advanced:hover {{ background: rgba(0,0,0,0.04); }}
+    .advanced:hover {{ background: var(--hover); }}
     .advanced-row {{
       margin-top: 10px;
       display: flex;
@@ -1735,11 +1742,11 @@ def _render_tm_old_frontend_html(
       border-radius: 6px;
       user-select: none;
     }}
-    .adv-reset:hover {{ background: rgba(0,0,0,0.04); color: var(--text); }}
+    .adv-reset:hover {{ background: var(--hover); color: var(--text); }}
     .exportbtn {{
       border: 0;
       border-radius: 4px;
-      background: #f1f3f4;
+      background: var(--surface-soft);
       padding: 8px 12px;
       display: inline-flex;
       align-items: center;
@@ -1754,16 +1761,16 @@ def _render_tm_old_frontend_html(
       cursor: not-allowed;
     }}
     .exportbtn.blockcoding {{
-      background: #eef1ff;
+      background: var(--blue-bg);
     }}
-    .exportbtn.blockcoding svg {{ stroke: #5b5ba8; }}
+    .exportbtn.blockcoding svg {{ stroke: var(--blue); }}
     .exportbtn svg {{ width: 16px; height: 16px; stroke: var(--muted); fill: none; stroke-width: 2; }}
     .footer {{
       position: fixed;
       right: 18px;
       bottom: 12px;
       font-size: 12px;
-      color: rgba(0,0,0,0.45);
+      color: var(--text-faint);
       pointer-events: none;
       z-index: 1000;
     }}
@@ -1812,7 +1819,7 @@ def _render_tm_old_frontend_html(
       align-items: center;
       justify-content: space-between;
       padding: 12px 14px;
-      border-bottom: 1px solid rgba(0,0,0,0.08);
+      border-bottom: 1px solid var(--line-soft);
     }}
     .modal-head strong {{
       font-size: 14px;
@@ -1836,11 +1843,11 @@ def _render_tm_old_frontend_html(
       user-select: none;
     }}
     .btn-secondary {{
-      background: rgba(0,0,0,0.06);
+      background: var(--hover);
       color: var(--muted);
     }}
     .btn-secondary:hover {{
-      background: rgba(0,0,0,0.09);
+      background: var(--chip);
       color: var(--text);
     }}
     .btn-primary {{
@@ -2130,7 +2137,7 @@ def _render_tm_old_frontend_html(
       margin-top: 16px;
       margin-left: 0;
       margin-right: 0;
-      border-top: 1px solid rgba(0,0,0,0.08);
+      border-top: 1px solid var(--line-soft);
       display: grid;
       grid-template-columns: 1.05fr 1fr;
       min-height: 360px;
@@ -2258,7 +2265,7 @@ def _render_tm_old_frontend_html(
       color: var(--blue);
     }}
     .source-settings-cancel {{
-      background: rgba(0,0,0,0.06);
+      background: var(--hover);
       color: var(--text);
     }}
     .source-right h4 {{
@@ -2332,7 +2339,7 @@ def _render_tm_old_frontend_html(
       object-fit: cover;
       border-radius: 10px;
       background: #eef2f6;
-      border: 1px solid rgba(0,0,0,0.06);
+      border: 1px solid var(--line-soft);
     }}
     .sample-delete {{
       position: absolute;
@@ -2364,7 +2371,7 @@ def _render_tm_old_frontend_html(
     }}
     .samples-empty {{
       margin-top: 14px;
-      border: 1px dashed rgba(0,0,0,0.12);
+      border: 1px dashed var(--input-border);
       border-radius: 12px;
       min-height: 180px;
       display: flex;
@@ -2377,7 +2384,7 @@ def _render_tm_old_frontend_html(
       padding: 10px 16px;
       font-size: 13px;
       font-weight: 700;
-      color: rgba(0,0,0,0.7);
+      color: var(--text);
     }}
     .summary-row {{
       padding: 10px 16px 14px 16px;
@@ -2429,7 +2436,7 @@ def _render_tm_old_frontend_html(
     .samples-strip-empty {{
       width: 100%;
       min-height: 62px;
-      border: 1px dashed rgba(0,0,0,0.12);
+      border: 1px dashed var(--input-border);
       border-radius: 12px;
       display: flex;
       align-items: center;
@@ -2626,6 +2633,10 @@ def _render_tm_old_frontend_html(
 
 <script>
 const STATE = {data};
+// Full-viewport canvas mode (desktop/embedded): CSS pins the iframe to the
+// window height, so the Streamlit auto-height loop must stay out of it —
+// otherwise iframe height and content height chase each other forever.
+window.__tmFixedCanvas = true;
 const baseUrl = `http://127.0.0.1:${{STATE.port}}`;
 if (window.__tmStageMark) window.__tmStageMark('script-start');
 function dbgEvent(hypothesisId, location, msg, data) {{
@@ -2743,6 +2754,7 @@ function ensureWrapResizeObserver() {{
 }}
 function syncFrameHeight() {{
   if (window.__tmNavigatingAway) return;
+  if (window.__tmFixedCanvas) return;
   initStreamlitFrame();
   ensureWrapResizeObserver();
   let nextHeight = 0;
@@ -6108,7 +6120,7 @@ function updateFlow() {{
     if (!path) {{
       path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       path.setAttribute('id', id);
-      path.setAttribute('stroke', 'rgba(0,0,0,0.16)');
+      path.setAttribute('stroke', themeVar('--input-border', 'rgba(0,0,0,0.16)'));
       path.setAttribute('stroke-width', '2');
       path.setAttribute('fill', 'none');
       if (trainPreviewPath && trainPreviewPath.parentNode === svg) {{
@@ -6648,6 +6660,8 @@ def _render_image_project() -> None:
     _dbg_open_project_layout("A", "pre-fix", "app.py:_render_image_project", "[DEBUG] render image project page", {"session": str(st.session_state.get("session_id", "")), "project_type": str(st.session_state.get("project_type", "")), "query": dict(st.query_params) if hasattr(st, "query_params") else {}, "workspace": str(_session_workspace())})
     # #endregion
     inject_teachable_style()
+    inject_dark_mode_patch()
+    inject_workspace_fullcanvas()
     controller = _get_record_controller()
     webcam_options = _list_camera_options()
     preferred_webcam_index = _preferred_webcam_index(webcam_options)
@@ -6926,6 +6940,7 @@ def _render_classified_import_page() -> None:
     _dbg_open_project_layout("B", "pre-fix", "app.py:_render_classified_import_page", "[DEBUG] render classified import page", {"session": str(st.session_state.get("session_id", "")), "project_type": str(st.session_state.get("project_type", "")), "query": dict(st.query_params) if hasattr(st, "query_params") else {}, "local_import_path": str(st.session_state.get("local_import_path", ""))})
     # #endregion
     inject_teachable_style()
+    inject_dark_mode_patch()
     st.markdown(
         '''
 <div class="tm-hero">

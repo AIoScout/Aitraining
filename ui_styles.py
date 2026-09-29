@@ -1045,3 +1045,100 @@ def inject_teachable_style() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def inject_dark_mode_patch() -> None:
+    """Dark-mode patch for the Streamlit chrome.
+
+    The embedded workspace (app.py's HTML blob) already follows the system
+    theme via prefers-color-scheme, but Streamlit itself has no dark theme
+    configured — in macOS dark mode the page stayed light behind dark
+    components. Align the Streamlit surfaces with the blob's dark palette
+    and let component iframes show the page background through.
+    """
+    import streamlit as st
+
+    st.markdown(
+        """
+<style>
+  /* The embedded workspace iframe must never paint its own background. */
+  .stComponent, .stComponent iframe,
+  [data-testid="stComponentBody"],
+  [data-testid="element-container"] .stComponent {
+    background: transparent !important;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    /* Palette mirrors the workspace blob's own dark variables. */
+    .stApp, [data-testid="stAppViewContainer"] {
+      background: #0f141a;
+      color: #e8eaed;
+    }
+    [data-testid="stAppViewContainer"] > .main,
+    .block-container,
+    section[data-testid="stSidebar"] {
+      background: transparent;
+      color: #e8eaed;
+    }
+    :root {
+      --tm-bg: #0f141a;
+      --tm-flow-bg: #111821;
+      --tm-surface: #1a212b;
+      --tm-surface-strong: #202833;
+      --tm-text: #e8eaed;
+      --tm-muted: #a8b0ba;
+      --tm-border: rgba(255, 255, 255, 0.12);
+      --tm-accent: rgba(138, 180, 248, 0.10);
+      --tm-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
+      --tm-shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.24);
+    }
+    .stApp p, .stApp span, .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
+      color: var(--tm-text);
+    }
+  }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def inject_workspace_fullcanvas() -> None:
+    """Pin the embedded workspace to a full-viewport, non-scrolling canvas.
+
+    The workspace blob renders inside a Streamlit component iframe sized to
+    its content; together with the page scrollbar that produced a fixed-width
+    layout with endless blank space below. Restore the original Teachable
+    Machine behavior: the iframe fills the window and the page never scrolls.
+    Only injected on the workspace page.
+    """
+    import streamlit as st
+
+    st.markdown(
+        """
+<style>
+  [data-testid="stAppViewContainer"] > .main,
+  section[data-testid="stSidebar"] {
+    overflow: hidden !important;
+  }
+  [data-testid="stAppViewContainer"] > .main > div,
+  .block-container {
+    height: 100vh;
+    max-height: 100vh;
+    overflow: hidden !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+  }
+  .stComponent iframe,
+  iframe.stIFrame,
+  [data-testid="stComponentBody"] iframe,
+  iframe[title^="streamlit_component"] {
+    height: 100vh !important;
+    min-height: 100vh !important;
+    max-height: 100vh !important;
+    display: block;
+  }
+</style>
+""",
+        unsafe_allow_html=True,
+    )
