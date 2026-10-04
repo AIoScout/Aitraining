@@ -168,6 +168,14 @@ class RecordController:
             t = threading.Thread(target=server.serve_forever, daemon=True)
             self._thread = t
             t.start()
+            # Publish the port so the embedding desktop app can reach this
+            # API directly (the Streamlit port it knows is a different server).
+            try:
+                port_file = _app_data_dir() / "record_controller_port.json"
+                port_file.parent.mkdir(parents=True, exist_ok=True)
+                port_file.write_text(json.dumps({"port": self._port}), encoding="utf-8")
+            except Exception:
+                pass
 
     def set_config(self, session_id: str, cfg: SessionConfig) -> None:
         with self._lock:
@@ -573,6 +581,17 @@ class RecordController:
             source = (qs.get("source") or [""])[0]
             self._stop_live(session_id=session_id, source=source if source else None)
             _send_json(req, {"ok": "1"}, cors=True)
+            return
+        if path == "/live/close-all":
+            # Release every live serial device session — the desktop shell
+            # calls this when the user switches away from the training page,
+            # so the block editor can upload to the same board.
+            with self._lock:
+                keys = list(self._live.keys())
+            for key in keys:
+                session_id, _, source = key.partition(":")
+                self._stop_live(session_id=session_id, source=source or None)
+            _send_json(req, {"ok": "1", "closed": len(keys)}, cors=True)
             return
         _send_json(req, {"ok": "0", "error": "not found"}, status=404)
 
