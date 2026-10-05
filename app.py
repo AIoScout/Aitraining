@@ -897,6 +897,11 @@ def _render_new_project() -> None:
                 st.session_state.step = 0
                 _tm_set_query_params(tm_project="image_classified_import", tm_session=st.session_state.session_id)
                 st.rerun()
+            template = _default_project_template()
+            if template is not None:
+                if st.button("Load Default Project", key="tm_start_template", type="primary", use_container_width=True):
+                    _open_tmproj_into_fresh_session(template)
+                    st.rerun()
         with st.popover("Open Project", use_container_width=True):
             st.markdown("Open a saved .tmproj file")
             if st.button("Open .tmproj", key="tm_open_tmproj", type="primary", use_container_width=True):
@@ -7602,15 +7607,6 @@ def main() -> None:
     _init_session()
 
     if st.session_state.project_type is None:
-        # Fresh visit: open the default workshop template instead of the
-        # empty "Class 1 / Class 2" workspace (once per browser session —
-        # resetting to the home screen keeps showing the home screen).
-        if not st.session_state.get("tm_template_auto_opened", False):
-            st.session_state.tm_template_auto_opened = True
-            template = _default_project_template()
-            if template is not None:
-                _open_tmproj_into_fresh_session(template)
-                st.rerun()
         _render_new_project()
         return
 

@@ -124,7 +124,7 @@ def inject_teachable_style() -> None:
     margin-bottom: 8px;
   }
   .tm-hero {
-    border: 1px solid rgba(16, 35, 63, 0.08);
+    border: 1px solid var(--tm-border);
     border-radius: 20px;
     padding: 20px 24px;
     background: var(--tm-surface);
@@ -156,7 +156,7 @@ def inject_teachable_style() -> None:
     padding: 10px 12px;
     border-radius: 14px;
     background: rgba(255,255,255,0.96);
-    border: 1px solid rgba(16, 35, 63, 0.08);
+    border: 1px solid var(--tm-border);
     box-shadow: var(--tm-shadow-soft);
   }
   .tm-flow-step span {
@@ -221,8 +221,8 @@ def inject_teachable_style() -> None:
   .tm-hero-panel {
     border-radius: 16px;
     padding: 14px 16px;
-    background: rgba(255, 255, 255, 0.98);
-    border: 1px solid rgba(16, 35, 63, 0.06);
+    background: var(--tm-surface);
+    border: 1px solid var(--tm-border);
     box-shadow: var(--tm-shadow-soft);
   }
   .tm-hero-panel h4 {
@@ -238,8 +238,8 @@ def inject_teachable_style() -> None:
   .tm-stat {
     border-radius: 14px;
     padding: 12px 14px;
-    background: rgba(255, 255, 255, 0.98);
-    border: 1px solid rgba(16, 35, 63, 0.06);
+    background: var(--tm-surface);
+    border: 1px solid var(--tm-border);
   }
   .tm-stat-label {
     font-size: 12px;
@@ -276,7 +276,7 @@ def inject_teachable_style() -> None:
     font-weight: 600;
   }
   .tm-card {
-    border: 1px solid rgba(16, 35, 63, 0.08);
+    border: 1px solid var(--tm-border);
     border-radius: 18px;
     padding: 18px 18px 16px 18px;
     background: var(--tm-surface);
@@ -315,8 +315,8 @@ def inject_teachable_style() -> None:
     padding: 10px 12px;
     margin: 12px 0 8px 0;
     border-radius: 14px;
-    background: rgba(255, 255, 255, 0.98);
-    border: 1px solid rgba(16, 35, 63, 0.06);
+    background: var(--tm-surface);
+    border: 1px solid var(--tm-border);
     box-shadow: var(--tm-shadow-soft);
   }
   .tm-class-header strong {
@@ -331,7 +331,7 @@ def inject_teachable_style() -> None:
     border-radius: 14px;
     padding: 12px 14px;
     background: rgba(255,255,255,0.94);
-    border: 1px solid rgba(16, 35, 63, 0.06);
+    border: 1px solid var(--tm-border);
     color: var(--tm-muted);
     margin: 8px 0 12px 0;
   }
@@ -673,7 +673,7 @@ def inject_teachable_style() -> None:
     border: 1px solid rgba(49, 105, 255, 0.10);
   }
   .tm-panel {
-    border: 1px solid rgba(16, 35, 63, 0.08);
+    border: 1px solid var(--tm-border);
     border-radius: 16px;
     padding: 10px;
     background: var(--tm-surface-strong);
