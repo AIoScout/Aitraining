@@ -1896,6 +1896,10 @@ def _render_tm_old_frontend_html(
     }}
     .tm-toolbar-dropdown button:hover {{ background: rgba(0,0,0,0.05); }}
     .tm-toolbar-dropdown button.danger {{ color: #b42318; }}
+    .tm-toolbar-dropdown button span {{ display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; flex: 0 0 auto; }}
+    .tm-toolbar-dropdown button span svg {{ width: 16px; height: 16px; display: block; }}
+    .tm-toolbar-btn .tm-toolbar-icon {{ display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-right: 4px; vertical-align: middle; }}
+    .tm-toolbar-btn .tm-toolbar-icon svg {{ width: 15px; height: 15px; display: block; }}
     .tm-toolbar-dropdown .dd-sep {{
       height:1px; background: rgba(0,0,0,0.08); margin: 4px 4px;
     }}
@@ -1961,8 +1965,50 @@ def _render_tm_old_frontend_html(
     .tm-settings-grid {{
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 14px 20px;
+      gap: 16px;
     }}
+    .tm-settings-group {{
+      background: #F8FAFC;
+      border: 1px solid #E2E8F0;
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }}
+    .tm-settings-group-head {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #E2E8F0;
+      margin-bottom: 4px;
+    }}
+    .tm-settings-group-head h4 {{
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      color: #0F172A;
+      letter-spacing: 0.02em;
+    }}
+    .tm-settings-group-icon {{
+      font-size: 15px;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--blue);
+    }}
+    .tm-settings-group-icon svg {{ width: 18px; height: 18px; display: block; }}
+    .card-head-icon {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      vertical-align: middle;
+      margin-right: 6px;
+      color: inherit;
+    }}
+    .card-head-icon svg {{ width: 18px; height: 18px; display: block; }}
     .tm-settings-field label {{
       display: block;
       font-size: 12px;
@@ -2028,56 +2074,62 @@ def _render_tm_old_frontend_html(
       font-weight: 600;
     }}
     .tm-source-chip .chip-icon,
-    .tm-source-chip .tm-chip-icon {{ font-size: 13px; line-height: 1; }}
+    .tm-source-chip .tm-chip-icon {{ font-size: 13px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }}
+    .tm-source-chip .tm-chip-icon svg {{ width: 14px; height: 14px; display: block; }}
     .tm-source-chip .tm-chip-text {{ line-height: 1; }}
     .tm-source-chip.settings-hint,
     .tm-source-chip.tm-source-chip-settings {{
-      background: color-mix(in srgb, var(--blue) 10%, transparent);
-      color: var(--blue);
-      cursor: pointer;
-      padding: 4px 10px;
-      border: none;
-      font-family: inherit;
-      font-weight: 600;
+      display: none;
     }}
     .tm-source-chip.settings-hint:hover,
     .tm-source-chip.tm-source-chip-settings:hover {{ background: color-mix(in srgb, var(--blue) 18%, transparent); }}
     .tm-rename-btn {{
-      width: auto !important;
-      height: 28px !important;
-      min-width: 72px;
-      padding: 0 10px 0 8px;
-      border-radius: 7px;
-      font-size: 12px;
+      width: 32px !important;
+      height: 32px !important;
+      padding: 0;
+      border-radius: 6px;
+      font-size: 14px;
       display: inline-flex !important;
       align-items: center;
       justify-content: center;
-      background: rgba(0,0,0,0.04);
-      color: var(--text);
-      border: 1px solid rgba(0,0,0,0.06);
+      background: transparent;
+      color: var(--muted);
+      border: none;
     }}
     .tm-rename-btn:hover {{
-      background: rgba(0,0,0,0.08);
-      color: var(--blue);
-      border-color: color-mix(in srgb, var(--blue) 25%, transparent);
+      background: rgba(0,0,0,0.05);
+      color: var(--text);
     }}
     .layout {{
       position: relative;
       display: flex;
+      flex-direction: row;
+      flex-wrap: nowrap;
       width: 100%;
       box-sizing: border-box;
       justify-content: space-between;
-      align-items: center;
+      align-items: flex-start;
       gap: 28px;
       z-index: 2;
     }}
-    .col-classes {{ width: 500px; display: flex; flex-direction: column; gap: 24px; }}
+    .col-classes {{ width: 500px; min-width: 0; display: flex; flex-direction: column; gap: 24px; }}
     .col-train {{
       width: 270px;
       flex: 0 0 270px;
       min-width: 270px;
+      align-self: stretch;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
     }}
-    .col-preview {{ width: 320px; }}
+    .col-preview {{
+      width: 320px;
+      min-width: 0;
+      align-self: stretch;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }}
     @media (max-width: 1320px) {{
       .wrap {{
         padding: 72px 16px 92px 16px;
@@ -2092,9 +2144,17 @@ def _render_tm_old_frontend_html(
         width: 230px;
         flex: 0 0 230px;
         min-width: 230px;
+        align-self: stretch;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
       }}
       .col-preview {{
         width: 260px;
+        align-self: stretch;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
       }}
     }}
     @media (max-width: 860px) {{
@@ -2109,12 +2169,12 @@ def _render_tm_old_frontend_html(
       }}
     }}
     .card {{
-      background: var(--card);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
+      background: #FFFFFF;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
       border: 1px solid #E2E8F0;
     }}
-    .class-card {{ padding: 0; position: relative; overflow: hidden; }}
+    .class-card {{ padding: 0; position: relative; overflow: hidden; min-width: 0; }}
     .class-head {{
       display: flex;
       align-items: center;
@@ -2170,17 +2230,25 @@ def _render_tm_old_frontend_html(
       justify-content: center;
     }}
     .iconbtn:hover {{ background: rgba(0,0,0,0.05); color: var(--text); }}
+    .iconbtn svg {{ width: 18px; height: 18px; display: block; }}
+    .tm-delete-class {{ font-size: 14px; }}
+    .tm-delete-class:hover {{ background: rgba(239,68,68,0.08); color: #EF4444; }}
+    .clear-samples {{ font-size: 14px; }}
+    .clear-samples:hover {{ background: rgba(245,158,11,0.08); color: #F59E0B; }}
     .more {{
       flex: 0 0 auto;
     }}
     .divider {{ height: 1px; background: rgba(0,0,0,0.08); margin: 0; }}
     .subhead {{ font-size: 12px; color: var(--muted); margin: 0 0 10px 0; }}
-    .btnrow {{
+    .tm-action-toolbar {{
       display: flex;
       gap: 12px;
-      padding: 10px 16px 14px 16px;
-      flex-wrap: wrap;
-      align-items: flex-start;
+      width: 100%;
+      justify-content: flex-start;
+    }}
+    .tm-action-toolbar .sample {{
+      flex: 0 0 auto;
+      min-width: 0;
     }}
     .sample {{
       width: 80px;
@@ -2198,6 +2266,7 @@ def _render_tm_old_frontend_html(
       font-weight: 600;
       cursor: pointer;
       user-select: none;
+      transition: background 0.15s ease;
     }}
     .sample:hover {{ background: var(--blue-bg-hover); }}
     .sample svg {{ width: 22px; height: 22px; stroke: var(--blue); fill: none; stroke-width: 2; }}
@@ -2367,6 +2436,8 @@ def _render_tm_old_frontend_html(
       color: #3169FF;
       background: #F0F4FF;
     }}
+    .addclass .addclass-icon {{ display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; }}
+    .addclass .addclass-icon svg {{ width: 18px; height: 18px; display: block; }}
     .train-card, .preview-card {{ padding: 16px 18px 18px 18px; position: relative; }}
     .card-head {{
       display: flex;
@@ -2374,8 +2445,9 @@ def _render_tm_old_frontend_html(
       justify-content: space-between;
       gap: 12px;
       margin-bottom: 12px;
+      min-width: 0;
     }}
-    .card-head h3 {{ margin: 0; font-size: 14px; font-weight: 700; }}
+    .card-head h3 {{ margin: 0; font-size: 14px; font-weight: 700; min-width: 0; flex-shrink: 1; }}
     .train-status {{
       width: 100%;
       border-radius: 6px;
@@ -2536,6 +2608,10 @@ def _render_tm_old_frontend_html(
       font-weight: 700;
       cursor: pointer;
       user-select: none;
+      flex-shrink: 0;
+      white-space: nowrap;
+      max-width: 100%;
+      overflow: hidden;
     }}
     .exportbtn:disabled {{
       opacity: 0.55;
@@ -2913,7 +2989,7 @@ def _render_tm_old_frontend_html(
       gap: 10px;
       margin-top: auto;
     }}
-    @media (max-width: 1100px) {{
+    @media (max-width: 600px) {{
       .class-preprocess-shell {{
         grid-template-columns: minmax(0, 1fr);
       }}
@@ -2934,6 +3010,7 @@ def _render_tm_old_frontend_html(
       min-height: 360px;
       overflow: hidden;
       border-radius: 0 0 12px 12px;
+      min-width: 0;
     }}
     .source-left {{
       background: var(--blue-bg);
@@ -2941,6 +3018,7 @@ def _render_tm_old_frontend_html(
       display: flex;
       flex-direction: column;
       gap: 14px;
+      min-width: 0;
     }}
     .source-right {{
       background: var(--surface-elevated);
@@ -2949,6 +3027,7 @@ def _render_tm_old_frontend_html(
       flex-direction: column;
       max-height: none;
       overflow: hidden;
+      min-width: 0;
     }}
     .source-head {{
       display: flex;
@@ -3115,11 +3194,18 @@ def _render_tm_old_frontend_html(
     .samples-grid {{
       margin-top: 14px;
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(4, 1fr);
       gap: 12px;
-      align-content: start;
+      align-items: start;
       min-height: 180px;
-      padding-right: 4px;
+      min-width: 0;
+    }}
+    .samples-grid .sample-item {{
+      width: 100%;
+    }}
+    .samples-grid .sample-thumb {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
     }}
     .sample-item {{
       position: relative;
@@ -3180,33 +3266,29 @@ def _render_tm_old_frontend_html(
     .summary-row {{
       padding: 10px 16px 14px 16px;
       display: flex;
-      gap: 12px;
-      align-items: center;
-    }}
-    .summary-actions {{
-      display: flex;
+      flex-direction: column;
       gap: 10px;
-    }}
-    .summary-actions .sample {{
-      width: 78px;
-      height: 62px;
-      flex: 0 0 78px;
-      border-radius: 6px;
-      gap: 4px;
-      font-size: 11px;
+      align-items: flex-start;
+      min-width: 0;
     }}
     .summary-samples {{
       min-height: 62px;
       display: flex;
       align-items: center;
       overflow: hidden;
+      min-width: 0;
+      width: 100%;
     }}
     .samples-strip {{
       display: flex;
       gap: 10px;
       align-items: center;
       overflow-x: auto;
-      padding-bottom: 2px;
+      overflow-y: hidden;
+      min-width: 0;
+      width: 100%;
+      min-height: 62px;
+      padding-bottom: 8px;
     }}
     .samples-strip .sample-thumb {{
       width: 54px;
@@ -3234,6 +3316,36 @@ def _render_tm_old_frontend_html(
       justify-content: center;
       color: var(--muted);
       font-size: 13px;
+    }}
+    .samples-grid-more {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border-radius: 10px;
+      background: #eef2f6;
+      border: 1px solid rgba(0,0,0,0.06);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--muted);
+      cursor: default;
+    }}
+    .samples-strip-more {{
+      flex: 0 0 auto;
+      min-width: 54px;
+      width: 54px;
+      height: 54px;
+      border-radius: 10px;
+      background: #eef2f6;
+      border: 1px solid rgba(0,0,0,0.06);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--muted);
+      cursor: default;
     }}
     .form-grid {{
       display: grid;
@@ -3276,7 +3388,8 @@ def _render_tm_old_frontend_html(
       .navmenu .divider {{ background: rgba(255,255,255,0.1); }}
       .iconbtn:hover {{ background: rgba(255,255,255,0.06); }}
       .divider {{ background: rgba(255,255,255,0.1); }}
-      .addclass {{ border-color: rgba(255,255,255,0.2); }}
+      .addclass {{ border-color: #CBD5E1; color: #475569; }}
+      .addclass:hover {{ border-color: #3169FF; color: #3169FF; background: #F0F4FF; }}
       /* Toolbar + settings modal dark overrides (Problem 2+3.2) */
       .topnav {{ border-color: rgba(255,255,255,0.08); }}
       .tm-toolbar-brand {{ border-color: rgba(255,255,255,0.1); }}
@@ -3304,14 +3417,13 @@ def _render_tm_old_frontend_html(
       .tm-source-chip.settings-hint:hover,
       .tm-source-chip.tm-source-chip-settings:hover {{ background: rgba(138,180,248,0.24); }}
       .tm-rename-btn {{
-        background: rgba(255,255,255,0.05);
-        color: #d9dee5;
-        border-color: rgba(255,255,255,0.1);
+        background: transparent;
+        color: #9aa4b2;
+        border: none;
       }}
       .tm-rename-btn:hover {{
-        background: rgba(255,255,255,0.1);
-        color: var(--blue);
-        border-color: rgba(138,180,248,0.35);
+        background: rgba(255,255,255,0.08);
+        color: #e8ecf1;
       }}
     }}
   </style>
@@ -3326,22 +3438,23 @@ def _render_tm_old_frontend_html(
   <div class="tm-toolbar-menu" id="menuFile">
     <button type="button" class="tm-toolbar-btn primary" id="menuFileBtn">File ▾</button>
     <div class="tm-toolbar-dropdown" id="menuFileDropdown">
-      <button type="button" id="navNewProject"><span>📄</span>New project<span class="kbd">⌘N</span></button>
-      <button type="button" id="navOpenProject"><span>📂</span>Open project<span class="kbd">⌘O</span></button>
+      <button type="button" id="navNewProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg></span>New project<span class="kbd">⌘N</span></button>
+      <button type="button" id="navOpenProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg></span>Open project<span class="kbd">⌘O</span></button>
       <div class="dd-sep"></div>
-      <button type="button" id="navSaveProject"><span>💾</span>Save<span class="kbd">⌘S</span></button>
-      <button type="button" id="navSaveAsProject"><span>📥</span>Save as<span class="kbd">⇧⌘S</span></button>
+      <button type="button" id="navSaveProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg></span>Save<span class="kbd">⌘S</span></button>
+      <button type="button" id="navSaveAsProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg></span>Save as<span class="kbd">⇧⌘S</span></button>
       <div class="dd-sep"></div>
-      <button type="button" id="navExportDataset"><span>📦</span>Export dataset</button>
+      <button type="button" id="navExportDataset"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg></span>Export dataset</button>
     </div>
   </div>
   <div class="tm-toolbar-menu" id="menuEdit">
     <button type="button" class="tm-toolbar-btn" id="menuEditBtn">Edit ▾</button>
     <div class="tm-toolbar-dropdown" id="menuEditDropdown">
-      <button type="button" class="danger" id="navResetProject"><span>♻</span>Reset project</button>
+      <button type="button" class="danger" id="navResetProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg></span>Reset project</button>
     </div>
   </div>
-  <button type="button" class="tm-toolbar-btn" id="navSettings" title="Global input settings (camera, serial, FPS, frame)">⚙ Settings</button>
+  <button type="button" class="tm-toolbar-btn" id="navSettings" title="Global input settings (camera, serial, FPS, frame)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.19.42.58.74 1.06.91.48.17.99.22 1.51.09"></path></svg></span>Settings</button>
+  <button type="button" class="tm-toolbar-btn" id="navPreferences" title="Preferences (display limits, caching)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg></span>Preferences</button>
   <div class="tm-toolbar-sep"></div>
   <div class="tm-toolbar-spacer"></div>
   <button type="button" class="tm-toolbar-return" id="navReturn">← Return Home</button>
@@ -3388,50 +3501,89 @@ def _render_tm_old_frontend_html(
       </div>
     </div>
     <div class="tm-settings-grid">
-      <div class="tm-settings-field">
-        <label>Webcam</label>
-        <select id="settingsWebcam"></select>
+      <div class="tm-settings-group">
+        <div class="tm-settings-group-head">
+          <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"></rect><path d="M22 8l-6 4 6 4V8z"></path></svg></span>
+          <h4>Webcam Settings</h4>
+        </div>
+        <div class="tm-settings-field">
+          <label>Webcam</label>
+          <select id="settingsWebcam"></select>
+        </div>
+        <div class="tm-settings-field">
+          <label>Capture FPS</label>
+          <input id="settingsFps" type="number" min="1" max="60" step="0.5"/>
+        </div>
       </div>
-      <div class="tm-settings-field">
-        <label>Capture FPS</label>
-        <input id="settingsFps" type="number" min="1" max="60" step="0.5"/>
-      </div>
-      <div class="tm-settings-field">
-        <label>Serial Device (port)</label>
-        <select id="settingsSerialPort">
-          <option value="">— Not connected —</option>
-        </select>
-      </div>
-      <div class="tm-settings-field">
-        <label>Baud rate</label>
-        <select id="settingsSerialBaud">
-          <option value="9600">9600</option>
-          <option value="57600">57600</option>
-          <option value="115200">115200 (default)</option>
-          <option value="230400">230400</option>
-          <option value="460800">460800</option>
-          <option value="921600">921600</option>
-        </select>
-      </div>
-      <div class="tm-settings-field">
-        <label>Frame side (pixels)</label>
-        <input id="settingsFrameSide" type="number" min="32" max="512" step="16"/>
-      </div>
-      <div class="tm-settings-field">
-        <label>Channels</label>
-        <select id="settingsChannels">
-          <option value="1">1 — Grayscale</option>
-          <option value="3">3 — RGB Color</option>
-        </select>
-      </div>
-      <div class="tm-settings-field" style="grid-column: 1 / -1;">
-        <label>Frame sync word (hex, space separated)</label>
-        <input id="settingsSerialSync" type="text" placeholder="AA 55 AA"/>
+      <div class="tm-settings-group">
+        <div class="tm-settings-group-head">
+          <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg></span>
+          <h4>MCU Device Settings</h4>
+        </div>
+        <div class="tm-settings-field">
+          <label>Serial Device (port)</label>
+          <select id="settingsSerialPort">
+            <option value="">— Not connected —</option>
+          </select>
+        </div>
+        <div class="tm-settings-field">
+          <label>Baud rate</label>
+          <select id="settingsSerialBaud">
+            <option value="9600">9600</option>
+            <option value="57600">57600</option>
+            <option value="115200">115200 (default)</option>
+            <option value="230400">230400</option>
+            <option value="460800">460800</option>
+            <option value="921600">921600</option>
+          </select>
+        </div>
+        <div class="tm-settings-field">
+          <label>Frame side (pixels)</label>
+          <input id="settingsFrameSide" type="number" min="32" max="512" step="16"/>
+        </div>
+        <div class="tm-settings-field">
+          <label>Channels</label>
+          <select id="settingsChannels">
+            <option value="1">1 — Grayscale</option>
+            <option value="3">3 — RGB Color</option>
+          </select>
+        </div>
+        <div class="tm-settings-field">
+          <label>Frame sync word (hex, space separated)</label>
+          <input id="settingsSerialSync" type="text" placeholder="AA 55 AA"/>
+        </div>
       </div>
     </div>
     <div class="tm-settings-foot">
       <button type="button" class="tm-btn" id="settingsCancel">Cancel</button>
       <button type="button" class="tm-btn primary" id="settingsSave">Save changes</button>
+    </div>
+  </div>
+</div>
+<div class="tm-settings-modal" id="preferencesModal" role="dialog" aria-modal="true">
+  <div class="tm-settings-card">
+    <div class="tm-settings-head">
+      <div>
+        <h3>Preferences</h3>
+        <p>Adjust display and caching behavior.</p>
+      </div>
+    </div>
+    <div class="tm-settings-grid">
+      <div class="tm-settings-group">
+        <div class="tm-settings-group-head">
+          <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg></span>
+          <h4>Display</h4>
+        </div>
+        <div class="tm-settings-field">
+          <label>Max samples displayed per class</label>
+          <input id="prefMaxSamples" type="number" min="1" max="100" step="1" value="12"/>
+          <small>Controls how many sample thumbnails are cached and shown in the class card (default: 12). Lower values reduce memory usage.</small>
+        </div>
+      </div>
+    </div>
+    <div class="tm-settings-foot">
+      <button type="button" class="tm-btn" id="prefCancel">Cancel</button>
+      <button type="button" class="tm-btn primary" id="prefSave">Save changes</button>
     </div>
   </div>
 </div>
@@ -3445,7 +3597,7 @@ def _render_tm_old_frontend_html(
     <div class="col-classes" id="classes"></div>
     <div class="col-train">
       <div class="card train-card" id="trainCard">
-        <div class="card-head"><h3>Training</h3></div>
+        <div class="card-head"><h3><span class="card-head-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg></span> Training</h3></div>
         <div class="train-status" id="trainStatus">Not trained</div>
         <button class="trainbtn" id="trainBtn">Train Embedded Model</button>
         <div class="train-progress" id="trainProgress">
@@ -3474,19 +3626,13 @@ def _render_tm_old_frontend_html(
     <div class="col-preview">
       <div class="card preview-card" id="previewCard">
         <div class="card-head">
-          <h3>Preview</h3>
+          <h3><span class="card-head-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></span> Preview</h3>
           <button class="exportbtn" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg><span>Export Model</span></button>
         </div>
         <div class="preview-controls">
           <label class="preview-toggle"><input id="previewInputToggle" type="checkbox"/><span>Input</span></label>
           <label class="preview-toggle"><input id="previewRoiToggle" type="checkbox"/><span>ROI</span></label>
           <label class="preview-toggle"><input id="previewRawToggle" type="checkbox"/><span>Orig</span></label>
-          <div class="preview-mode-tabs" id="previewModeTabs">
-            <button class="preview-mode-tab" type="button" data-preview-mode="auto_by_label">Auto</button>
-          </div>
-          <div class="preview-controls-right">
-            <button class="iconbtn source-settings" type="button" id="previewSettingsToggle" title="Input settings">⚙</button>
-          </div>
         </div>
         <div id="previewSettingsHost"></div>
         <div class="preview-pane" id="previewPane"></div>
@@ -4024,8 +4170,7 @@ let holdSyncTimer = null;
 let holdPollController = null;
 let holdSeq = 0;
 let holdNextToken = 0;
-const SAMPLE_PREVIEW_LIMIT = 12;
-const SAMPLE_STRIP_LIMIT = 3;
+let PREF_MAX_SAMPLES_DISPLAY = 12;
 const CLASS_PREPROCESS_WINDOW = 15;
 const UPLOAD_CONCURRENCY = 3;
 const UPLOAD_MAX_MB = 25;
@@ -4047,7 +4192,7 @@ let directTensorStream = false;  // device streams the preprocessed tensor (mode
 let previewInputOn = false;
 let previewSource = 'webcam';
 let previewPreprocessMode = 'auto_by_label';
-let previewShowRoi = true;
+let previewShowRoi = false;
 let previewShowRaw = false;  // toggle to show original (unprocessed) image
 let previewShowScore = false;  // toggle: percentage (%) vs raw score (0.000-1.000)
 let previewDarkThresh = 0;
@@ -4093,6 +4238,7 @@ const previewStorageKey = `tm-preview-${{STATE.session}}`;
 const exportDirStorageKey = `tm-export-dir-${{STATE.session}}`;
 const exportNameStorageKey = `tm-export-name-${{STATE.session}}`;
 const exportArrayStorageKey = `tm-export-array-${{STATE.session}}`;
+const preferencesStorageKey = `tm-preferences`;
 let exportDir = '';
 let exportModelName = 'tm';
 let exportArrayName = '';
@@ -5110,6 +5256,7 @@ async function pickPreviewUploadFile() {{
     }});
 }}
 restorePreviewState();
+restorePreferences();
 if (window.__tmStageMark) window.__tmStageMark('preview-restored');
 function restoreExportDir() {{
   try {{
@@ -5980,6 +6127,52 @@ function closeGlobalSettings() {{
   const modal = document.getElementById('globalSettingsModal');
   if (modal) modal.classList.remove('open');
 }}
+function restorePreferences() {{
+  try {{
+    const raw = window.localStorage.getItem(preferencesStorageKey);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return;
+    if (Number.isFinite(Number(data.maxSamplesDisplay)) && Number(data.maxSamplesDisplay) > 0) {{
+      PREF_MAX_SAMPLES_DISPLAY = Math.max(1, Math.min(100, Math.round(Number(data.maxSamplesDisplay))));
+    }}
+  }} catch (e) {{}}
+}}
+function persistPreferences() {{
+  try {{
+    window.localStorage.setItem(preferencesStorageKey, JSON.stringify({{
+      maxSamplesDisplay: Number(PREF_MAX_SAMPLES_DISPLAY),
+    }}));
+  }} catch (e) {{}}
+}}
+function openPreferences() {{
+  const modal = document.getElementById('preferencesModal');
+  if (!modal) return;
+  const input = document.getElementById('prefMaxSamples');
+  if (input) input.value = Number(PREF_MAX_SAMPLES_DISPLAY);
+  modal.classList.add('open');
+}}
+function closePreferences() {{
+  const modal = document.getElementById('preferencesModal');
+  if (modal) modal.classList.remove('open');
+}}
+function savePreferences() {{
+  try {{
+    const input = document.getElementById('prefMaxSamples');
+    if (input) {{
+      const v = Number(input.value);
+      if (Number.isFinite(v) && v > 0) {{
+        PREF_MAX_SAMPLES_DISPLAY = Math.max(1, Math.min(100, Math.round(v)));
+      }}
+    }}
+    persistPreferences();
+    closePreferences();
+    render();
+    toast('Preferences saved.');
+  }} catch (e) {{
+    toast('Failed to save preferences.');
+  }}
+}}
 async function saveGlobalSettings() {{
   try {{
     const payload = {{}};
@@ -5997,26 +6190,55 @@ async function saveGlobalSettings() {{
     if (ch) payload.serial_channels = Number(ch.value);
     const sw = document.getElementById('settingsSerialSync');
     if (sw) payload.serial_sync = String(sw.value || 'AA 55 AA').trim().toUpperCase() || 'AA 55 AA';
-    // Write through the canonical action dispatcher so the host Streamlit
-    // state updates, the controller reconfigures, and a re-render happens.
-    const anyChanged = true;
-    if (payload.webcam_index != null && payload.webcam_index !== Number(STATE.current_webcam_index)) {{
-      setAction('set_webcam_index', {{ index: String(payload.webcam_index) }});
+
+    // Resolve webcam uid from the selected option
+    let webcamUid = '';
+    if (wSel && Array.isArray(STATE.webcam_options)) {{
+      const selIdx = Number(payload.webcam_index || 0);
+      const found = STATE.webcam_options.find((o) => o && Number(o.index ?? -1) === selIdx);
+      if (found) webcamUid = String(found.unique_id || found.uid || found.deviceId || '');
     }}
-    const serialActions = [];
-    if (payload.serial_port !== String(STATE.current_serial_port || ''))
-      serialActions.push(['set_serial_port', {{ value: payload.serial_port }}]);
-    if (payload.serial_baud !== Number(STATE.current_serial_baud))
-      serialActions.push(['set_serial_baud', {{ value: String(payload.serial_baud) }}]);
-    if (payload.serial_frame_side !== Number(STATE.current_serial_frame_side))
-      serialActions.push(['set_serial_frame_side', {{ value: String(payload.serial_frame_side) }}]);
-    if (payload.serial_channels !== Number(STATE.current_serial_channels))
-      serialActions.push(['set_serial_channels', {{ value: String(payload.serial_channels) }}]);
-    if (payload.serial_sync !== String(STATE.current_serial_sync || ''))
-      serialActions.push(['set_serial_sync', {{ value: payload.serial_sync }}]);
-    if (payload.fps !== Number(STATE.fps))
-      serialActions.push(['set_fps', {{ value: String(payload.fps) }}]);
-    for (const [a, p] of serialActions) setAction(a, p);
+
+    // Apply locally first so the UI reflects the new values immediately
+    currentWebcamIndex = Number(payload.webcam_index || 0);
+    currentWebcamUid = webcamUid;
+    currentSerialPort = String(payload.serial_port || '');
+    currentSerialBaud = Number(payload.serial_baud || 115200);
+    currentSerialFrameSide = Number(payload.serial_frame_side || 96);
+    currentSerialChannels = Number(payload.serial_channels || 1);
+    currentSerialSync = String(payload.serial_sync || 'AA 55 AA');
+    STATE.current_webcam_index = currentWebcamIndex;
+    STATE.current_webcam_id = currentWebcamUid;
+    STATE.current_serial_port = currentSerialPort;
+    STATE.current_serial_baud = currentSerialBaud;
+    STATE.current_serial_frame_side = currentSerialFrameSide;
+    STATE.current_serial_channels = currentSerialChannels;
+    STATE.current_serial_sync = currentSerialSync;
+    if (payload.fps != null) STATE.fps = payload.fps;
+
+    // Persist to the controller via /live/config — no page reload
+    const params = new URLSearchParams();
+    params.set('session', String(STATE.session || ''));
+    params.set('webcam_index', String(currentWebcamIndex));
+    if (webcamUid) params.set('webcam_id', webcamUid);
+    params.set('serial_port', currentSerialPort);
+    params.set('serial_baud', String(currentSerialBaud));
+    params.set('serial_frame_side', String(currentSerialFrameSide));
+    params.set('serial_channels', String(currentSerialChannels));
+    params.set('serial_sync', currentSerialSync);
+    const res = await fetch(`${{baseUrl}}/live/config?${{params.toString()}}`);
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to save settings.');
+
+    // Re-render so the open source panel reflects the new webcam/port labels
+    // (currentCamLabel / currentPortLabel are computed inside render()).
+    // render() also re-opens the live source via ensureOpenSourceLive().
+    try {{
+      if (typeof render === 'function') render();
+    }} catch (e) {{
+      console.warn('[settings] render after save failed', e);
+    }}
+
     closeGlobalSettings();
     toast('Settings saved.');
   }} catch (err) {{
@@ -6665,7 +6887,7 @@ function prependSamplePreview(className, item) {{
   if (!className || !normalized) return;
   const items = Array.isArray(STATE.sample_previews[className]) ? STATE.sample_previews[className].slice() : [];
   items.unshift(normalized);
-  STATE.sample_previews[className] = normalizePreviewList(items).slice(0, SAMPLE_PREVIEW_LIMIT);
+  STATE.sample_previews[className] = normalizePreviewList(items).slice(0, PREF_MAX_SAMPLES_DISPLAY);
 }}
 function removePreviewItemLocal(className, filename) {{
   if (!className || !filename) return;
@@ -6690,7 +6912,7 @@ async function syncClassState(className) {{
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to refresh class state.');
     STATE.counts[className] = Number(data.count || 0);
-    STATE.sample_previews[className] = normalizePreviewList(data.previews).slice(0, SAMPLE_PREVIEW_LIMIT);
+    STATE.sample_previews[className] = normalizePreviewList(data.previews).slice(0, PREF_MAX_SAMPLES_DISPLAY);
     recomputeTrainEnabled();
   refreshTrainRec();
     syncTrainUi();
@@ -7227,21 +7449,40 @@ function buildSampleTileMarkup(item, idx) {{
   `;
 }}
 function buildSamplesMarkup(className) {{
-  const items = normalizePreviewList((STATE.sample_previews && STATE.sample_previews[className]) || []).slice(0, SAMPLE_PREVIEW_LIMIT);
+  const items = normalizePreviewList((STATE.sample_previews && STATE.sample_previews[className]) || []).slice(0, PREF_MAX_SAMPLES_DISPLAY);
   if (!items.length) return '<div class="samples-empty">No samples yet.</div>';
-  return `<div class="samples-grid">${{items.map((item, idx) => buildSampleTileMarkup(item, idx)).join('')}}</div>`;
+  const totalSamples = Number(STATE.counts && STATE.counts[className] ? STATE.counts[className] : items.length);
+  const hiddenCount = Math.max(0, totalSamples - items.length);
+  const more = hiddenCount > 0 ? `<div class="samples-grid-more">+${{hiddenCount}}</div>` : '';
+  return `<div class="samples-grid">${{items.map((item, idx) => buildSampleTileMarkup(item, idx)).join('')}}${{more}}</div>`;
 }}
 function buildSamplesStripMarkup(className) {{
   const allItems = normalizePreviewList((STATE.sample_previews && STATE.sample_previews[className]) || []);
-  const items = allItems.slice(0, SAMPLE_STRIP_LIMIT);
+  const items = allItems.slice(0, PREF_MAX_SAMPLES_DISPLAY);
   if (!items.length) return '<div class="samples-strip-empty">No samples yet.</div>';
-  const more = allItems.length > items.length ? `<div class="samples-strip-more">+${{allItems.length - items.length}}</div>` : '';
+  const totalSamples = Number(STATE.counts && STATE.counts[className] ? STATE.counts[className] : allItems.length);
+  const hiddenCount = Math.max(0, totalSamples - items.length);
+  const more = hiddenCount > 0 ? `<div class="samples-strip-more">+${{hiddenCount}}</div>` : '';
   return `<div class="samples-strip">${{items.map((item, idx) => buildSampleTileMarkup(item, idx)).join('')}}${{more}}</div>`;
 }}
 function createIcon(kind) {{
-  if (kind === 'webcam') return `<svg viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"></rect><path d="M22 8l-6 4 6 4V8z"></path></svg>`;
-  if (kind === 'upload') return `<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>`;
-  return `<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`;
+  if (kind === 'webcam') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"></rect><path d="M22 8l-6 4 6 4V8z"></path></svg>`;
+  if (kind === 'upload') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>`;
+  if (kind === 'device') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`;
+  if (kind === 'rename') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>`;
+  if (kind === 'clear') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H7L3 16a2 2 0 0 1 0-2.83l9.17-9.17a2 2 0 0 1 2.83 0l5 5a2 2 0 0 1 0 2.83L11 20"></path><line x1="18" y1="13" x2="9" y2="4"></line><line x1="5" y1="16" x2="13" y2="8"></line></svg>`;
+  if (kind === 'delete') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
+  if (kind === 'cpu') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>`;
+  if (kind === 'settings') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.19.42.58.74 1.06.91.48.17.99.22 1.51.09"></path></svg>`;
+  if (kind === 'file') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`;
+  if (kind === 'folder') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>`;
+  if (kind === 'save') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>`;
+  if (kind === 'download') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
+  if (kind === 'box') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`;
+  if (kind === 'refresh') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>`;
+  if (kind === 'eye') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+  if (kind === 'plus') return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>`;
 }}
 function setFlowPath(id, d) {{
   const p = document.getElementById(id);
@@ -7980,7 +8221,7 @@ function renderPreviewCard() {{
   const roiToggle = document.getElementById('previewRoiToggle');
   const settingsBtn = document.getElementById('previewSettingsToggle');
   const modeTabs = Array.from(document.querySelectorAll('[data-preview-mode]'));
-  if (!pane || !note || !output || !toggle || !settingsBtn || !roiToggle) return;
+  if (!pane || !note || !output || !toggle || !roiToggle) return;
   if (!STATE.export_enabled) {{
     stopPreviewPredictLoop();
     previewSettingsOpen = false;
@@ -7993,7 +8234,11 @@ function renderPreviewCard() {{
     toggle.disabled = true;
     setCheckedSilent(roiToggle, false);
     roiToggle.disabled = true;
-    settingsBtn.disabled = true;
+    if (rawToggle) {{
+      setCheckedSilent(rawToggle, false);
+      rawToggle.disabled = true;
+    }}
+    if (settingsBtn) settingsBtn.disabled = true;
     const bar = document.getElementById('previewThreshBar');
     if (bar) bar.style.display = 'none';
     modeTabs.forEach((btn) => {{
@@ -8004,7 +8249,8 @@ function renderPreviewCard() {{
   }}
   toggle.disabled = false;
   roiToggle.disabled = false;
-  settingsBtn.disabled = false;
+  if (rawToggle) rawToggle.disabled = false;
+  if (settingsBtn) settingsBtn.disabled = false;
   const bar = document.getElementById('previewThreshBar');
   if (bar) bar.style.display = '';
   modeTabs.forEach((btn) => {{
@@ -8098,10 +8344,12 @@ function bindPreviewControls() {{
   const roiToggle = document.getElementById('previewRoiToggle');
   const settings = document.getElementById('previewSettingsToggle');
   const modeTabs = Array.from(document.querySelectorAll('[data-preview-mode]'));
-  if (!toggle || !roiToggle || !settings) return;
-  setCheckedSilent(rawToggle, !!previewShowRaw);
-  setCheckedSilent(roiToggle, !!previewShowRoi);
-  setCheckedSilent(toggle, !!previewInputOn);
+  if (!toggle || !roiToggle) return;
+  if (STATE.export_enabled) {{
+    setCheckedSilent(rawToggle, !!previewShowRaw);
+    setCheckedSilent(roiToggle, !!previewShowRoi);
+    setCheckedSilent(toggle, !!previewInputOn);
+  }}
   // Bind each control independently so renderPreviewCard() can be re-run
   // after a view toggle without dropping change handlers.
   const onViewToggleChanged = () => {{
@@ -8178,7 +8426,7 @@ function bindPreviewControls() {{
       }}, 0);
     }};
   }}
-  if (settings.dataset.bound !== '1') {{
+  if (settings && settings.dataset.bound !== '1') {{
     settings.dataset.bound = '1';
     settings.onclick = () => {{
       previewSettingsOpen = !previewSettingsOpen;
@@ -8644,6 +8892,7 @@ function renderAdvancedPanel() {{
   if (chev) chev.textContent = trainAdvancedOpen ? '▴' : '▾';
   if (trainAdvancedOpen) syncAdvancedInlineInputs();
   updateFlow();
+  setTimeout(() => {{ if (typeof syncFrameHeight === 'function') syncFrameHeight(); }}, 50);
 }}
 async function applyRecommendedTrainCfg() {{
   const rec = STATE.train_rec || null;
@@ -8891,15 +9140,16 @@ function render() {{
       }};
       const edit = document.createElement('button');
       edit.className = 'iconbtn tm-rename-btn';
-      edit.title = 'Rename class';
-      edit.innerHTML = '<span style="font-weight:600">✎</span><span style="font-size:11px;margin-left:4px">Rename</span>';
+      edit.title = 'Rename this class';
+      edit.innerHTML = createIcon('rename');
       edit.onclick = () => renameClass(name);
       title.appendChild(preprocessBtn);
       title.appendChild(edit);
       head.appendChild(title);
       const more = document.createElement('button');
-      more.className = 'iconbtn more';
-      more.textContent = '⋮';
+      more.className = 'iconbtn more tm-delete-class';
+      more.innerHTML = createIcon('delete');
+      more.title = 'Delete this class';
       more.onclick = async (e) => {{
         if (e) {{
           e.preventDefault();
@@ -8909,8 +9159,8 @@ function render() {{
       }};
       const clearBtn = document.createElement('button');
       clearBtn.className = 'iconbtn clear-samples';
-      clearBtn.title = 'Clear all samples in this class';
-      clearBtn.textContent = '⌫';
+      clearBtn.title = 'Clear all samples';
+      clearBtn.innerHTML = createIcon('clear');
       clearBtn.onclick = async (e) => {{
         if (e) {{
           e.preventDefault();
@@ -8932,22 +9182,22 @@ function render() {{
       card.appendChild(sh);
 
       const row = document.createElement('div');
-      row.className = openSourceClass === name ? 'btnrow' : 'summary-actions';
+      row.className = 'tm-action-toolbar';
 
       const upWebcam = document.createElement('button');
       upWebcam.className = 'sample';
-      upWebcam.innerHTML = createIcon('webcam') + '<div>Webcam</div>';
+      upWebcam.innerHTML = `${{createIcon('webcam')}}<span>Webcam</span>`;
       upWebcam.onclick = () => openSourcePanel('webcam', name);
-
-      const upDevice = document.createElement('button');
-      upDevice.className = 'sample';
-      upDevice.innerHTML = createIcon('device') + '<div>Device</div>';
-      upDevice.onclick = () => openSourcePanel('device', name);
 
       const upUpload = document.createElement('button');
       upUpload.className = 'sample';
-      upUpload.innerHTML = createIcon('upload') + '<div>Upload</div>';
+      upUpload.innerHTML = `${{createIcon('upload')}}<span>Upload</span>`;
       upUpload.onclick = () => openSourcePanel('upload', name);
+
+      const upDevice = document.createElement('button');
+      upDevice.className = 'sample';
+      upDevice.innerHTML = `${{createIcon('device')}}<span>Device</span>`;
+      upDevice.onclick = () => openSourcePanel('device', name);
 
       row.appendChild(upWebcam);
       row.appendChild(upUpload);
@@ -8982,9 +9232,8 @@ function render() {{
             const m = opts.find(w => Number(w.index) === idx || String(w.uid || '') === String(currentWebcamUid || ''));
             return (m && String(m.label || m.device || m.title || '')) || (opts[idx] && String(opts[idx].label || opts[idx].device || `Camera ${{idx}}`)) || `Camera ${{idx}}`;
           }})();
-          const fpsChip = buildChip(`${{Number(STATE.fps || 0) || 30}} fps`, '⏱', 'fps');
           const jumpChip = `<button type="button" class="tm-source-chip tm-source-chip-settings" id="sourceSettingsToggle-${{cssSafe(name)}}" title="Open global input settings">
-            <span class="tm-chip-icon">⚙</span><span class="tm-chip-text">Settings</span>
+            <span class="tm-chip-icon">${{createIcon('settings')}}</span><span class="tm-chip-text">Settings</span>
           </button>`;
           const sourceChipRow = (chips) => `<div class="tm-source-chip-row">${{chips}}</div>`;
           bodyMarkup =
@@ -8993,7 +9242,7 @@ function render() {{
                  <div class="upload-hint">Images are added to this class and appear immediately on the right.</div>`
               : (
                 openSourceKind === 'device'
-                  ? `${{sourceChipRow(buildChip(currentPortLabel, '🔌', 'port') + fpsChip + jumpChip)}}
+                  ? `${{sourceChipRow(buildChip(currentPortLabel, createIcon('device'), 'port') + jumpChip)}}
                      <div class="device-help">${{deviceHelpText()}}</div>
                      <div class="source-preview-wrap">
                        <img id="sourcePreview-${{cssSafe(name)}}" class="preview-frame" alt="Preview"/>
@@ -9003,7 +9252,7 @@ function render() {{
                        <button class="btn btn-primary" type="button" id="sourceCapture-${{cssSafe(name)}}">Capture</button>
                        <button class="btn" type="button" id="sourceHold-${{cssSafe(name)}}">${{holdRecording && holdRecordClass === name ? 'Recording...' : 'Hold to Capture'}}</button>
                      </div>`
-                  : `${{sourceChipRow(buildChip(currentCamLabel, '📷', 'cam') + fpsChip + jumpChip)}}
+                  : `${{sourceChipRow(buildChip(currentCamLabel, createIcon('webcam'), 'cam') + jumpChip)}}
                      <div class="device-help">${{webcamHelpText()}}</div>
                      <div class="source-preview-wrap">
                        <img id="sourcePreview-${{cssSafe(name)}}" class="preview-frame" alt="Preview"/>
@@ -9043,6 +9292,7 @@ function render() {{
       }} else {{
         const summary = document.createElement('div');
         summary.className = 'summary-row';
+        summary.appendChild(row);
         const samples = document.createElement('div');
         samples.className = 'summary-samples';
         try {{
@@ -9051,7 +9301,6 @@ function render() {{
           console.error('[render] samples strip failed for', name, stripErr);
           samples.innerHTML = `<div class="render-error" style="padding:8px;color:#ffaaaa;font-family:monospace;font-size:12px;">Samples render failed: ${{escapeHtml(String(stripErr && stripErr.message || stripErr))}}</div>`;
         }}
-        summary.appendChild(row);
         summary.appendChild(samples);
         card.appendChild(summary);
       }}
@@ -9084,7 +9333,7 @@ function render() {{
   try {{
     const add = document.createElement('div');
     add.className = 'addclass';
-    add.innerHTML = '<span style="font-size:18px;">⊞</span><span>Add a class</span>';
+    add.innerHTML = `<span class="addclass-icon">${{createIcon('plus')}}</span><span>Add a class</span>`;
     add.onclick = () => addClass();
     root.appendChild(add);
 
@@ -9184,6 +9433,21 @@ function render() {{
     const setModal = document.getElementById('globalSettingsModal');
     if (setModal) setModal.onclick = (e) => {{
       if (e && e.target === setModal) closeGlobalSettings();
+    }};
+    // Preferences button + modal bindings
+    const navPrefs = document.getElementById('navPreferences');
+    if (navPrefs) navPrefs.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      closeToolbarDropdowns();
+      openPreferences();
+    }};
+    const prefCancel = document.getElementById('prefCancel');
+    if (prefCancel) prefCancel.onclick = (e) => {{ if (e) e.stopPropagation(); closePreferences(); }};
+    const prefSave = document.getElementById('prefSave');
+    if (prefSave) prefSave.onclick = (e) => {{ if (e) e.stopPropagation(); savePreferences(); }};
+    const prefModal = document.getElementById('preferencesModal');
+    if (prefModal) prefModal.onclick = (e) => {{
+      if (e && e.target === prefModal) closePreferences();
     }};
     if (navOpen) navOpen.onclick = async (e) => {{
       if (e) e.stopPropagation();
