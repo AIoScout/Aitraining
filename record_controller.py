@@ -764,84 +764,169 @@ class RecordController:
             )
             return
         if path == "/export/pick_dir":
-            if sys.platform != "darwin":
-                _send_json(req, {"ok": "0", "error": "unsupported"}, status=400, cors=True)
-                return
-            try:
-                script = 'POSIX path of (choose folder with prompt "Export folder")'
-                proc = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if proc.returncode != 0:
-                    _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
+            picked: Optional[str] = None
+            if sys.platform == "darwin":
+                try:
+                    script = 'POSIX path of (choose folder with prompt "Export folder")'
+                    proc = subprocess.run(
+                        ["osascript", "-e", script],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if proc.returncode == 0:
+                        out = (proc.stdout or "").strip()
+                        if out:
+                            picked = out
+                except Exception:
+                    picked = None
+            if not picked:
+                try:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                except Exception as e2:
+                    _send_json(req, {"ok": "0", "error": "no-picker: " + str(e2)}, status=400, cors=True)
                     return
-                picked = (proc.stdout or "").strip()
-                if not picked:
-                    _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
-                    return
-                _send_json(req, {"ok": "1", "export_dir": picked}, cors=True)
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    root.attributes("-topmost", True)
+                except Exception:
+                    pass
+                try:
+                    initial = str(Path.home() / "Documents")
+                    try:
+                        initial = str(Path.home() / "Desktop")
+                    except Exception:
+                        pass
+                    path = filedialog.askdirectory(title="Export folder", initialdir=initial)
+                finally:
+                    try:
+                        root.destroy()
+                    except Exception:
+                        pass
+                if path:
+                    picked = path
+            if not picked:
+                _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
                 return
-            except Exception as e:
-                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
-                return
+            _send_json(req, {"ok": "1", "export_dir": picked}, cors=True)
+            return
         if path == "/project/pick_save":
-            if sys.platform != "darwin":
-                _send_json(req, {"ok": "0", "error": "unsupported"}, status=400, cors=True)
-                return
-            try:
-                script = 'POSIX path of (choose file name with prompt "Save Project" default name "project.tmproj")'
-                proc = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if proc.returncode != 0:
-                    _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
+            picked: Optional[str] = None
+            if sys.platform == "darwin":
+                try:
+                    script = 'POSIX path of (choose file name with prompt "Save Project" default name "project.tmproj")'
+                    proc = subprocess.run(
+                        ["osascript", "-e", script],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if proc.returncode == 0:
+                        out = (proc.stdout or "").strip()
+                        if out:
+                            picked = out
+                except Exception:
+                    picked = None
+            if not picked:
+                try:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                except Exception as e2:
+                    _send_json(req, {"ok": "0", "error": "no-picker: " + str(e2)}, status=400, cors=True)
                     return
-                picked = (proc.stdout or "").strip()
-                if not picked:
-                    _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
-                    return
-                p = Path(picked).expanduser()
-                if p.suffix.lower() != ".tmproj":
-                    p = p.with_suffix(".tmproj")
-                _send_json(req, {"ok": "1", "save_path": str(p)}, cors=True)
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    root.attributes("-topmost", True)
+                except Exception:
+                    pass
+                try:
+                    initial = str(Path.home() / "Documents")
+                    try:
+                        initial = str(Path.home() / "Desktop")
+                    except Exception:
+                        pass
+                    path = filedialog.asksaveasfilename(
+                        title="Save Project",
+                        defaultextension=".tmproj",
+                        initialfile="project.tmproj",
+                        initialdir=initial,
+                        filetypes=[("Teachable Machine Project", "*.tmproj")],
+                    )
+                finally:
+                    try:
+                        root.destroy()
+                    except Exception:
+                        pass
+                if path:
+                    picked = path
+            if not picked:
+                _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
                 return
-            except Exception as e:
-                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
-                return
+            p = Path(picked).expanduser()
+            if p.suffix.lower() != ".tmproj":
+                p = p.with_suffix(".tmproj")
+            _send_json(req, {"ok": "1", "save_path": str(p)}, cors=True)
+            return
         if path == "/project/pick_open":
-            if sys.platform != "darwin":
-                _send_json(req, {"ok": "0", "error": "unsupported"}, status=400, cors=True)
-                return
-            try:
-                script = 'POSIX path of (choose file with prompt "Open Project")'
-                proc = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if proc.returncode != 0:
-                    _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
+            picked2: Optional[str] = None
+            if sys.platform == "darwin":
+                try:
+                    script = 'POSIX path of (choose file with prompt "Open Project")'
+                    proc = subprocess.run(
+                        ["osascript", "-e", script],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if proc.returncode == 0:
+                        out = (proc.stdout or "").strip()
+                        if out:
+                            picked2 = out
+                except Exception:
+                    picked2 = None
+            if not picked2:
+                try:
+                    import tkinter as tk
+                    from tkinter import filedialog
+                except Exception as e2:
+                    _send_json(req, {"ok": "0", "error": "no-picker: " + str(e2)}, status=400, cors=True)
                     return
-                picked = (proc.stdout or "").strip()
-                if not picked:
-                    _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
-                    return
-                p = Path(picked).expanduser()
-                if p.suffix.lower() != ".tmproj":
-                    _send_json(req, {"ok": "0", "error": "not a .tmproj file"}, status=400, cors=True)
-                    return
-                _send_json(req, {"ok": "1", "open_path": str(p)}, cors=True)
+                root = tk.Tk()
+                root.withdraw()
+                try:
+                    root.attributes("-topmost", True)
+                except Exception:
+                    pass
+                try:
+                    initial = str(Path.home() / "Documents")
+                    try:
+                        initial = str(Path.home() / "Desktop")
+                    except Exception:
+                        pass
+                    path = filedialog.askopenfilename(
+                        title="Open Project",
+                        initialdir=initial,
+                        filetypes=[("Teachable Machine Project", "*.tmproj")],
+                    )
+                finally:
+                    try:
+                        root.destroy()
+                    except Exception:
+                        pass
+                if path:
+                    picked2 = path
+            if not picked2:
+                _send_json(req, {"ok": "0", "canceled": "1"}, cors=True)
                 return
-            except Exception as e:
-                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+            p = Path(picked2).expanduser()
+            if p.suffix.lower() != ".tmproj":
+                _send_json(req, {"ok": "0", "error": "not a .tmproj file"}, status=400, cors=True)
                 return
+            _send_json(req, {"ok": "1", "open_path": str(p)}, cors=True)
+            return
         if path == "/live/capture":
             session_id = (qs.get("session") or [""])[0]
             source = (qs.get("source") or [""])[0]

@@ -283,20 +283,48 @@ def _pick_directory_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
 
 
 def _pick_tmproj_file_dialog() -> Optional[Path]:
-    if sys.platform != "darwin":
-        return None
-    try:
-        proc = subprocess.run(
-            ["osascript", "-e", 'POSIX path of (choose file with prompt "Open Project")'],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return None
-    if proc.returncode != 0:
-        return None
-    picked = (proc.stdout or "").strip()
+    picked: Optional[str] = None
+    if sys.platform == "darwin":
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", 'POSIX path of (choose file with prompt "Open Project")'],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                out = (proc.stdout or "").strip()
+                if out:
+                    picked = out
+        except Exception:
+            picked = None
+
+    if not picked:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception:
+            return None
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            path = filedialog.askopenfilename(
+                title="Open Project",
+                filetypes=[("Teachable Machine Project", "*.tmproj")],
+                initialdir=str(_documents_dir()),
+            )
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        if path:
+            picked = path
+
     if not picked:
         return None
     p = Path(picked).expanduser()
@@ -454,6 +482,8 @@ def _init_session() -> None:
         st.session_state.tm_frontend_notice = ""
     if "tm_return_target" not in st.session_state:
         st.session_state.tm_return_target = "home"
+    if "tm_current_project_path" not in st.session_state:
+        st.session_state.tm_current_project_path = None
 
 
 def _restore_last_session_id() -> str:
@@ -529,6 +559,7 @@ def _reset_session_workspace() -> None:
     st.session_state.tm_webcam_index = 0
     st.session_state.tm_webcam_id = ""
     st.session_state.tm_webcam_user_selected = False
+    st.session_state.tm_current_project_path = None
 
 
 def _begin_fresh_tm_session() -> str:
@@ -1037,167 +1068,159 @@ def _render_new_project() -> None:
     # #region debug-point B:render-new-project
     _dbg_open_project_layout("B", "pre-fix", "app.py:_render_new_project", "[DEBUG] render new project page", {"session": str(st.session_state.get("session_id", "")), "project_type": str(st.session_state.get("project_type", "")), "query": dict(st.query_params) if hasattr(st, "query_params") else {}})
     # #endregion
+    import textwrap as _tw_dedent_helper
+    import base64 as _b64_helper
     inject_teachable_style()
+    _icon_b64 = ""
+    try:
+        with open(os.path.join(os.path.dirname(__file__) or ".", "AIoScouts.png"), "rb") as _ifh:
+            _icon_b64 = _b64_helper.b64encode(_ifh.read()).decode()
+    except Exception:
+        pass
+    _hero_icon_html = (
+        f'<img src="data:image/png;base64,{_icon_b64}" style="width:100%;height:100%;object-fit:contain;" alt="AIoScouts" />'
+        if _icon_b64
+        else '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="100%" height="100%"><circle cx="12" cy="12" r="2"/></svg>'
+    )
+    st.markdown('<div class="tm-image-project-hero-marker"></div>', unsafe_allow_html=True)
     st.markdown(
-        '''
-<div class="tm-hero">
-  <div class="tm-hero-grid">
-    <div class="tm-hero-copy">
-      <div class="tm-eyebrow">Desktop AI Trainer</div>
-      <h2>Build classroom-friendly image models without touching code.</h2>
-      <p>Inspired by Google Teachable Machine, with a desktop-first workflow for importing data, training, and exporting TFLite + C sources.</p>
-      <div class="tm-chip-row">
+        _tw_dedent_helper.dedent('''
+        <div style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:40px;margin-bottom:2rem;display:flex;flex-direction:row;justify-content:space-between;align-items:center;gap:40px;position:relative;overflow:hidden;">
+        <div style="flex:1;min-width:500px;z-index:2;">
+        <h2 style="margin:0 0 8px 0;font-size:14px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:1.5px;">Desktop AI Training</h2>
+        <h1 style="margin:0 0 16px 0;font-size:2.8rem;font-weight:800;color:#0F172A;letter-spacing:-1px;line-height:1.1;">TFLite Training</h1>
+        <p style="margin:0 0 28px 0;max-width:540px;line-height:1.6;color:#475569;font-size:15px;">Build classroom-friendly image models without touching code. Inspired by Google Teachable Machine, with a desktop-first workflow for importing data, training, and exporting TFLite + C sources.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:40px;">
         <span class="tm-chip">Import local images</span>
         <span class="tm-chip">Capture from webcam</span>
         <span class="tm-chip">Train lightweight CNN</span>
         <span class="tm-chip">Export .tflite + model.cpp</span>
-      </div>
-    </div>
-    <div class="tm-hero-panel">
-      <h4>Recommended flow</h4>
-      <div class="tm-stat-grid">
-        <div class="tm-stat">
-          <div class="tm-stat-label">1</div>
-          <div class="tm-stat-value">Collect</div>
-          <div class="tm-stat-note">Import images or capture samples</div>
         </div>
-        <div class="tm-stat">
-          <div class="tm-stat-label">2</div>
-          <div class="tm-stat-value">Label</div>
-          <div class="tm-stat-note">Organize data by class</div>
+        <div style="border-top:1px solid #E2E8F0;padding-top:32px;display:flex;flex-direction:column;align-items:flex-start;">
+        <div style="font-size:11px !important;text-transform:uppercase;letter-spacing:1.5px;color:#64748B;font-weight:700;margin-bottom:16px;line-height:1;">Recommended Workflow</div>
+        <div style="display:flex;flex-direction:row;align-items:center;gap:14px;">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="background:#E0E7FF;color:#3169FF;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">1</span><span style="font-weight:600;font-size:14px;color:#1E293B;line-height:1;">Collect</span></div>
+        <span style="display:flex;align-items:center;color:#CBD5E1;font-size:14px;line-height:1;margin-top:-1px;">➔</span>
+        <div style="display:flex;align-items:center;gap:8px;"><span style="background:#E0E7FF;color:#3169FF;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">2</span><span style="font-weight:600;font-size:14px;color:#1E293B;line-height:1;">Label</span></div>
+        <span style="display:flex;align-items:center;color:#CBD5E1;font-size:14px;line-height:1;margin-top:-1px;">➔</span>
+        <div style="display:flex;align-items:center;gap:8px;"><span style="background:#E0E7FF;color:#3169FF;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">3</span><span style="font-weight:600;font-size:14px;color:#1E293B;line-height:1;">Train</span></div>
+        <span style="display:flex;align-items:center;color:#CBD5E1;font-size:14px;line-height:1;margin-top:-1px;">➔</span>
+        <div style="display:flex;align-items:center;gap:8px;"><span style="background:#E0E7FF;color:#3169FF;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">4</span><span style="font-weight:600;font-size:14px;color:#1E293B;line-height:1;">Export</span></div>
         </div>
-        <div class="tm-stat">
-          <div class="tm-stat-label">3</div>
-          <div class="tm-stat-value">Train</div>
-          <div class="tm-stat-note">Train and quantize to int8 TFLite</div>
         </div>
-        <div class="tm-stat">
-          <div class="tm-stat-label">4</div>
-          <div class="tm-stat-value">Export</div>
-          <div class="tm-stat-note">Export files ready for MCU integration</div>
         </div>
-      </div>
-    </div>
-  </div>
-</div>
+        <div style="position:absolute;right:20px;top:40px;width:280px;height:280px;opacity:0.04;z-index:1;pointer-events:none;">
+        __HERO_ICON__
+        </div>
+        </div>
+        ''').strip().replace("__HERO_ICON__", _hero_icon_html),
+        unsafe_allow_html=True,
+    )
+
+    # Section header bridging the top panel and the project card grid
+    st.markdown(
+        '''
+        <div style="margin-top:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:8px;">
+            <h3 style="margin:0;font-size:20px;font-weight:700;color:#1E293B;letter-spacing:-0.5px;">
+                ✨ Choose a project type
+            </h3>
+        </div>
         ''',
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    card_col1, card_col2, card_col3 = st.columns([1, 1, 1], gap="large")
+    with card_col1:
         st.markdown(
-            '''
-<div class="tm-card">
-  <div class="tm-eyebrow">Ready now</div>
-  <h3>Image Project</h3>
-  <p>Build an image classification model from images, webcam, or device stream.</p>
-  <div class="tm-card-footnote">Great for classroom demos and local training.</div>
-</div>
-            ''',
+            _tw_dedent_helper.dedent('''
+            <div class="tm-start-card">
+            <div class="tm-start-card-head">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+            <h3 style="margin:0;padding:0;font-size:22px;font-weight:800;">Image Project</h3>
+            <span style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
+            </div>
+            <p>Build an image classification model from images, webcam, or ESP32-P4 device stream. Great for classroom demos and local training for tinyML MCU deployment.</p>
+            </div>
+            </div>
+            ''').strip(),
             unsafe_allow_html=True,
         )
-        with st.popover("Open Image Project", use_container_width=True):
-            st.markdown("Choose a start mode")
-            if st.button("Start from empty", key="tm_start_empty", type="primary", use_container_width=True):
-                _begin_fresh_tm_session()
-                st.session_state.tm_return_target = "home"
-                st.session_state.project_type = "image"
-                st.session_state.step = 0
-                _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
-                st.rerun()
-            if st.button("Start from classified class", key="tm_start_classified", use_container_width=True):
-                _begin_fresh_tm_session()
-                st.session_state.tm_return_target = "classified-import"
-                st.session_state.project_type = "image_classified_import"
-                st.session_state.step = 0
-                _tm_set_query_params(tm_project="image_classified_import", tm_session=st.session_state.session_id)
-                st.rerun()
-        with st.popover("Open Project", use_container_width=True):
-            st.markdown("Open a saved .tmproj file")
-            if st.button("Open .tmproj", key="tm_open_tmproj", type="primary", use_container_width=True):
-                p = _pick_tmproj_file_dialog()
-                if not p:
-                    st.warning("No file selected.")
-                    st.stop()
-                manifest = _tmproj_read_manifest(p)
-                ptype = _tmproj_detect_project_type(p, manifest)
-                if ptype != "image":
-                    st.error(f"Unsupported project type: {ptype}")
-                    st.stop()
-                # #region debug-point A:home-open-project-click
-                _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project selected file", {"picked_path": str(p), "project_type": str(ptype), "session_before_fresh": str(st.session_state.get("session_id", ""))})
-                # #endregion
-                _begin_fresh_tm_session()
-                st.session_state.tm_return_target = "home"
-                controller = _ensure_fresh_record_controller()
-                controller.set_config(
-                    st.session_state.session_id,
-                    SessionConfig(
-                        dataset_root=_tm_dataset_dir(),
-                        serial_port=st.session_state.tm_serial_port,
-                        serial_baud=int(st.session_state.tm_serial_baud),
-                        serial_sync=str(st.session_state.tm_serial_sync),
-                        serial_frame_side=int(st.session_state.tm_serial_frame_side),
-                        serial_channels=int(st.session_state.tm_serial_channels),
-                        webcam_index=int(st.session_state.tm_webcam_index),
-                        webcam_id=str(st.session_state.get("tm_webcam_id") or ""),
-                        img_size=int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96),
-                        fps=float(st.session_state.tm_record_fps),
-                        crop_box=st.session_state.tm_record_crop_box,
-                    ),
+        if st.button("Get Started", key="tm_get_started", type="primary", use_container_width=True):
+            _begin_fresh_tm_session()
+            st.session_state.tm_return_target = "home"
+            st.session_state.project_type = "image"
+            st.session_state.step = 0
+            _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
+            st.rerun()
+        if st.button("Open Project (.tmproj)", key="tm_open_tmproj", type="secondary", use_container_width=True):
+            p = _pick_tmproj_file_dialog()
+            if not p:
+                st.warning("No file selected.")
+                st.stop()
+            manifest = _tmproj_read_manifest(p)
+            ptype = _tmproj_detect_project_type(p, manifest)
+            if ptype != "image":
+                st.error(f"Unsupported project type: {ptype}")
+                st.stop()
+            # #region debug-point A:home-open-project-click
+            _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project selected file", {"picked_path": str(p), "project_type": str(ptype), "session_before_fresh": str(st.session_state.get("session_id", ""))})
+            # #endregion
+            _begin_fresh_tm_session()
+            st.session_state.tm_return_target = "home"
+            controller = _ensure_fresh_record_controller()
+            controller.set_config(
+                st.session_state.session_id,
+                SessionConfig(
+                    dataset_root=_tm_dataset_dir(),
+                    serial_port=st.session_state.tm_serial_port,
+                    serial_baud=int(st.session_state.tm_serial_baud),
+                    serial_sync=str(st.session_state.tm_serial_sync),
+                    serial_frame_side=int(st.session_state.tm_serial_frame_side),
+                    serial_channels=int(st.session_state.tm_serial_channels),
+                    webcam_index=int(st.session_state.tm_webcam_index),
+                    webcam_id=str(st.session_state.get("tm_webcam_id") or ""),
+                    img_size=int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96),
+                    fps=float(st.session_state.tm_record_fps),
+                    crop_box=st.session_state.tm_record_crop_box,
+                ),
+            )
+            state = controller._project_open(st.session_state.session_id, p)
+            # #region debug-point A:home-open-project-after-open
+            _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project restored state", {"session": str(st.session_state.session_id), "classes": list(state.get("classes") or []), "count_keys": list((state.get("counts") or {}).keys())})
+            # #endregion
+            st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
+            st.session_state.tm_preview_dark_thresh = 0
+            st.session_state.tm_preview_lum_thresh = 100
+            train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
+            if isinstance(train_cfg_state, dict):
+                prev_cfg = st.session_state.train_cfg
+                st.session_state.train_cfg = TrainConfig(
+                    img_size=int(getattr(prev_cfg, "img_size", 96)),
+                    color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
+                    batch_size=int(train_cfg_state.get("batch_size", getattr(prev_cfg, "batch_size", 16))),
+                    epochs=int(train_cfg_state.get("epochs", getattr(prev_cfg, "epochs", 10))),
+                    validation_split=float(train_cfg_state.get("validation_split", getattr(prev_cfg, "validation_split", 0.2))),
+                    seed=int(getattr(prev_cfg, "seed", 42)),
+                    optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
+                    learning_rate=float(train_cfg_state.get("learning_rate", getattr(prev_cfg, "learning_rate", 0.001))),
+                    conv1_filters=int(train_cfg_state.get("conv1_filters", getattr(prev_cfg, "conv1_filters", 32))),
+                    conv2_filters=int(train_cfg_state.get("conv2_filters", getattr(prev_cfg, "conv2_filters", 64))),
+                    dense_units=int(train_cfg_state.get("dense_units", getattr(prev_cfg, "dense_units", 128))),
+                    representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
+                    preprocess_mode=str(train_cfg_state.get("preprocess_mode", getattr(prev_cfg, "preprocess_mode", "auto_by_label"))),
+                    manual_roi=train_cfg_state.get("manual_roi", getattr(prev_cfg, "manual_roi", None)),
                 )
-                state = controller._project_open(st.session_state.session_id, p)
-                # #region debug-point A:home-open-project-after-open
-                _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project restored state", {"session": str(st.session_state.session_id), "classes": list(state.get("classes") or []), "count_keys": list((state.get("counts") or {}).keys())})
-                # #endregion
-                st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
-                st.session_state.tm_preview_dark_thresh = 0
-                st.session_state.tm_preview_lum_thresh = 100
-                train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
-                if isinstance(train_cfg_state, dict):
-                    prev_cfg = st.session_state.train_cfg
-                    st.session_state.train_cfg = TrainConfig(
-                        img_size=int(getattr(prev_cfg, "img_size", 96)),
-                        color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
-                        batch_size=int(train_cfg_state.get("batch_size", getattr(prev_cfg, "batch_size", 16))),
-                        epochs=int(train_cfg_state.get("epochs", getattr(prev_cfg, "epochs", 10))),
-                        validation_split=float(train_cfg_state.get("validation_split", getattr(prev_cfg, "validation_split", 0.2))),
-                        seed=int(getattr(prev_cfg, "seed", 42)),
-                        optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
-                        learning_rate=float(train_cfg_state.get("learning_rate", getattr(prev_cfg, "learning_rate", 0.001))),
-                        conv1_filters=int(train_cfg_state.get("conv1_filters", getattr(prev_cfg, "conv1_filters", 32))),
-                        conv2_filters=int(train_cfg_state.get("conv2_filters", getattr(prev_cfg, "conv2_filters", 64))),
-                        dense_units=int(train_cfg_state.get("dense_units", getattr(prev_cfg, "dense_units", 128))),
-                        representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
-                        preprocess_mode=str(train_cfg_state.get("preprocess_mode", getattr(prev_cfg, "preprocess_mode", "auto_by_label"))),
-                        manual_roi=train_cfg_state.get("manual_roi", getattr(prev_cfg, "manual_roi", None)),
-                    )
-                st.session_state.project_type = "image"
-                _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
-                st.rerun()
-    with c2:
-        st.markdown(
-            '''
-<div class="tm-card">
-  <div class="tm-eyebrow">Roadmap</div>
-  <h3>Audio Project <span class="tm-badge">Coming soon</span></h3>
-  <p>Planned: microphone sampling and audio classification for voice commands.</p>
-</div>
-            ''',
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            '''
-<div class="tm-card">
-  <div class="tm-eyebrow">Roadmap</div>
-  <h3>Pose Project <span class="tm-badge">Coming soon</span></h3>
-  <p>Planned: pose and gesture projects for interactive demos.</p>
-</div>
-            ''',
-            unsafe_allow_html=True,
-        )
+            st.session_state.project_type = "image"
+            st.session_state.tm_current_project_path = str(p)
+            _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
+            st.rerun()
+        if st.button("Import classified class", key="tm_start_classified", type="secondary", use_container_width=True):
+            _begin_fresh_tm_session()
+            st.session_state.tm_return_target = "classified-import"
+            st.session_state.project_type = "image_classified_import"
+            st.session_state.step = 0
+            _tm_set_query_params(tm_project="image_classified_import", tm_session=st.session_state.session_id)
+            st.rerun()
 
 
 def _tm_train_recommendations(cfg: TrainConfig) -> Dict[str, Any]:
@@ -1628,6 +1651,7 @@ def _render_tm_old_frontend_html(
             "manual_roi": list(getattr(train_cfg, "manual_roi", []) or []) or None,
         },
         "train_rec": _tm_train_recommendations(train_cfg),
+        "current_project_path": str(st.session_state.get("tm_current_project_path") or "") or None,
     }
     debug_server_url = None
     debug_session_id = None
@@ -1773,6 +1797,270 @@ def _render_tm_old_frontend_html(
       background: rgba(0,0,0,0.08);
       margin: 6px 0;
     }}
+    /* ── Problem 2+3.2: persistent segmented Toolbar (replaces topnav card) ── */
+    .wrap {{
+      padding-top: 86px;
+    }}
+    .topnav {{
+      position: absolute;
+      top: 10px;
+      left: 16px;
+      right: 16px;
+      width: calc(100% - 32px);
+      border-radius: 12px;
+      padding: 6px 10px;
+      background: var(--card);
+      border: 1px solid rgba(0,0,0,0.06);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      z-index: 1000;
+      cursor: default;
+      box-shadow: var(--shadow);
+    }}
+    .tm-toolbar-brand {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px 6px 6px;
+      border-right: 1px solid rgba(0,0,0,0.08);
+      margin-right: 2px;
+      color: var(--text);
+      font-weight: 800;
+      font-size: 14px;
+    }}
+    .tm-toolbar-brand img {{
+      width: 22px; height: 22px; object-fit: contain; border-radius: 4px; display:block;
+    }}
+    .tm-toolbar-menu {{
+      position: relative;
+      display: inline-flex;
+      align-items: stretch;
+    }}
+    .tm-toolbar-btn {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border: 0;
+      background: transparent;
+      border-radius: 8px;
+      color: var(--text);
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .tm-toolbar-btn:hover {{ background: rgba(0,0,0,0.05); }}
+    .tm-toolbar-btn.danger {{ color: #b42318; }}
+    .tm-toolbar-btn.primary {{ color: var(--blue); font-weight: 700; }}
+    .tm-toolbar-btn .kbd {{
+      font-size: 10.5px;
+      padding: 1px 5px;
+      background: rgba(0,0,0,0.06);
+      border-radius: 4px;
+      color: var(--muted);
+      margin-left: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 600;
+    }}
+    .tm-toolbar-dropdown {{
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 280px;
+      background: var(--card);
+      border: 1px solid rgba(0,0,0,0.08);
+      border-radius: 10px;
+      padding: 6px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.14);
+      z-index: 1002;
+      display: none;
+      flex-direction: column;
+    }}
+    .tm-toolbar-dropdown.open {{ display: flex; }}
+    .tm-toolbar-dropdown button {{
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 0;
+      background: transparent;
+      padding: 9px 10px;
+      border-radius: 7px;
+      cursor: pointer;
+      color: var(--text);
+      text-align: left;
+      font-weight: 600;
+      font-size: 13px;
+    }}
+    .tm-toolbar-dropdown button:hover {{ background: rgba(0,0,0,0.05); }}
+    .tm-toolbar-dropdown button.danger {{ color: #b42318; }}
+    .tm-toolbar-dropdown .dd-sep {{
+      height:1px; background: rgba(0,0,0,0.08); margin: 4px 4px;
+    }}
+    .tm-toolbar-sep {{
+      width: 1px;
+      background: rgba(0,0,0,0.08);
+      align-self: stretch;
+      margin: 6px 4px;
+    }}
+    .tm-toolbar-spacer {{ flex: 1 1 auto; }}
+    .tm-toolbar-return {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border: 1px solid rgba(0,0,0,0.1);
+      background: rgba(0,0,0,0.02);
+      border-radius: 8px;
+      color: var(--text);
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+    }}
+    .tm-toolbar-return:hover {{ background: rgba(0,0,0,0.06); }}
+    /* Legacy navmenu (the old floating dropdown) is visually hidden but kept
+       so JS bindings fail-safe (it will never open because topnav.onclick no
+       longer calls toggleNavMenu — but its buttons still have the IDs). */
+    .navmenu {{ display: none !important; }}
+    /* ── Settings SSOT Modal (Problem 3.2) ── */
+    .tm-settings-modal {{
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 14, 22, 0.45);
+      z-index: 2000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }}
+    .tm-settings-modal.open {{ display: flex; }}
+    .tm-settings-card {{
+      width: min(720px, 100%);
+      max-height: calc(100vh - 40px);
+      overflow: auto;
+      background: var(--card);
+      border-radius: 14px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.28);
+      padding: 22px 24px 18px;
+    }}
+    .tm-settings-head {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }}
+    .tm-settings-head h3 {{
+      margin: 0;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }}
+    .tm-settings-head p {{ margin: 4px 0 0; color: var(--muted); font-size: 13px; }}
+    .tm-settings-grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px 20px;
+    }}
+    .tm-settings-field label {{
+      display: block;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--muted);
+      margin: 0 0 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }}
+    .tm-settings-field select,
+    .tm-settings-field input[type="number"],
+    .tm-settings-field input[type="text"] {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 9px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(0,0,0,0.12);
+      background: var(--surface-soft);
+      color: var(--text);
+      font-size: 13.5px;
+    }}
+    .tm-settings-foot {{
+      margin-top: 20px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      border-top: 1px solid rgba(0,0,0,0.08);
+      padding-top: 14px;
+    }}
+    .tm-btn {{
+      padding: 9px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      border: 1px solid rgba(0,0,0,0.1);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+    }}
+    .tm-btn:hover {{ background: rgba(0,0,0,0.04); }}
+    .tm-btn.primary {{
+      background: var(--blue);
+      color: #fff;
+      border-color: transparent;
+    }}
+    .tm-btn.primary:hover {{ filter: brightness(0.94); }}
+    /* ── Source chip (Problem 3.2: class card compact source indicator) ── */
+    .tm-source-chip-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 4px 4px;
+    }}
+    .tm-source-chip {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.04);
+      color: var(--text);
+      font-size: 11.5px;
+      font-weight: 600;
+    }}
+    .tm-source-chip .chip-icon,
+    .tm-source-chip .tm-chip-icon {{ font-size: 13px; line-height: 1; }}
+    .tm-source-chip .tm-chip-text {{ line-height: 1; }}
+    .tm-source-chip.settings-hint,
+    .tm-source-chip.tm-source-chip-settings {{
+      background: color-mix(in srgb, var(--blue) 10%, transparent);
+      color: var(--blue);
+      cursor: pointer;
+      padding: 4px 10px;
+      border: none;
+      font-family: inherit;
+      font-weight: 600;
+    }}
+    .tm-source-chip.settings-hint:hover,
+    .tm-source-chip.tm-source-chip-settings:hover {{ background: color-mix(in srgb, var(--blue) 18%, transparent); }}
+    .tm-rename-btn {{
+      width: auto !important;
+      height: 28px !important;
+      min-width: 72px;
+      padding: 0 10px 0 8px;
+      border-radius: 7px;
+      font-size: 12px;
+      display: inline-flex !important;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.04);
+      color: var(--text);
+      border: 1px solid rgba(0,0,0,0.06);
+    }}
+    .tm-rename-btn:hover {{
+      background: rgba(0,0,0,0.08);
+      color: var(--blue);
+      border-color: color-mix(in srgb, var(--blue) 25%, transparent);
+    }}
     .layout {{
       position: relative;
       display: flex;
@@ -1824,7 +2112,7 @@ def _render_tm_old_frontend_html(
       background: var(--card);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
-      border: none;
+      border: 1px solid #E2E8F0;
     }}
     .class-card {{ padding: 0; position: relative; overflow: hidden; }}
     .class-head {{
@@ -2060,18 +2348,24 @@ def _render_tm_old_frontend_html(
       pointer-events: none;
     }}
     .addclass {{
-      border: 2px dashed rgba(0,0,0,0.15);
+      border: 2px dashed #CBD5E1;
       background: transparent;
-      border-radius: 10px;
-      padding: 18px;
+      border-radius: 12px;
+      padding: 16px;
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 10px;
-      color: var(--muted);
+      color: #475569;
       font-weight: 600;
       cursor: pointer;
       user-select: none;
+      transition: all 0.2s ease;
+    }}
+    .addclass:hover {{
+      border-color: #3169FF;
+      color: #3169FF;
+      background: #F0F4FF;
     }}
     .train-card, .preview-card {{ padding: 16px 18px 18px 18px; position: relative; }}
     .card-head {{
@@ -2983,19 +3277,82 @@ def _render_tm_old_frontend_html(
       .iconbtn:hover {{ background: rgba(255,255,255,0.06); }}
       .divider {{ background: rgba(255,255,255,0.1); }}
       .addclass {{ border-color: rgba(255,255,255,0.2); }}
+      /* Toolbar + settings modal dark overrides (Problem 2+3.2) */
+      .topnav {{ border-color: rgba(255,255,255,0.08); }}
+      .tm-toolbar-brand {{ border-color: rgba(255,255,255,0.1); }}
+      .tm-toolbar-btn:hover {{ background: rgba(255,255,255,0.06); }}
+      .tm-toolbar-btn.danger {{ color: #f28b82; }}
+      .tm-toolbar-btn .kbd {{ background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.6); }}
+      .tm-toolbar-dropdown {{ border-color: rgba(255,255,255,0.1); }}
+      .tm-toolbar-dropdown button:hover {{ background: rgba(255,255,255,0.06); }}
+      .tm-toolbar-dropdown button.danger {{ color: #f28b82; }}
+      .tm-toolbar-dropdown .dd-sep {{ background: rgba(255,255,255,0.1); }}
+      .tm-toolbar-sep {{ background: rgba(255,255,255,0.1); }}
+      .tm-toolbar-return {{ border-color: rgba(255,255,255,0.14); background: rgba(255,255,255,0.03); }}
+      .tm-toolbar-return:hover {{ background: rgba(255,255,255,0.07); }}
+      .tm-settings-modal {{ background: rgba(0,0,0,0.6); }}
+      .tm-settings-card {{ box-shadow: 0 20px 60px rgba(0,0,0,0.55); }}
+      .tm-settings-field select,
+      .tm-settings-field input[type="number"],
+      .tm-settings-field input[type="text"] {{ border-color: rgba(255,255,255,0.14); }}
+      .tm-btn {{ border-color: rgba(255,255,255,0.14); background: rgba(255,255,255,0.03); }}
+      .tm-btn:hover {{ background: rgba(255,255,255,0.08); }}
+      .tm-btn.primary {{ background: var(--blue); color: #0f141a; }}
+      .tm-source-chip {{ background: rgba(255,255,255,0.06); }}
+      .tm-source-chip.settings-hint,
+      .tm-source-chip.tm-source-chip-settings {{ background: rgba(138,180,248,0.14); color: var(--blue); border-color: transparent; }}
+      .tm-source-chip.settings-hint:hover,
+      .tm-source-chip.tm-source-chip-settings:hover {{ background: rgba(138,180,248,0.24); }}
+      .tm-rename-btn {{
+        background: rgba(255,255,255,0.05);
+        color: #d9dee5;
+        border-color: rgba(255,255,255,0.1);
+      }}
+      .tm-rename-btn:hover {{
+        background: rgba(255,255,255,0.1);
+        color: var(--blue);
+        border-color: rgba(138,180,248,0.35);
+      }}
     }}
   </style>
 </head>
 <body>
 <div class="toast" id="toast"></div>
-<div class="topnav" id="goHome"><img src="data:image/png;base64,{_AIO_SCOUTS_LOGO_B64}" alt="AIoScout"/><span>AIoScout</span></div>
+<div class="topnav" id="goHome">
+  <div class="tm-toolbar-brand">
+    <img src="data:image/png;base64,{_AIO_SCOUTS_LOGO_B64}" alt="AIoScout"/>
+    <span>AIoScout</span>
+  </div>
+  <div class="tm-toolbar-menu" id="menuFile">
+    <button type="button" class="tm-toolbar-btn primary" id="menuFileBtn">File ▾</button>
+    <div class="tm-toolbar-dropdown" id="menuFileDropdown">
+      <button type="button" id="navNewProject"><span>📄</span>New project<span class="kbd">⌘N</span></button>
+      <button type="button" id="navOpenProject"><span>📂</span>Open project<span class="kbd">⌘O</span></button>
+      <div class="dd-sep"></div>
+      <button type="button" id="navSaveProject"><span>💾</span>Save<span class="kbd">⌘S</span></button>
+      <button type="button" id="navSaveAsProject"><span>📥</span>Save as<span class="kbd">⇧⌘S</span></button>
+      <div class="dd-sep"></div>
+      <button type="button" id="navExportDataset"><span>📦</span>Export dataset</button>
+    </div>
+  </div>
+  <div class="tm-toolbar-menu" id="menuEdit">
+    <button type="button" class="tm-toolbar-btn" id="menuEditBtn">Edit ▾</button>
+    <div class="tm-toolbar-dropdown" id="menuEditDropdown">
+      <button type="button" class="danger" id="navResetProject"><span>♻</span>Reset project</button>
+    </div>
+  </div>
+  <button type="button" class="tm-toolbar-btn" id="navSettings" title="Global input settings (camera, serial, FPS, frame)">⚙ Settings</button>
+  <div class="tm-toolbar-sep"></div>
+  <div class="tm-toolbar-spacer"></div>
+  <button type="button" class="tm-toolbar-return" id="navReturn">← Return Home</button>
+</div>
 <div class="navmenu" id="navMenu">
-  <button type="button" id="navOpenProject">Open project</button>
-  <button type="button" id="navSaveProject">Save project</button>
-  <button type="button" id="navExportDataset">Export dataset</button>
-  <button type="button" id="navReturn">Return</button>
+  <button type="button">Open project</button>
+  <button type="button">Save project</button>
+  <button type="button">Export dataset</button>
+  <button type="button">Return</button>
   <div class="divider"></div>
-  <button type="button" class="danger" id="navResetProject">Reset project</button>
+  <button type="button" class="danger">Reset project</button>
 </div>
 <div class="modal-backdrop" id="advancedModal">
   <div class="modal">
@@ -3021,6 +3378,63 @@ def _render_tm_old_frontend_html(
   </div>
 </div>
 <div class="modal-backdrop" id="classPreprocessModal"></div>
+<!-- Problem 3.2: Global Input Settings (Single Source of Truth) -->
+<div class="tm-settings-modal" id="globalSettingsModal" role="dialog" aria-modal="true">
+  <div class="tm-settings-card">
+    <div class="tm-settings-head">
+      <div>
+        <h3>Input Settings</h3>
+        <p>Configure webcam, serial device, and capture parameters. Applied globally to all class cards.</p>
+      </div>
+    </div>
+    <div class="tm-settings-grid">
+      <div class="tm-settings-field">
+        <label>Webcam</label>
+        <select id="settingsWebcam"></select>
+      </div>
+      <div class="tm-settings-field">
+        <label>Capture FPS</label>
+        <input id="settingsFps" type="number" min="1" max="60" step="0.5"/>
+      </div>
+      <div class="tm-settings-field">
+        <label>Serial Device (port)</label>
+        <select id="settingsSerialPort">
+          <option value="">— Not connected —</option>
+        </select>
+      </div>
+      <div class="tm-settings-field">
+        <label>Baud rate</label>
+        <select id="settingsSerialBaud">
+          <option value="9600">9600</option>
+          <option value="57600">57600</option>
+          <option value="115200">115200 (default)</option>
+          <option value="230400">230400</option>
+          <option value="460800">460800</option>
+          <option value="921600">921600</option>
+        </select>
+      </div>
+      <div class="tm-settings-field">
+        <label>Frame side (pixels)</label>
+        <input id="settingsFrameSide" type="number" min="32" max="512" step="16"/>
+      </div>
+      <div class="tm-settings-field">
+        <label>Channels</label>
+        <select id="settingsChannels">
+          <option value="1">1 — Grayscale</option>
+          <option value="3">3 — RGB Color</option>
+        </select>
+      </div>
+      <div class="tm-settings-field" style="grid-column: 1 / -1;">
+        <label>Frame sync word (hex, space separated)</label>
+        <input id="settingsSerialSync" type="text" placeholder="AA 55 AA"/>
+      </div>
+    </div>
+    <div class="tm-settings-foot">
+      <button type="button" class="tm-btn" id="settingsCancel">Cancel</button>
+      <button type="button" class="tm-btn primary" id="settingsSave">Save changes</button>
+    </div>
+  </div>
+</div>
 <div class="wrap">
   <svg class="flow" viewBox="0 0 1200 700" preserveAspectRatio="none" aria-hidden="true">
     <path id="flowClass1" d="" />
@@ -3155,6 +3569,7 @@ def _render_tm_old_frontend_html(
 <script>
 const STATE = {data};
 STATE.trainClassAccuracies = null;
+STATE.currentProjectPath = STATE.current_project_path || null;
 const baseUrl = `http://127.0.0.1:${{STATE.port}}`;
 if (window.__tmStageMark) window.__tmStageMark('script-start');
 function dbgEvent(hypothesisId, location, msg, data) {{
@@ -5481,13 +5896,133 @@ function renderNavMenu() {{
     window.requestAnimationFrame(() => updateFlow());
   }} catch (e) {{}}
 }}
+function closeToolbarDropdowns() {{
+  try {{
+    const d1 = document.getElementById('menuFileDropdown');
+    const d2 = document.getElementById('menuEditDropdown');
+    if (d1) d1.classList.remove('open');
+    if (d2) d2.classList.remove('open');
+  }} catch (e) {{}}
+}}
 function closeNavMenu() {{
   navMenuOpen = false;
   renderNavMenu();
+  closeToolbarDropdowns();
 }}
 function toggleNavMenu() {{
   navMenuOpen = !navMenuOpen;
   renderNavMenu();
+}}
+function openToolbarDropdown(id) {{
+  closeToolbarDropdowns();
+  const el = document.getElementById(id);
+  if (el) el.classList.add('open');
+}}
+function openGlobalSettings() {{
+  const modal = document.getElementById('globalSettingsModal');
+  if (!modal) return;
+  try {{
+    const wSel = document.getElementById('settingsWebcam');
+    if (wSel && Array.isArray(STATE.webcam_options)) {{
+      wSel.innerHTML = '';
+      STATE.webcam_options.forEach((opt, i) => {{
+        const o = document.createElement('option');
+        o.value = String(opt.index ?? i);
+        o.textContent = String(opt.label || opt.name || `Camera ${{i + 1}}`);
+        if (String(opt.index ?? i) === String(STATE.current_webcam_index ?? 0)) o.selected = true;
+        wSel.appendChild(o);
+      }});
+      if (!wSel.options.length) {{
+        const o = document.createElement('option');
+        o.value = '0'; o.textContent = 'No cameras detected';
+        wSel.appendChild(o);
+      }}
+    }}
+    const pSel = document.getElementById('settingsSerialPort');
+    if (pSel && Array.isArray(STATE.serial_ports)) {{
+      const cur = String(STATE.current_serial_port || '');
+      STATE.serial_ports.forEach((opt) => {{
+        const o = document.createElement('option');
+        o.value = String(opt.path || opt.device || '');
+        const lbl = String(opt.path || opt.device || opt.label || '');
+        const desc = String(opt.description || opt.label || '').trim();
+        o.textContent = desc ? `${{lbl}} (${{desc}})` : lbl || '(unknown)';
+        if (o.value === cur) o.selected = true;
+        pSel.appendChild(o);
+      }});
+      if (!Array.from(pSel.options).some((x) => x.value === '')) {{
+        const o = document.createElement('option');
+        o.value = ''; o.textContent = '— Not connected —';
+        pSel.insertBefore(o, pSel.firstChild);
+        if (!cur) o.selected = true;
+      }}
+    }}
+    const fps = document.getElementById('settingsFps');
+    if (fps) fps.value = Number(STATE.fps ?? 8.0);
+    const bSel = document.getElementById('settingsSerialBaud');
+    if (bSel) {{
+      const v = String(STATE.current_serial_baud ?? 115200);
+      for (const o of Array.from(bSel.options)) {{ if (o.value === v) o.selected = true; }}
+    }}
+    const fs = document.getElementById('settingsFrameSide');
+    if (fs) fs.value = Number(STATE.current_serial_frame_side ?? 96);
+    const ch = document.getElementById('settingsChannels');
+    if (ch) {{
+      const v = String(STATE.current_serial_channels ?? 1);
+      for (const o of Array.from(ch.options)) {{ if (o.value === v) o.selected = true; }}
+    }}
+    const sw = document.getElementById('settingsSerialSync');
+    if (sw) sw.value = String(STATE.current_serial_sync ?? 'AA 55 AA');
+  }} catch (err) {{ console.error('[settings] populate failed', err); }}
+  modal.classList.add('open');
+}}
+function closeGlobalSettings() {{
+  const modal = document.getElementById('globalSettingsModal');
+  if (modal) modal.classList.remove('open');
+}}
+async function saveGlobalSettings() {{
+  try {{
+    const payload = {{}};
+    const wSel = document.getElementById('settingsWebcam');
+    if (wSel) payload.webcam_index = Number(wSel.value);
+    const pSel = document.getElementById('settingsSerialPort');
+    if (pSel) payload.serial_port = String(pSel.value || '');
+    const fps = document.getElementById('settingsFps');
+    if (fps) payload.fps = Math.max(1, Math.min(60, Number(fps.value || 0)));
+    const bSel = document.getElementById('settingsSerialBaud');
+    if (bSel) payload.serial_baud = Number(bSel.value);
+    const fs = document.getElementById('settingsFrameSide');
+    if (fs) payload.serial_frame_side = Math.max(32, Math.min(512, Number(fs.value || 96)));
+    const ch = document.getElementById('settingsChannels');
+    if (ch) payload.serial_channels = Number(ch.value);
+    const sw = document.getElementById('settingsSerialSync');
+    if (sw) payload.serial_sync = String(sw.value || 'AA 55 AA').trim().toUpperCase() || 'AA 55 AA';
+    // Write through the canonical action dispatcher so the host Streamlit
+    // state updates, the controller reconfigures, and a re-render happens.
+    const anyChanged = true;
+    if (payload.webcam_index != null && payload.webcam_index !== Number(STATE.current_webcam_index)) {{
+      setAction('set_webcam_index', {{ index: String(payload.webcam_index) }});
+    }}
+    const serialActions = [];
+    if (payload.serial_port !== String(STATE.current_serial_port || ''))
+      serialActions.push(['set_serial_port', {{ value: payload.serial_port }}]);
+    if (payload.serial_baud !== Number(STATE.current_serial_baud))
+      serialActions.push(['set_serial_baud', {{ value: String(payload.serial_baud) }}]);
+    if (payload.serial_frame_side !== Number(STATE.current_serial_frame_side))
+      serialActions.push(['set_serial_frame_side', {{ value: String(payload.serial_frame_side) }}]);
+    if (payload.serial_channels !== Number(STATE.current_serial_channels))
+      serialActions.push(['set_serial_channels', {{ value: String(payload.serial_channels) }}]);
+    if (payload.serial_sync !== String(STATE.current_serial_sync || ''))
+      serialActions.push(['set_serial_sync', {{ value: payload.serial_sync }}]);
+    if (payload.fps !== Number(STATE.fps))
+      serialActions.push(['set_fps', {{ value: String(payload.fps) }}]);
+    for (const [a, p] of serialActions) setAction(a, p);
+    closeGlobalSettings();
+    toast('Settings saved.');
+  }} catch (err) {{
+    console.error('[settings] save failed', err);
+    toast(`Settings save failed: ${{String(err && err.message ? err.message : err)}}`);
+  }}
 }}
 function applyProjectState(state) {{
   const s = state && typeof state === 'object' ? state : {{}};
@@ -5564,6 +6099,15 @@ function applyProjectState(state) {{
   persistPreviewState();
   recomputeTrainEnabled();
   refreshTrainRec();
+  STATE.trainClassAccuracies = null;
+  STATE._trained_fingerprint = null;
+  if ('current_project_path' in s) {{
+    if (typeof s.current_project_path === 'string' && s.current_project_path) {{
+      STATE.currentProjectPath = s.current_project_path;
+    }} else {{
+      STATE.currentProjectPath = null;
+    }}
+  }}
   try {{
     document.documentElement.scrollTop = 0;
     document.documentElement.scrollLeft = 0;
@@ -5595,7 +6139,7 @@ async function exportDataset() {{
     toast(String(e && e.message ? e.message : e));
   }}
 }}
-async function saveProject() {{
+async function saveProjectAs() {{
   try {{
     const pickRes = await fetch(`${{baseUrl}}/project/pick_save?session=${{encodeURIComponent(STATE.session)}}`);
     const pick = await pickRes.json().catch(() => ({{ok:'0'}}));
@@ -5624,7 +6168,64 @@ async function saveProject() {{
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Save failed.');
-    toast(`Saved: ${{String(data.save_path || savePath)}}`);
+    const finalPath = String(data.save_path || savePath);
+    STATE.currentProjectPath = finalPath;
+    toast(`Saved: ${{finalPath}}`);
+  }} catch (e) {{
+    toast(String(e && e.message ? e.message : e));
+  }}
+}}
+async function saveProjectQuick() {{
+  const existing = String(STATE.currentProjectPath || '').trim();
+  if (existing) {{
+    try {{
+      const res = await fetch(`${{baseUrl}}/project/save`, {{
+        method: 'POST',
+        headers: {{'Content-Type':'application/json'}},
+        body: JSON.stringify({{
+          session: STATE.session,
+          save_path: existing,
+          project_state: {{
+            train_cfg: Object.assign({{}}, STATE.train_cfg || {{}}, {{
+              class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}})
+            }}),
+            class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}}),
+            sample_preprocess: normalizeSamplePreprocessMap(STATE.sample_preprocess || {{}}),
+            bg_dark_thresh: Number((previewDarkThresh ?? 0)),
+            bg_lum_thresh: Number((previewLumThresh ?? 100))
+          }}
+        }})
+      }});
+      const data = await res.json().catch(() => ({{ok:'0'}}));
+      if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Save failed.');
+      const finalPath = String(data.save_path || existing);
+      STATE.currentProjectPath = finalPath;
+      toast(`Saved: ${{finalPath}}`);
+      return;
+    }} catch (e) {{
+      toast(String(e && e.message ? e.message : e));
+      return;
+    }}
+  }}
+  await saveProjectAs();
+}}
+async function newProject() {{
+  const ok = window.confirm('Start a new project? Unsaved changes will be lost.');
+  if (!ok) return;
+  try {{
+    const res = await fetch(`${{baseUrl}}/project/reset`, {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{session: STATE.session, confirm: '1'}})
+    }});
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'New project failed.');
+    const resetMerged = Object.assign({{}}, data.state || {{}}, {{current_project_path: null}});
+    applyProjectState(resetMerged);
+    render();
+    scheduleLayoutResync();
+    requestShellLayoutRefresh('new-project');
+    toast('New project.');
   }} catch (e) {{
     toast(String(e && e.message ? e.message : e));
   }}
@@ -5664,7 +6265,8 @@ async function openProject() {{
       stateCounts: statePayload.counts || {{}},
     }});
     // #endregion
-    applyProjectState(data.state || {{}});
+    const mergedState = Object.assign({{}}, statePayload, {{current_project_path: openPath}});
+    applyProjectState(mergedState);
     render();
     scheduleLayoutResync();
     requestShellLayoutRefresh('open-project');
@@ -5705,7 +6307,8 @@ async function resetProject() {{
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Reset failed.');
-    applyProjectState(data.state || {{}});
+    const resetMerged = Object.assign({{}}, data.state || {{}}, {{current_project_path: null}});
+    applyProjectState(resetMerged);
     render();
     scheduleLayoutResync();
     requestShellLayoutRefresh('reset-project');
@@ -5768,18 +6371,30 @@ async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arr
 }}
 async function exportModel() {{
   if (!STATE.export_enabled) return;
-  const suggested = defaultExportDir();
-  const picked = window.prompt('Export folder', suggested);
-  if (picked == null) return;
-  exportDir = String(picked || '').trim();
-  if (!exportDir) return;
-  persistExportDir();
+  const exportBtn = document.getElementById('exportBtn');
+  if (exportBtn) exportBtn.disabled = true;
   try {{
-    const data = await exportRunWithOverwriteConfirm(exportDir, 'model', 'g_model');
-    if (!data || data.canceled === '1') return;
-    toast(`Exported to: ${{data.export_dir || exportDir}}`);
+    const pickRes = await fetch(`${{baseUrl}}/export/pick_dir?session=${{encodeURIComponent(STATE.session)}}`);
+    const pick = await pickRes.json().catch(() => ({{ok:'0'}}));
+    if (!pickRes.ok || pick.ok !== '1') {{
+      if (pick && pick.canceled === '1') return;
+      throw new Error(pick.error || 'Unable to choose folder.');
+    }}
+    const chosenDir = String(pick.export_dir || '').trim();
+    if (!chosenDir) return;
+    exportDir = chosenDir;
+    persistExportDir();
+    const runData = await exportRunWithOverwriteConfirm(
+      exportDir,
+      String(exportModelName || 'model'),
+      String(exportArrayName || 'g_model')
+    );
+    if (!runData || runData.canceled === '1') return;
+    toast(`Exported to: ${{String(runData.export_dir || exportDir)}}`);
   }} catch (err) {{
     toast(String(err && err.message ? err.message : err));
+  }} finally {{
+    if (exportBtn) exportBtn.disabled = !STATE.export_enabled;
   }}
 }}
 function showTrainProgress(show, pct, text) {{
@@ -5798,6 +6413,16 @@ function syncTrainUi() {{
   trainBtn.classList.toggle('enabled', !!STATE.train_enabled);
   trainBtn.disabled = !STATE.train_enabled || !!trainInFlight;
 }}
+function datasetFingerprint() {{
+  try {{
+    const cls = Array.isArray(STATE.classes) ? STATE.classes.slice().sort() : [];
+    const counts = STATE.counts && typeof STATE.counts === 'object' ? STATE.counts : {{}};
+    const entries = cls.map((c) => `${{c}}:${{Number(counts[c] || 0)}}`);
+    let total = 0;
+    for (const c of cls) total += Number(counts[c] || 0);
+    return `${{cls.length}}|${{total}}|${{entries.join(';')}}`;
+  }} catch (e) {{ return ''; }}
+}}
 async function startTrain() {{
   if (trainInFlight) return;
   if (!STATE.train_enabled) return;
@@ -5806,6 +6431,9 @@ async function startTrain() {{
   trainPollToken += 1;
   const token = trainPollToken;
   showTrainProgress(true, 0.01, 'Starting...');
+  STATE.trainClassAccuracies = null;
+  STATE.export_enabled = false;
+  renderTrainStatus();
   try {{
     const res = await fetch(`${{baseUrl}}/train/start`, {{
       method: 'POST',
@@ -5848,6 +6476,7 @@ async function startTrain() {{
           showTrainProgress(true, 1.0, 'Failed.');
         }} else {{
           STATE.export_enabled = true;
+          STATE._trained_fingerprint = datasetFingerprint();
           renderTrainStatus();
           // Force the preview pane to re-render (fresh static image / fresh
           // predict loop) so the NEW model is visible immediately.
@@ -7251,21 +7880,19 @@ function renderTrainStatus() {{
   const el = document.getElementById('trainStatus');
   if (!el) return;
   const lines = classAccuracyLines();
+  const staleWarn = (STATE.export_enabled && STATE._trained_fingerprint &&
+                    datasetFingerprint() !== STATE._trained_fingerprint) ? ' ⚠ Stale' : '';
   if (STATE.export_enabled && lines) {{
-    // Keep the inline text SHORT (the training column is narrow — the full
-    // per-class list used to get cut off here).  Hover shows a native
-    // tooltip; clicking opens the dismissible accuracy box (same style as
-    // the "cannot delete class" warning).
-    el.textContent = 'Model Trained · tap for accuracy';
-    el.title = lines.join(' · ');
+    el.textContent = 'Model Trained · tap for accuracy' + staleWarn;
+    el.title = lines.join(' · ') + (staleWarn ? ' | Dataset changed since last training' : '');
     el.style.cursor = 'pointer';
-    el.style.color = lines.some((t) => Number(t.split(': ')[1].replace('%','')) < 80) ? '#c62828' : '#2e7d32';
+    el.style.color = staleWarn ? '#ef6c00' : (lines.some((t) => Number(t.split(': ')[1].replace('%','')) < 80) ? '#c62828' : '#2e7d32');
     el.onclick = () => showClassAccuracyModal();
   }} else {{
-    el.textContent = STATE.export_enabled ? 'Model Trained' : 'Not trained';
-    el.title = '';
+    el.textContent = (STATE.export_enabled ? 'Model Trained' : 'Not trained') + staleWarn;
+    el.title = staleWarn ? 'Dataset changed since last training' : '';
     el.style.cursor = '';
-    el.style.color = '';
+    el.style.color = staleWarn ? '#ef6c00' : '';
     el.onclick = null;
   }}
 }}
@@ -7853,7 +8480,7 @@ function updateFlow() {{
   const trainPreviewPath = document.getElementById('flowTrainPreview');
   const existing = Array.from(svg.querySelectorAll('path[id^="flowClass"]'));
   for (const p of existing) {{
-    const m = String(p.id || '').match(/^flowClass(\d+)$/);
+    const m = String(p.id || '').match(/^flowClass(\\d+)$/);
     if (!m) continue;
     const idx = Number(m[1] || 0);
     if (idx > cards.length) p.remove();
@@ -8263,8 +8890,9 @@ function render() {{
         openClassPreprocessEditor(name);
       }};
       const edit = document.createElement('button');
-      edit.className = 'iconbtn';
-      edit.textContent = '✎';
+      edit.className = 'iconbtn tm-rename-btn';
+      edit.title = 'Rename class';
+      edit.innerHTML = '<span style="font-weight:600">✎</span><span style="font-size:11px;margin-left:4px">Rename</span>';
       edit.onclick = () => renameClass(name);
       title.appendChild(preprocessBtn);
       title.appendChild(edit);
@@ -8336,36 +8964,54 @@ function render() {{
         panel.className = 'source-panel';
         let bodyMarkup;
         try {{
+          const buildChip = (label, icon, kind) => `
+            <span class="tm-source-chip tm-source-chip-${{kind}}" title="${{escapeHtml(String(label || ''))}}">
+              <span class="tm-chip-icon">${{icon}}</span>
+              <span class="tm-chip-text">${{escapeHtml(String(label || '—'))}}</span>
+            </span>
+          `;
+          const currentPortLabel = (() => {{
+            const opts = Array.isArray(STATE.serial_ports) ? STATE.serial_ports : [];
+            const m = opts.find(p => p && String(p.device || p.path || p) === String(currentSerialPort || ''));
+            if (m) return String(m.description || m.product || m.device || m.path || currentSerialPort);
+            return currentSerialPort || 'No device selected';
+          }})();
+          const currentCamLabel = (() => {{
+            const idx = Number(currentWebcamIndex);
+            const opts = Array.isArray(STATE.webcam_options) ? STATE.webcam_options : [];
+            const m = opts.find(w => Number(w.index) === idx || String(w.uid || '') === String(currentWebcamUid || ''));
+            return (m && String(m.label || m.device || m.title || '')) || (opts[idx] && String(opts[idx].label || opts[idx].device || `Camera ${{idx}}`)) || `Camera ${{idx}}`;
+          }})();
+          const fpsChip = buildChip(`${{Number(STATE.fps || 0) || 30}} fps`, '⏱', 'fps');
+          const jumpChip = `<button type="button" class="tm-source-chip tm-source-chip-settings" id="sourceSettingsToggle-${{cssSafe(name)}}" title="Open global input settings">
+            <span class="tm-chip-icon">⚙</span><span class="tm-chip-text">Settings</span>
+          </button>`;
+          const sourceChipRow = (chips) => `<div class="tm-source-chip-row">${{chips}}</div>`;
           bodyMarkup =
             openSourceKind === 'upload'
               ? `<button class="upload-pick" type="button" id="uploadPick-${{cssSafe(name)}}">Choose images from your files</button>
                  <div class="upload-hint">Images are added to this class and appear immediately on the right.</div>`
               : (
                 openSourceKind === 'device'
-                  ? `<select class="device-select" id="deviceSelect-${{cssSafe(name)}}">
-                       ${{buildDeviceOptions(selectedPort)}}
-                     </select>
+                  ? `${{sourceChipRow(buildChip(currentPortLabel, '🔌', 'port') + fpsChip + jumpChip)}}
                      <div class="device-help">${{deviceHelpText()}}</div>
                      <div class="source-preview-wrap">
                        <img id="sourcePreview-${{cssSafe(name)}}" class="preview-frame" alt="Preview"/>
                      </div>
                      <div class="source-note" id="sourceNote-${{cssSafe(name)}}"></div>
-                     ${{buildSourceSettingsMarkup(name)}}
                      <div class="source-actions">
                        <button class="btn btn-primary" type="button" id="sourceCapture-${{cssSafe(name)}}">Capture</button>
                        <button class="btn" type="button" id="sourceHold-${{cssSafe(name)}}">${{holdRecording && holdRecordClass === name ? 'Recording...' : 'Hold to Capture'}}</button>
-                       <button class="iconbtn source-settings" type="button" id="sourceSettingsToggle-${{cssSafe(name)}}" title="Source settings">⚙</button>
                      </div>`
-                  : `<div class="device-help">${{webcamHelpText()}}</div>
+                  : `${{sourceChipRow(buildChip(currentCamLabel, '📷', 'cam') + fpsChip + jumpChip)}}
+                     <div class="device-help">${{webcamHelpText()}}</div>
                      <div class="source-preview-wrap">
                        <img id="sourcePreview-${{cssSafe(name)}}" class="preview-frame" alt="Preview"/>
                      </div>
                      <div class="source-note" id="sourceNote-${{cssSafe(name)}}"></div>
-                     ${{buildSourceSettingsMarkup(name)}}
                      <div class="source-actions">
                        <button class="btn btn-primary" type="button" id="sourceCapture-${{cssSafe(name)}}">Capture</button>
                        <button class="btn" type="button" id="sourceHold-${{cssSafe(name)}}">${{holdRecording && holdRecordClass === name ? 'Recording...' : 'Hold to Capture'}}</button>
-                       <button class="iconbtn source-settings" type="button" id="sourceSettingsToggle-${{cssSafe(name)}}" title="Source settings">⚙</button>
                      </div>`
               );
         }} catch (markupErr) {{
@@ -8506,7 +9152,38 @@ function render() {{
     const navReset = document.getElementById('navResetProject');
     if (nav) nav.onclick = (e) => {{
       if (e) e.stopPropagation();
-      toggleNavMenu();
+    }};
+    // Toolbar segmented dropdowns (Problem 2: File / Edit menus)
+    const menuFileBtn = document.getElementById('menuFileBtn');
+    if (menuFileBtn) menuFileBtn.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      const d = document.getElementById('menuFileDropdown');
+      const isOpen = d && d.classList.contains('open');
+      closeToolbarDropdowns();
+      if (!isOpen && d) d.classList.add('open');
+    }};
+    const menuEditBtn = document.getElementById('menuEditBtn');
+    if (menuEditBtn) menuEditBtn.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      const d = document.getElementById('menuEditDropdown');
+      const isOpen = d && d.classList.contains('open');
+      closeToolbarDropdowns();
+      if (!isOpen && d) d.classList.add('open');
+    }};
+    // Settings button (Problem 3.2 SSOT modal) + settings close/save bindings
+    const navSettings = document.getElementById('navSettings');
+    if (navSettings) navSettings.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      closeToolbarDropdowns();
+      openGlobalSettings();
+    }};
+    const setCancel = document.getElementById('settingsCancel');
+    if (setCancel) setCancel.onclick = (e) => {{ if (e) e.stopPropagation(); closeGlobalSettings(); }};
+    const setSave = document.getElementById('settingsSave');
+    if (setSave) setSave.onclick = (e) => {{ if (e) e.stopPropagation(); saveGlobalSettings(); }};
+    const setModal = document.getElementById('globalSettingsModal');
+    if (setModal) setModal.onclick = (e) => {{
+      if (e && e.target === setModal) closeGlobalSettings();
     }};
     if (navOpen) navOpen.onclick = async (e) => {{
       if (e) e.stopPropagation();
@@ -8516,7 +9193,19 @@ function render() {{
     if (navSave) navSave.onclick = async (e) => {{
       if (e) e.stopPropagation();
       closeNavMenu();
-      await saveProject();
+      await saveProjectQuick();
+    }};
+    const navSaveAs = document.getElementById('navSaveAsProject');
+    if (navSaveAs) navSaveAs.onclick = async (e) => {{
+      if (e) e.stopPropagation();
+      closeNavMenu();
+      await saveProjectAs();
+    }};
+    const navNew = document.getElementById('navNewProject');
+    if (navNew) navNew.onclick = async (e) => {{
+      if (e) e.stopPropagation();
+      closeNavMenu();
+      await newProject();
     }};
     if (navExportDataset) navExportDataset.onclick = async (e) => {{
       if (e) e.stopPropagation();
@@ -8569,7 +9258,10 @@ function render() {{
         devSel.onpointerdown = () => refreshSerialPorts(false, selectId);
         devSel.onmousedown = () => refreshSerialPorts(false, selectId);
       }}
-      if (settingsToggle) settingsToggle.onclick = () => toggleSourceSettings(openSourceClass);
+      if (settingsToggle) settingsToggle.onclick = (e) => {{
+        if (e) {{ e.preventDefault(); e.stopPropagation(); }}
+        openGlobalSettings();
+      }};
       if (settingsSave) settingsSave.onclick = () => applySourceSettings(openSourceClass);
       if (settingsCancel) settingsCancel.onclick = () => {{
         sourceSettingsOpen = false;
@@ -8694,6 +9386,30 @@ window.addEventListener('load', () => {{
   // #endregion
   queueFrameHeightSync();
   requestShellLayoutRefresh('image-project-mount:load');
+  const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || '') ||
+                (navigator.userAgentData && navigator.userAgentData.platform &&
+                 /mac/i.test(navigator.userAgentData.platform));
+  window.addEventListener('keydown', (e) => {{
+    const mod = isMac ? (e.metaKey && !e.ctrlKey && !e.altKey) : (e.ctrlKey && !e.metaKey && !e.altKey);
+    if (!mod) return;
+    const k = String(e.key || '').toLowerCase();
+    if (k === 's' && !e.shiftKey) {{
+      e.preventDefault(); e.stopImmediatePropagation();
+      saveProjectQuick();
+    }} else if (k === 's' && e.shiftKey) {{
+      e.preventDefault(); e.stopImmediatePropagation();
+      saveProjectAs();
+    }} else if (k === 'o') {{
+      e.preventDefault(); e.stopImmediatePropagation();
+      openProject();
+    }} else if (k === 'n') {{
+      e.preventDefault(); e.stopImmediatePropagation();
+      newProject();
+    }} else if (k === 'e') {{
+      e.preventDefault(); e.stopImmediatePropagation();
+      exportModel();
+    }}
+  }}, true);
 }});
 window.addEventListener('pagehide', () => {{
   cleanupWorkspaceFrameBeforeNavigate('pagehide');
@@ -9117,26 +9833,28 @@ def _render_classified_import_page() -> None:
     _dbg_open_project_layout("B", "pre-fix", "app.py:_render_classified_import_page", "[DEBUG] render classified import page", {"session": str(st.session_state.get("session_id", "")), "project_type": str(st.session_state.get("project_type", "")), "query": dict(st.query_params) if hasattr(st, "query_params") else {}, "local_import_path": str(st.session_state.get("local_import_path", ""))})
     # #endregion
     inject_teachable_style()
+
+    # Breadcrumb back navigation
+    if st.button("← Back to Home", key="tm_back_from_classified", type="secondary"):
+        _tm_teardown_controller_session(_ensure_fresh_record_controller(), str(st.session_state.get("session_id", "")))
+        _reset_session_workspace()
+        _tm_clear_query_params()
+        st.rerun()
+
+    # Full-width header panel (matches Start Page design system)
     st.markdown(
         '''
-<div class="tm-hero">
-  <div class="tm-hero-copy">
-    <div class="tm-eyebrow">Start from classified class</div>
-    <h2>Import a classified image folder</h2>
-    <p>Supported layouts include <code>label/image</code> and common <code>train|val|test/label/image</code> datasets. Imported images become class samples and each label becomes a class name.</p>
-  </div>
-</div>
+        <div style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:32px 40px;margin-bottom:2.5rem;margin-top:1rem;">
+            <h1 style="margin:0 0 12px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">Import a classified image folder</h1>
+            <p style="margin:0;max-width:800px;line-height:1.6;color:#475569;font-size:15px;">
+                Import pre-classified image folders. Supported layouts include <code>label/image</code> and common <code>train|val|test/label/image</code> datasets. Each folder name becomes a class label.
+            </p>
+        </div>
         ''',
         unsafe_allow_html=True,
     )
-    top_left, top_right = st.columns([1, 5])
-    with top_left:
-        if st.button("← Back", key="tm_back_from_classified"):
-            _tm_teardown_controller_session(_ensure_fresh_record_controller(), str(st.session_state.get("session_id", "")))
-            _reset_session_workspace()
-            _tm_clear_query_params()
-            st.rerun()
 
+    # Form inputs flow full-width to match the header panel edges
     input_left, input_right = st.columns([5, 1], vertical_alignment="bottom")
     prior_path = str(st.session_state.local_import_path or "")
     with input_left:
@@ -9161,7 +9879,7 @@ def _render_classified_import_page() -> None:
                 st.rerun()
 
     path_value = str(st.session_state.local_import_path or "").strip()
-    if st.button("Load folder", type="primary", key="tm_read_classified_dir", disabled=(not path_value)):
+    if st.button("Load folder", type="primary", key="tm_read_classified_dir", disabled=(not path_value), use_container_width=True):
         p = Path(path_value).expanduser()
         if not p.exists() or not p.is_dir():
             st.error("Path does not exist or is not a folder.")
@@ -9202,7 +9920,7 @@ def _render_classified_import_page() -> None:
             )
     st.session_state.class_rename = rename
 
-    if st.button("Import to workspace", type="primary", key="tm_import_classified_workspace"):
+    if st.button("Import to workspace", type="primary", key="tm_import_classified_workspace", use_container_width=True):
         try:
             class_names = _import_classified_into_workspace(imported, rename)
         except Exception as e:
@@ -9777,7 +10495,7 @@ def _render_tm_preview_export_panel() -> None:
 
 def main() -> None:
     _persist_session_id()
-    st.set_page_config(page_title="TF Lite Training", layout="wide")
+    st.set_page_config(page_title="TF Lite Training", layout="wide", page_icon="AIoScouts.png")
     _init_session()
 
     if st.session_state.project_type is None:
