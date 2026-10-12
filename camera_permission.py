@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ def get_camera_access_status() -> CameraAccessResult:
     return _result("not_determined", allowed=False)
 
 
-def ensure_camera_access(webcam_index: int = 0, wait_timeout_s: float = 15.0, probe_open: bool = True) -> CameraAccessResult:
+def ensure_camera_access(webcam_index: int = 0, wait_timeout_s: float = 15.0, probe_open: bool = True, unique_id: Optional[str] = None) -> CameraAccessResult:
     status = get_camera_access_status()
     if status.status in {"denied", "restricted"}:
         return status
@@ -89,12 +90,35 @@ def ensure_camera_access(webcam_index: int = 0, wait_timeout_s: float = 15.0, pr
     if not probe_open:
         return _result("granted")
 
+    uid = str(unique_id or "").strip()
+    if sys.platform == "darwin" and uid:
+        # Probe the SELECTED camera by uniqueID via the AVCaptureSession
+        # bridge — probing cv2 index 0 as a side effect used to open the
+        # virtual camera (Iriun) instead of the user's choice.
+        try:
+            from mac_camera import open_macos_camera_by_unique_id
+        except Exception:
+            open_macos_camera_by_unique_id = None
+        if open_macos_camera_by_unique_id is not None:
+            cap = None
+            try:
+                cap = open_macos_camera_by_unique_id(uid, timeout_s=4.0)
+            except Exception:
+                cap = None
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                return _result("granted")
+            return _result("open_failed", allowed=False)
+
     try:
         import cv2
     except Exception:
         return status
 
-    cap = cv2.VideoCapture(int(webcam_index))
+    cap = cv2.VideoCapture(int(webcam_index or 0))
     if not cap.isOpened():
         cap.release()
         return _result("open_failed", allowed=False)

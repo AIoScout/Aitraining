@@ -11,3 +11,6 @@ model.h
 model.cpp
 g_model.tflite
 /.venv
+AI training.docx
+*.docx
+*.pdf

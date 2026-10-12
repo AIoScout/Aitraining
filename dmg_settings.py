@@ -5,7 +5,8 @@ application = os.path.join("dist", "TFLiteTraining.app")
 files = [application]
 symlinks = {"Applications": "/Applications"}
 
-icon = None
+# Volume icon (AIoScouts.icns generated from the repo-root AIoScouts.png).
+icon = os.path.join("AIoScouts.icns")
 background = None
 
 format = "UDZO"

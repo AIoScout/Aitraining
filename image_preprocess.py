@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -8,23 +9,39 @@ from PIL import Image, ImageOps
 
 CLIP_MODE_SIGN = 0
 CLIP_MODE_JUNCTION = 1
+CLIP_MODE_BLUE_DIFF = 2  # B-G channel extraction for blue/purple signs
 
 PREPROCESS_MODE_AUTO_BY_LABEL = "auto_by_label"
 PREPROCESS_MODE_MANUAL_ROI = "manual_roi"
 PREPROCESS_MODE_NONE = "none"
 PREPROCESS_MODE_SIGN = "sign"
 PREPROCESS_MODE_JUNCTION = "junction"
+PREPROCESS_MODE_BLUE_DIFF = "blue_diff"  # B-G extraction for blue/purple signs
 
-_SEARCH_LEFT_FRAC = 0.04
-_SEARCH_RIGHT_FRAC = 0.50
-_SEARCH_TOP_FRAC = 0.14
-_SEARCH_BOTTOM_FRAC = 0.62
-_FALLBACK_SIDE_FRAC = 0.24
-_FALLBACK_CENTER_X_FRAC = 0.22
-_FALLBACK_CENTER_Y_FRAC = 0.42
-_MIN_FOCUS_PIXELS = 18
-_MIN_SIDE_FRAC = 0.50
+# Model-input crop selection (train + live predict + device firmware must agree):
+#   CROP_MODE_AUTO_SEARCH — the auto shadow-search box (_focus_bbox C port on
+#       the device, BG_ENABLE_FOCUS_SEARCH=1).  Removes background outside the
+#       detected sign.  Default for NEW trainings.
+#   CROP_MODE_CENTER — legacy deterministic center 60 % crop (device
+#       BG_ENABLE_FOCUS_SEARCH=0).  Old deployed models keep this.
+CROP_MODE_AUTO_SEARCH = "auto_search"
+CROP_MODE_CENTER = "center"
+
+_SEARCH_LEFT_FRAC = 0.10
+_SEARCH_RIGHT_FRAC = 0.90
+_SEARCH_TOP_FRAC = 0.10
+_SEARCH_BOTTOM_FRAC = 0.90
+_FALLBACK_SIDE_FRAC = 0.40
+_FALLBACK_CENTER_X_FRAC = 0.50
+_FALLBACK_CENTER_Y_FRAC = 0.50
+_CENTER_ROI_FRAC = 0.60  # fraction of image to keep from center for sign crop
+_MIN_FOCUS_PIXELS = 8
+_MIN_SIDE_FRAC = 0.25
 _DARK_OFFSET = 10
+_NEAR_BLACK_THRESH = 45  # max(R,G,B) below this → converted to pure white before auto-crop
+_NEAR_WHITE_THRESH = 200  # R/G/B above this → kept as white (avoids stretch-to-black)
+_BG_LUM_THRESH = 100  # max(R,G,B) above this → bright background → white
+_BG_DIFF_MIN = 15    # |B-G| magnitude below this → low saturation → white
 _CONTRAST_MIN_SPAN = 24
 _EDGE_PERCENTILE = 0.90
 _EDGE_MIN = 18
@@ -32,8 +49,8 @@ _EDGE_RELAX = 8
 _SIGN_CENTER_BIAS_X_FRAC = 0.10
 _SIGN_CENTER_BIAS_Y_FRAC = -0.03
 _SIGN_PROJECTION_FRAC = 0.16
-_SIGN_PRIOR_CENTER_X_FRAC = 0.52
-_SIGN_PRIOR_CENTER_Y_FRAC = 0.34
+_SIGN_PRIOR_CENTER_X_FRAC = 0.50
+_SIGN_PRIOR_CENTER_Y_FRAC = 0.50
 _SIGN_PRIOR_SIGMA_X_FRAC = 0.18
 _SIGN_PRIOR_SIGMA_Y_FRAC = 0.16
 _SIGN_LOCAL_PEAK_RATIO = 0.68
@@ -99,6 +116,88 @@ def _contrast_stretch_u8(arr: np.ndarray) -> np.ndarray:
     out = (src.astype(np.int32) - low) * 255 + span // 2
     out = out // span
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+# ── Device-exact model-input transform ──────────────────────────────────
+# Bit-for-bit mirror of TFLite/image_provider.cpp crop_resize_bilinear() +
+# contrast_stretch_int8() (the pipeline GetImage runs in GRAY mode and in
+# BG mode with BG_ENABLE_BLOB_SEARCH=0).  float32 arithmetic, operator
+# order, the PIL-style center mapping ((x+0.5)*side/out - 0.5, including
+# the device's negative border weights) and the BT.601 round-half-up are
+# all replicated so host and device produce IDENTICAL int8 inputs from the
+# same RGB frame.  Keep this in sync with crop_resize_bilinear().
+_DEV_LUM_R = np.float32(30.0)
+_DEV_LUM_G = np.float32(59.0)
+_DEV_LUM_B = np.float32(11.0)
+_DEV_LUM_DIV = np.float32(100.0)
+_DEV_LUM_HALF = np.float32(0.5)
+
+
+def _device_crop_resize_bilinear_lum(crop_rgb: np.ndarray, out_size: int) -> np.ndarray:
+    """Device crop_resize_bilinear() mirror: RGB crop → bilinear → BT.601 lum.
+
+    crop_rgb: uint8 (ch, cw, 3) crop.  Returns uint8 (out_size, out_size)
+    luminance BEFORE contrast stretch (caller applies _contrast_stretch_u8).
+    For a square crop this is bit-identical to the firmware.
+    """
+    ch, cw = crop_rgb.shape[:2]
+    if ch < 1 or cw < 1:
+        raise ValueError("empty crop")
+    f32 = np.float32
+    ys = np.arange(out_size, dtype=np.float32)
+    xs = np.arange(out_size, dtype=np.float32)
+    # fy = (y + 0.5) * cside / OUT - 0.5  — float32, same rounding as C++
+    fy = (((ys + f32(0.5)) * f32(ch)) / f32(out_size)) - f32(0.5)
+    fx = (((xs + f32(0.5)) * f32(cw)) / f32(out_size)) - f32(0.5)
+    y0 = np.floor(fy).astype(np.int32)
+    x0 = np.floor(fx).astype(np.int32)
+    np.maximum(y0, 0, out=y0)
+    np.maximum(x0, 0, out=x0)
+    y1 = np.minimum(y0 + 1, ch - 1)
+    x1 = np.minimum(x0 + 1, cw - 1)
+    # NOTE: computed AFTER clamping, like the C++ — border rows keep the
+    # (possibly negative) fractional weight the firmware uses.
+    wy = (fy - y0.astype(np.float32)).astype(np.float32)
+    wx = (fx - x0.astype(np.float32)).astype(np.float32)
+    omx = f32(1.0) - wx   # (out_size,)
+    omy = f32(1.0) - wy   # (out_size,)
+    # 2D bilinear weights: outer product of x/y terms (cross product, not
+    # elementwise pairing).
+    omx2 = omx[None, :]
+    omy2 = omy[:, None]
+    wx2 = wx[None, :]
+    wy2 = wy[:, None]
+    w00 = (omx2 * omy2).astype(np.float32)
+    w10 = (wx2 * omy2).astype(np.float32)
+    w01 = (omx2 * wy2).astype(np.float32)
+    w11 = (wx2 * wy2).astype(np.float32)
+
+    i00 = crop_rgb[y0[:, None], x0[None, :]].astype(np.float32)
+    i10 = crop_rgb[y0[:, None], x1[None, :]].astype(np.float32)
+    i01 = crop_rgb[y1[:, None], x0[None, :]].astype(np.float32)
+    i11 = crop_rgb[y1[:, None], x1[None, :]].astype(np.float32)
+
+    # Left-assoc float32 sums, term order identical to the C++.
+    r = ((w00 * i00[:, :, 0] + w10 * i10[:, :, 0]) + w01 * i01[:, :, 0]) + w11 * i11[:, :, 0]
+    g = ((w00 * i00[:, :, 1] + w10 * i10[:, :, 1]) + w01 * i01[:, :, 1]) + w11 * i11[:, :, 1]
+    b = ((w00 * i00[:, :, 2] + w10 * i10[:, :, 2]) + w01 * i01[:, :, 2]) + w11 * i11[:, :, 2]
+
+    # lum = (r*30 + g*59 + b*11) / 100 + 0.5  → float32 → truncate (=floor
+    # for positive values), same as the firmware's (uint8_t) cast.
+    lum = ((((r * _DEV_LUM_R + g * _DEV_LUM_G) + b * _DEV_LUM_B) / _DEV_LUM_DIV) + _DEV_LUM_HALF)
+    return np.clip(np.floor(lum), 0.0, 255.0).astype(np.uint8)
+
+
+def _center_bbox(h: int, w: int, frac: float = 0.60) -> Tuple[int, int, int, int]:
+    """Simple center crop → sign is always in the middle of the frame."""
+    side = int(min(h, w) * frac)
+    cx, cy = w // 2, h // 2
+    half = side // 2
+    left = max(0, cx - half)
+    top  = max(0, cy - half)
+    right = min(w, left + side)
+    bottom = min(h, top + side)
+    return left, top, right, bottom
 
 
 def _fallback_bbox(h: int, w: int) -> Tuple[int, int, int, int]:
@@ -182,7 +281,8 @@ def _weighted_center_in_bbox(
 
 
 def _estimate_sign_center_and_side(
-    target_map: np.ndarray, search_h: int, search_w: int, max_crop_side: int
+    target_map: np.ndarray, search_h: int, search_w: int, max_crop_side: int,
+    dark_mask: Optional[np.ndarray] = None,
 ) -> Optional[Tuple[float, float, int, float, float, float, Tuple[int, int, int, int]]]:
     if target_map.size == 0:
         return None
@@ -190,14 +290,42 @@ def _estimate_sign_center_and_side(
     kernel_size = max(3, int(round(min(search_h, search_w) * _SIGN_PROJECTION_FRAC)))
     if kernel_size % 2 == 0:
         kernel_size += 1
-    kernel = np.ones(kernel_size, dtype=np.float32)
+    half = kernel_size // 2
 
-    score_map = np.apply_along_axis(lambda v: np.convolve(v, kernel, mode="same"), 1, target_map)
-    score_map = np.apply_along_axis(lambda v: np.convolve(v, kernel, mode="same"), 0, score_map)
-    ys = np.linspace(0.0, 1.0, search_h, dtype=np.float32)
-    xs = np.linspace(0.0, 1.0, search_w, dtype=np.float32)
-    prior_x = np.exp(-0.5 * ((xs - _SIGN_PRIOR_CENTER_X_FRAC) / max(_SIGN_PRIOR_SIGMA_X_FRAC, 1e-6)) ** 2)
-    prior_y = np.exp(-0.5 * ((ys - _SIGN_PRIOR_CENTER_Y_FRAC) / max(_SIGN_PRIOR_SIGMA_Y_FRAC, 1e-6)) ** 2)
+    # Deterministic separable box blur in float32, running-sum (cumsum) with
+    # the kernel centered and zero padding — mirrors the device C port
+    # (fb box_blur) BIT-FOR-BIT.  np.convolve uses SIMD summation whose
+    # rounding order is machine-dependent and cannot be reproduced on the
+    # MCU, which used to shift the auto crop box by ~1 px on some frames.
+    def _blur_axis(a: np.ndarray, axis: int) -> np.ndarray:
+        pad_shape = [(0, 0), (0, 0)]
+        pad_shape[axis] = (half, half)
+        p = np.pad(a, pad_shape, mode="constant")
+        c = np.cumsum(p, axis=axis, dtype=np.float32)
+        # out[j] = sum of vpad[j .. j+K-1] = C[j+K-1] - C[j-1]  (C[-1] = 0)
+        n = int(a.shape[axis])
+        hi_sl = slice(kernel_size - 1, kernel_size - 1 + n)
+        if axis == 1:
+            hi = c[:, hi_sl]
+            lo = np.concatenate([np.zeros((c.shape[0], 1), dtype=np.float32), c[:, : n - 1]], axis=1)
+            return hi - lo
+        hi = c[hi_sl, :]
+        lo = np.concatenate([np.zeros((1, c.shape[1]), dtype=np.float32), c[: n - 1, :]], axis=0)
+        return hi - lo
+
+    score_map = _blur_axis(_blur_axis(target_map.astype(np.float32), 1), 0)
+    # Priors: linspace in float64, exp in float64, cast to float32 — same
+    # double math as the device C port (exp() then (float) cast).
+    ys = np.linspace(0.0, 1.0, search_h, dtype=np.float64)
+    xs = np.linspace(0.0, 1.0, search_w, dtype=np.float64)
+    prior_y = np.asarray(
+        [math.exp(-0.5 * ((float(y) - _SIGN_PRIOR_CENTER_Y_FRAC) / max(_SIGN_PRIOR_SIGMA_Y_FRAC, 1e-6)) ** 2) for y in ys],
+        dtype=np.float32,
+    )
+    prior_x = np.asarray(
+        [math.exp(-0.5 * ((float(x) - _SIGN_PRIOR_CENTER_X_FRAC) / max(_SIGN_PRIOR_SIGMA_X_FRAC, 1e-6)) ** 2) for x in xs],
+        dtype=np.float32,
+    )
     score_map = score_map * prior_y[:, None] * prior_x[None, :]
     peak_value = float(score_map.max(initial=0.0))
     if peak_value <= 0.0:
@@ -257,6 +385,14 @@ def _estimate_sign_center_and_side(
             if weighted_sum <= 0.0:
                 continue
 
+            # Background rejection: components touching >= 2 borders of the
+            # search region are the desk/surface, not the sign (the sign
+            # lives on bright paper and never spans the frame edges).
+            touch_count = int(min_x <= _SIGN_BORDER_TOUCH_PX) + int(min_y <= _SIGN_BORDER_TOUCH_PX) \
+                + int(max_x >= w - 1 - _SIGN_BORDER_TOUCH_PX) + int(max_y >= h - 1 - _SIGN_BORDER_TOUCH_PX)
+            if touch_count >= 2:
+                continue
+
             span_w = int(max_x - min_x + 1)
             span_h = int(max_y - min_y + 1)
             aspect = float(span_w) / float(max(1, span_h))
@@ -284,8 +420,24 @@ def _estimate_sign_center_and_side(
 
     span_w, span_h = best_span
     component_side_frac = float(max(span_w, span_h)) / float(max(1, min(search_h, search_w)))
-    support_mask = score_map >= (peak_value * _SIGN_SUPPORT_PEAK_RATIO)
-    support_bbox = _connected_bbox_from_seed(support_mask, best_peak[0], best_peak[1])
+    # Support bbox = the DARK-MASK connected component seeded at the peak
+    # (NOT the score-based support mask): flat dark sign interiors have ~0
+    # edge weight, so the score support ring only covers border fragments
+    # and the crop misses large flat signs.  A dark component touching >= 2
+    # borders is background (desk/surface) — reject it.  The score mask is
+    # the next fallback; the best local bbox is the last.
+    support_bbox = None
+    if dark_mask is not None:
+        support_bbox = _connected_bbox_from_seed(dark_mask, best_peak[0], best_peak[1])
+        if support_bbox is not None:
+            s_x1, s_y1, s_x2, s_y2 = support_bbox
+            s_touch = int(s_x1 <= _SIGN_BORDER_TOUCH_PX) + int(s_y1 <= _SIGN_BORDER_TOUCH_PX) \
+                + int(s_x2 >= search_w - 1 - _SIGN_BORDER_TOUCH_PX) + int(s_y2 >= search_h - 1 - _SIGN_BORDER_TOUCH_PX)
+            if s_touch >= 2:
+                support_bbox = None
+    if support_bbox is None:
+        support_mask = score_map >= (peak_value * _SIGN_SUPPORT_PEAK_RATIO)
+        support_bbox = _connected_bbox_from_seed(support_mask, best_peak[0], best_peak[1])
     if support_bbox is None:
         support_bbox = best_bbox
     sup_min_x, sup_min_y, sup_max_x, sup_max_y = support_bbox
@@ -344,18 +496,25 @@ def _focus_bbox(gray: np.ndarray) -> Tuple[int, int, int, int]:
     edge_thr = max(_EDGE_MIN, _percentile_from_hist(edge_hist, total, _EDGE_PERCENTILE))
 
     mask = (region <= thr) & (edge >= edge_thr)
+    dark_thr = thr  # pure-dark threshold for the support seed (tracks the mask)
     dark_strength = np.clip(thr - region.astype(np.int16), 0, None).astype(np.float32)
     edge_strength = np.clip(edge.astype(np.int16) - edge_thr, 0, None).astype(np.float32)
     target_map = dark_strength * (edge_strength + 1.0)
     if int(mask.sum()) < _MIN_FOCUS_PIXELS:
         relax_thr = max(_EDGE_RELAX, edge_thr - 6)
         mask = (region <= p20) & (edge >= relax_thr)
+        dark_thr = p20
         edge_strength = np.clip(edge.astype(np.int16) - relax_thr, 0, None).astype(np.float32)
         target_map = np.clip(p20 - region.astype(np.int16), 0, None).astype(np.float32) * (edge_strength + 1.0)
     if int(mask.sum()) < _MIN_FOCUS_PIXELS:
         return _fallback_bbox(h, w)
 
-    estimated = _estimate_sign_center_and_side(target_map, region.shape[0], region.shape[1], min(h, w))
+    # dark_mask for support seeding: pure dark set at the current threshold
+    # (the sign mass, incl. flat interiors with no edge content)
+    dark_mask = (region <= dark_thr).astype(bool)
+    estimated = _estimate_sign_center_and_side(
+        target_map, region.shape[0], region.shape[1], min(h, w), dark_mask=dark_mask
+    )
     if estimated is None:
         return _fallback_bbox(h, w)
 
@@ -380,6 +539,73 @@ def _focus_bbox(gray: np.ndarray) -> Tuple[int, int, int, int]:
     return int(crop_left), int(crop_top), int(crop_left + side), int(crop_top + side)
 
 
+def _focus_bbox_adaptive(gray_raw: np.ndarray) -> Tuple[int, int, int, int]:
+    """Auto search box with exposure-adaptive band selection.
+
+    The sign's absolute gray shifts with camera framing (auto-exposure:
+    paper-filled frames render ink dark, desk-dominated frames render ink
+    mid-gray), so a single fixed (dark, lum) mask cannot serve both.  This
+    wrapper picks candidate gray bands from the smoothed histogram
+    (valleys between peaks), runs the classic _focus_bbox per band, and
+    keeps the box whose surroundings are bright paper (the sign sits ON
+    the paper; the desk's ring is dark).  Falls back to the classic search
+    on the whole frame when no band produces a paper-surrounded box.
+
+    Mirrored bit-for-bit by find_search_box_adaptive() in
+    TFLite/image_provider.cpp — keep both in lockstep.
+    """
+    h, w = gray_raw.shape
+    left, top, right, bottom = _sign_search_window(h, w)
+    region = gray_raw[top:bottom, left:right].astype(np.int64)
+    hist = np.bincount(region.reshape(-1), minlength=256).astype(np.float64)
+    smooth = np.convolve(hist, np.ones(11) / 11.0, mode="same")
+    total = int(region.size)
+    peaks: List[int] = [
+        i for i in range(2, 254)
+        if smooth[i] >= smooth[i - 1] and smooth[i] > smooth[i + 1] and smooth[i] >= 0.03 * total / 8
+    ]
+    if len(peaks) < 2:
+        peaks = [int(np.percentile(region, 15)), int(np.percentile(region, 85))]
+    bands: List[Tuple[int, int]] = []
+    for a, b in zip(peaks, peaks[1:]):
+        lo = a + int(np.argmin(smooth[a : b + 1]))
+        bands.append((int(lo), int(b)))
+    if peaks:
+        v1 = peaks[0] + int(np.argmin(smooth[: peaks[0] + 1])) if peaks[0] > 0 else 0
+        bands.append((0, int(v1) if v1 > 0 else 100))
+
+    def _ring_bright_frac(box: Tuple[int, int, int, int]) -> float:
+        x1, y1, x2, y2 = box
+        pad = 4
+        ry1, ry2 = max(0, y1 - pad), min(h, y2 + pad)
+        rx1, rx2 = max(0, x1 - pad), min(w, x2 + pad)
+        ring = gray_raw[ry1:ry2, rx1:rx2].astype(np.int64).copy()
+        ring[max(0, y1 - ry1):min(y2 - ry1, ring.shape[0]),
+             max(0, x1 - rx1):min(x2 - rx1, ring.shape[1])] = -1
+        m = ring >= 0
+        if int(m.sum()) == 0:
+            return 0.0
+        return float(((ring >= 180) & m).sum()) / float(int(m.sum()))
+
+    best: Optional[Tuple[float, Tuple[int, int, int, int]]] = None
+    for lo, hi in bands:
+        if hi - lo < 10:
+            continue
+        band_gray = gray_raw.copy()
+        band_gray[~((gray_raw > lo) & (gray_raw < hi))] = 255
+        box = _focus_bbox(band_gray)
+        ring = _ring_bright_frac(box)
+        if ring < 0.35:
+            continue  # box not surrounded by paper — background/desk
+        score = ring * float(box[2] - box[0])
+        if best is None or score > best[0]:
+            best = (score, box)
+    if best is not None:
+        return best[1]
+    # Last resort: the classic single-pass search (legacy behaviour).
+    return _focus_bbox(gray_raw)
+
+
 def _render_crop(crop: np.ndarray, out_size: int, color_mode: str, preserve_aspect: bool) -> np.ndarray:
     if color_mode == "grayscale":
         base = crop[:, :, 0] if crop.shape[-1] == 1 else crop[:, :, :3]
@@ -401,43 +627,11 @@ def _render_crop(crop: np.ndarray, out_size: int, color_mode: str, preserve_aspe
     return out.astype(np.float32) / 255.0
 
 
-def class_clip_mode(class_name: str, class_labels: Optional[Dict[str, str]] = None) -> int:
-    if isinstance(class_labels, dict):
-        label = class_labels.get(str(class_name or "").strip())
-        if label == "road":
-            return CLIP_MODE_JUNCTION
-        if label == "sign":
-            return CLIP_MODE_SIGN
-        # Class not in the labels dict.  If the dict is non-empty the user
-        # IS using labels — default to sign mode (matches the UI default).
-        # If the dict is empty / None, fall through to keyword matching below
-        # so projects that predate the label feature still work.
-        if class_labels:
-            return CLIP_MODE_SIGN
-    # Fallback: keyword-based heuristic (reached when class_labels is None,
-    # empty, or doesn't contain this class name).
-    name = str(class_name or "").upper(
-        
-    )
-    name = name.replace(" ", "_")
-    parts = name.split("_")
-
-    junction_tokens = {"CROSS", "CROSSROAD", "INTERSECTION", "T_JUNCTION",
-                       "TJUNCTION", "THREE_WAY", "FORK", "STRAIGHT", "LINE"}
-    if any(p in parts for p in junction_tokens):
+def class_clip_mode(class_name: str) -> int:
+    name = str(class_name or "").upper()
+    junction_tokens = ("CROSS", "CROSSROAD", "INTERSECTION", "T_JUNCTION", "TJUNCTION", "THREE_WAY", "FORK")
+    if any(token in name for token in junction_tokens):
         return CLIP_MODE_JUNCTION
-
-    # Road-direction class tokens — not junctions, but still road-mode (not signs).
-    # Use exact part matching to avoid substring false-positives
-    # (e.g. "RIGHT" matching inside "TRAFFICLIGHT").
-    road_direction_tokens = {
-        "LEFT", "RIGHT", "STRAIGHT", "AHEAD", "FORWARD",
-        "TURN", "GO", "ROUNDABOUT", "EXIT",
-        "END",
-    }
-    if any(p in road_direction_tokens for p in parts):
-        return CLIP_MODE_JUNCTION
-
     return CLIP_MODE_SIGN
 
 
@@ -475,9 +669,6 @@ def normalize_preprocess_mode(mode: Any) -> str:
     if value in {
         PREPROCESS_MODE_AUTO_BY_LABEL,
         PREPROCESS_MODE_MANUAL_ROI,
-        PREPROCESS_MODE_NONE,
-        PREPROCESS_MODE_SIGN,
-        PREPROCESS_MODE_JUNCTION,
     }:
         return value
     return PREPROCESS_MODE_AUTO_BY_LABEL
@@ -490,6 +681,14 @@ def normalize_class_preprocess(raw: Any) -> Dict[str, Any]:
     manual_roi = normalize_manual_roi(src.get("manual_roi"))
     if manual_roi is not None:
         out["manual_roi"] = list(manual_roi)
+    # Preserve user-adjustable thresholds (clamped to valid range)
+    bg_lum = int(src.get("bg_lum_thresh", 100))
+    bg_diff = int(src.get("bg_diff_abs", _BG_DIFF_MIN))  # magnitude mode
+    bg_dark = int(src.get("bg_dark_thresh", 0))
+    out["bg_lum_thresh"] = max(50, min(255, bg_lum))
+    out["bg_diff_abs"] = max(0, min(255, bg_diff))  # |B-G| magnitude
+    out["bg_dark_thresh"] = max(0, min(100, bg_dark))
+
     return out
 
 
@@ -524,40 +723,25 @@ def normalize_sample_preprocess_map(raw: Any) -> Dict[str, Dict[str, Dict[str, A
     return out
 
 
-def normalize_class_labels_map(raw: Any) -> Dict[str, str]:
-    if not isinstance(raw, dict):
-        return {}
-    out: Dict[str, str] = {}
-    for key, value in raw.items():
-        name = str(key or "").strip()
-        if not name:
-            continue
-        v = str(value or "").strip().lower()
-        if v in {"road", "sign"}:
-            out[name] = v
-    return out
-
-
 def resolve_preprocess_config(
     label_name: str,
     preprocess_mode: str = PREPROCESS_MODE_AUTO_BY_LABEL,
     manual_roi: Any = None,
     class_preprocess: Optional[Dict[str, Dict[str, Any]]] = None,
-    class_labels: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     if class_preprocess:
         item = class_preprocess.get(str(label_name or ""))
         if isinstance(item, dict):
             normalized = normalize_class_preprocess(item)
             item_mode = str(normalized.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
-            if item_mode in {PREPROCESS_MODE_SIGN, PREPROCESS_MODE_JUNCTION, PREPROCESS_MODE_MANUAL_ROI, PREPROCESS_MODE_NONE}:
+            if item_mode == PREPROCESS_MODE_MANUAL_ROI:
                 return {
                     "mode": item_mode,
                     "manual_roi": normalize_manual_roi(normalized.get("manual_roi")),
                 }
     mode = normalize_preprocess_mode(preprocess_mode)
     if mode == PREPROCESS_MODE_AUTO_BY_LABEL:
-        return {"mode": PREPROCESS_MODE_JUNCTION if class_clip_mode(label_name, class_labels=class_labels) == CLIP_MODE_JUNCTION else PREPROCESS_MODE_SIGN, "manual_roi": None}
+        return {"mode": PREPROCESS_MODE_AUTO_BY_LABEL, "manual_roi": None}
     return {"mode": mode, "manual_roi": normalize_manual_roi(manual_roi)}
 
 
@@ -582,12 +766,244 @@ def preprocess_array(arr: np.ndarray, out_size: int, color_mode: str = "grayscal
         x1, y1, x2, y2 = _junction_bbox(gray.shape[0], gray.shape[1])
         preserve_aspect = True
     else:
-        x1, y1, x2, y2 = _focus_bbox(gray)
+        # Use G channel for shadow search — best SNR in green-biased lighting.
+        # Dark sign absorbs green → low G.  White background reflects → high G.
+        g_chan = src[:, :, 1] if src.shape[-1] >= 3 else src[:, :, 0]
+        x1, y1, x2, y2 = _focus_bbox(g_chan.astype(np.uint8))
         preserve_aspect = False
     crop = src[y1:y2, x1:x2]
     if crop.size == 0:
         crop = src
     return _render_crop(crop, out_size=out_size, color_mode=color_mode, preserve_aspect=preserve_aspect)
+
+
+def _find_bg_roi(rgb: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """Find the largest blue/purple region in an RGB image and return its bbox.
+
+    Pipeline:
+    1. Convert near-black (all channels < 30) and near-white (all > 200)
+       pixels to pure white so dark/bright background don't confuse detection.
+    2. Compute B-G difference on the cleaned image (white → 0, blue sign → +).
+    3. Gaussian blur → contrast stretch → binary mask (>80).
+    4. Morphological clean-up (erode 1×, dilate 2×).
+    5. Find largest contour → square crop box with 20 % padding.
+
+    Returns None when no blue/purple region is found.
+    """
+    try:
+        import cv2
+    except Exception:
+        return None  # OpenCV not available → fall back to full frame
+
+    h, w = rgb.shape[:2]
+    if h < 8 or w < 8:
+        return None
+
+    # Step 1 — Convert near-black and near-white pixels to pure white first.
+    # Dark / shadow areas and bright-white background can both confuse the
+    # auto-crop detector.  Replacing both with pure white makes the sign
+    # the only non-background region in the frame.
+    r_raw = rgb[:, :, 0].astype(np.int16)
+    g_raw = rgb[:, :, 1].astype(np.int16)
+    b_raw = rgb[:, :, 2].astype(np.int16)
+    near_black = np.maximum(np.maximum(r_raw, g_raw), b_raw) < _NEAR_BLACK_THRESH
+    near_white = (r_raw > _NEAR_WHITE_THRESH) & (g_raw > _NEAR_WHITE_THRESH) & (b_raw > _NEAR_WHITE_THRESH)
+    background = near_black | near_white
+
+    clean_rgb = rgb.copy()
+    clean_rgb[background] = [255, 255, 255]
+
+    # Step 2 — B-G difference on the cleaned image.
+    # White pixels → B-G = 0 (neutral).  Blue/purple sign → B > G → bright.
+    r = clean_rgb[:, :, 0].astype(np.int16)
+    g = clean_rgb[:, :, 1].astype(np.int16)
+    b = clean_rgb[:, :, 2].astype(np.int16)
+    bg_gray = (b - g).astype(np.float32)
+    bg_blur = cv2.GaussianBlur(bg_gray, (5, 5), 0)
+
+    bg_min = float(bg_blur.min())
+    bg_max = float(bg_blur.max())
+    bg_span = bg_max - bg_min
+    if bg_span < 20:                            # no meaningful contrast
+        return None
+
+    stretched = ((bg_blur - bg_min) / bg_span * 255).astype(np.uint8)
+    mask = (stretched > 80).astype(np.uint8) * 255   # bright = sign, lower = sensitive
+
+    if mask.sum() < 16:
+        return None
+
+    # Morphological clean-up
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.erode(mask, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+
+    # Find contours → largest blob
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    area = float(cv2.contourArea(largest))
+    if area < 16.0:                                  # too small
+        return None
+
+    x, y, bw, bh = cv2.boundingRect(largest)
+
+    # Expand to square with 20 % padding
+    side = max(bw, bh)
+    pad = max(1, int(side * 0.20))
+    side += pad * 2
+    cx, cy = x + bw // 2, y + bh // 2
+    half = side // 2
+    x1 = max(0, cx - half)
+    y1 = max(0, cy - half)
+    x2 = min(w, x1 + side)
+    y2 = min(h, y1 + side)
+    if x2 <= x1 + 4 or y2 <= y1 + 4:
+        return None
+    return (int(x1), int(y1), int(x2), int(y2))
+
+
+def preprocess_blue_diff_array(arr: np.ndarray, out_size: int, color_mode: str = "grayscale",
+                               roi: Optional[Tuple[int, int, int, int]] = None,
+                               bg_dark_thresh: int = 0,
+                               bg_lum_thresh: int = 100,
+                               return_crop_box: bool = False,
+                               fast_mode: bool = False,
+                               return_stats: bool = False):
+    """Simplified pipeline for all-black signs on white background.
+
+    Uses raw G channel (best SNR in green-biased lighting).
+    Sign = dark pixels (G between dark_thresh and lum_thresh).
+    No colour processing needed — black is black in any light.
+    """
+    src = _to_uint8_image(arr)
+    if src.ndim == 2:
+        src = src[:, :, None]
+    if src.shape[-1] < 3:
+        src = np.repeat(src[:, :, :1], 3, axis=2)
+
+    # Use raw G channel as luminance — best SNR in green lighting.
+    # Black sign absorbs all light → low G.  White paper reflects → high G.
+    gray = src[:, :, 1].astype(np.uint8)
+
+    # Simple dark/lum mask: keep only mid-brightness pixels (the sign).
+    # Too dark (below dark_thresh) → shadow/noise → white.
+    # Too bright (above lum_thresh) → paper/background → white.
+    # The mask drives the PREVIEWS and the sign_pct OOD stat; it also drives
+    # the crop search box when the user has TUNED this class's thresholds
+    # (see the crop branches below — the Edit-view sliders exist to move
+    # the ROI).  At default thresholds the crop keeps the exposure-adaptive
+    # band search so auto-exposure shifts don't move the box.
+    is_sign = (gray > bg_dark_thresh) & (gray < bg_lum_thresh)
+    sign_pct = is_sign.mean() * 100
+    too_dark_pct = (gray <= bg_dark_thresh).mean() * 100
+    too_bright_pct = (gray >= bg_lum_thresh).mean() * 100
+    gray[~is_sign] = 255
+
+    # Crop: shadow search (live preview) or center crop (batch/cache)
+    h_orig, w_orig = gray.shape[:2]
+    if roi is not None:
+        x1, y1, x2, y2 = roi
+        x1 = max(0, min(gray.shape[1] - 1, x1))
+        y1 = max(0, min(gray.shape[0] - 1, y1))
+        x2 = max(x1 + 1, min(gray.shape[1], x2))
+        y2 = max(y1 + 1, min(gray.shape[0], y2))
+    elif fast_mode:
+        # Fast: simple center crop (for batch cache rebuild)
+        x1, y1, x2, y2 = _center_bbox(h_orig, w_orig, frac=0.60)
+    elif bg_dark_thresh != 0 or bg_lum_thresh != 100:
+        # Tuned thresholds: the ROI must follow the mask — that is what the
+        # Edit-view dark/lum sliders are for (and what training ingests for
+        # this class via preprocess_for_label).
+        x1, y1, x2, y2 = _focus_bbox(gray)
+    else:
+        # Default thresholds: exposure-adaptive band search on the RAW G
+        # channel (mirrored by find_search_box_adaptive() in
+        # TFLite/image_provider.cpp — keep in lockstep).
+        x1, y1, x2, y2 = _focus_bbox_adaptive(np.asarray(src[:, :, 1], dtype=np.uint8))
+
+    # Save normalized crop box for ROI overlay display
+    crop_norm = (x1 / w_orig, y1 / h_orig, x2 / w_orig, y2 / h_orig)
+
+    # Build a masked-preview image so the user can see dark/lum threshold effects.
+    # This is the G-channel after thresholding (non-sign pixels → white), cropped
+    # and resized to out_size.  Distinct from the model-input image below.
+    masked_preview = None
+    try:
+        mp = gray[y1:y2, x1:x2]  # crop the masked G-channel
+        mp_img = Image.fromarray(mp, mode="L")
+        mp_img = mp_img.resize((int(out_size), int(out_size)), Image.BILINEAR)
+        mp_arr = _contrast_stretch_u8(np.asarray(mp_img, dtype=np.uint8))
+        masked_preview = np.expand_dims(mp_arr.astype(np.float32) / 255.0, axis=-1)
+    except Exception:
+        pass
+
+    # Full-frame thresholded preview (mask applied, NO crop) — for the Orig view.
+    # Keep the frame's aspect ratio (fit inside out_size): the ROI overlay
+    # draws the search box with normalized coordinates of the ORIGINAL frame,
+    # and a squashed square here would misplace the box on the Orig view.
+    full_preview = None
+    try:
+        fp_arr = gray.copy()  # gray is already masked: non-sign → 255
+        fp_img = Image.fromarray(fp_arr, mode="L")
+        fp_img.thumbnail((int(out_size), int(out_size)), Image.BILINEAR)
+        full_preview = np.expand_dims(np.asarray(fp_img, dtype=np.uint8).astype(np.float32) / 255.0, axis=-1)
+    except Exception:
+        pass
+
+    # Crop-only preview: cropped RGB → luminance, resized, NO threshold/stretch.
+    crop_preview = None
+    try:
+        cp_rgb = src[y1:y2, x1:x2, :3].astype(np.int32)
+        cp_gray = ((cp_rgb[:,:,0] * 30 + cp_rgb[:,:,1] * 59 + cp_rgb[:,:,2] * 11 + 50) // 100).astype(np.uint8)
+        cp_img = Image.fromarray(cp_gray, mode="L")
+        cp_img = cp_img.resize((int(out_size), int(out_size)), Image.BILINEAR)
+        crop_preview = np.expand_dims(np.asarray(cp_img, dtype=np.uint8).astype(np.float32) / 255.0, axis=-1)
+    except Exception:
+        pass
+
+    # ── Model-input pixels: device-exact transform ──────────────────────
+    # Mirrors TFLite/image_provider.cpp crop_resize_bilinear() +
+    # contrast_stretch_int8() bit-for-bit: bilinear-resample the RGB crop
+    # (float32, PIL-style center mapping, incl. the firmware's negative
+    # border weights) → BT.601 luminance (30/59/11, round half up) →
+    # contrast stretch (span ≥ 24) → int8 gray−128.
+    # The old host-only path (0.299/0.587/0.114 truncation, then PIL
+    # BILINEAR on uint8) differed from the device by up to ±2 LSB on ~52 %
+    # of pixels; the device-exact version is bit-identical for the same
+    # frame.  For grayscale inputs (replicated channels) the BT.601 step is
+    # an exact identity, so the IMX219_Grayscale_Serial training captures
+    # also stop losing 1 LSB to float-sum truncation.
+    crop_rgb = src[y1:y2, x1:x2, :3]
+    if crop_rgb.shape[0] < 1 or crop_rgb.shape[1] < 1:
+        crop_rgb = src[:, :, :3]
+    out_arr = _device_crop_resize_bilinear_lum(np.asarray(crop_rgb, dtype=np.uint8), int(out_size))
+
+    # Contrast stretch — matches C++ side exactly
+    out = _contrast_stretch_u8(out_arr)
+    result = out.astype(np.float32) / 255.0
+    image = np.expand_dims(result, axis=-1)  # (96,96) → (96,96,1)
+    stats = {
+        "sign_pct": float(sign_pct),
+        "too_dark_pct": float(too_dark_pct),
+        "too_bright_pct": float(too_bright_pct),
+        "bg_dark_thresh": int(bg_dark_thresh),
+        "bg_lum_thresh": int(bg_lum_thresh),
+    } if return_stats else None
+    # Backward compatible return structure: stats appended ONLY when return_stats=True.
+    # When both return_crop_box + return_stats → stats is always LAST element.
+    if return_crop_box:
+        if masked_preview is not None and crop_preview is not None and full_preview is not None:
+            t = (image, crop_norm, masked_preview, crop_preview, full_preview)
+            return (*t, stats) if return_stats else t
+        t = (image, crop_norm)
+        return (*t, stats) if return_stats else t
+    if masked_preview is not None and crop_preview is not None and full_preview is not None:
+        t = (image, masked_preview, crop_preview, full_preview)
+        return (*t, stats) if return_stats else t
+    return (image, stats) if return_stats else image
 
 
 def preprocess_manual_roi_array(arr: np.ndarray, out_size: int, color_mode: str = "grayscale", manual_roi: Any = None) -> np.ndarray:
@@ -612,27 +1028,38 @@ def preprocess_for_label(
     preprocess_mode: str = PREPROCESS_MODE_AUTO_BY_LABEL,
     manual_roi: Any = None,
     class_preprocess: Optional[Dict[str, Dict[str, Any]]] = None,
-    class_labels: Optional[Dict[str, str]] = None,
+    crop_mode: str = CROP_MODE_AUTO_SEARCH,
 ) -> np.ndarray:
     resolved = resolve_preprocess_config(
         label_name=label_name,
         preprocess_mode=preprocess_mode,
         manual_roi=manual_roi,
         class_preprocess=class_preprocess,
-        class_labels=class_labels,
     )
     mode = str(resolved.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
-    resolved_roi = resolved.get("manual_roi")
-    if mode == PREPROCESS_MODE_NONE:
-        src = _to_uint8_image(arr)
-        if src.ndim == 2:
-            src = src[:, :, None]
-        return _render_crop(src, out_size=out_size, color_mode=color_mode, preserve_aspect=True)
+    roi: Any = None
     if mode == PREPROCESS_MODE_MANUAL_ROI:
-        return preprocess_manual_roi_array(arr, out_size=out_size, color_mode=color_mode, manual_roi=resolved_roi)
-    if mode == PREPROCESS_MODE_JUNCTION:
-        return preprocess_array(arr, out_size=out_size, color_mode=color_mode, clip_mode=CLIP_MODE_JUNCTION)
-    return preprocess_array(arr, out_size=out_size, color_mode=color_mode, clip_mode=CLIP_MODE_SIGN)
+        resolved_roi = resolved.get("manual_roi")
+        src = _to_uint8_image(arr)
+        roi = manual_roi_to_pixels(src.shape[0], src.shape[1], resolved_roi)
+    class_cfg = normalize_class_preprocess(class_preprocess.get(str(label_name or ""))) if class_preprocess else {}
+    # Training must use the SAME transform the model is deployed with.
+    # crop_mode selects the model-input crop (auto shadow-search box or the
+    # deterministic center 60 % crop); a manual ROI still takes precedence.
+    if mode == PREPROCESS_MODE_MANUAL_ROI:
+        fast_mode = True
+    else:
+        fast_mode = (str(crop_mode or CROP_MODE_CENTER) != CROP_MODE_AUTO_SEARCH)
+    result = preprocess_blue_diff_array(
+        arr, out_size=out_size, color_mode=color_mode, roi=roi,
+        bg_dark_thresh=int(class_cfg.get("bg_dark_thresh", 0)),
+        bg_lum_thresh=int(class_cfg.get("bg_lum_thresh", 100)),
+        fast_mode=fast_mode,
+    )
+    # preprocess_blue_diff_array returns a preview tuple when the optional
+    # previews are computed; training callers (trainer.py numpy_function)
+    # need the single model-input array.
+    return result[0] if isinstance(result, tuple) else result
 
 
 def prepare_inference_inputs(
@@ -642,28 +1069,99 @@ def prepare_inference_inputs(
     preprocess_mode: str = PREPROCESS_MODE_AUTO_BY_LABEL,
     manual_roi: Any = None,
     class_preprocess: Optional[Dict[str, Dict[str, Any]]] = None,
-    class_labels: Optional[Dict[str, str]] = None,
-) -> Dict[str, np.ndarray]:
+    bg_dark_thresh: Optional[int] = None,
+    bg_lum_thresh: Optional[int] = None,
+    crop_mode: str = CROP_MODE_CENTER,
+) -> Dict[str, Any]:
     mode = normalize_preprocess_mode(preprocess_mode)
-    if mode == PREPROCESS_MODE_NONE:
-        return {"full": preprocess_for_label(arr, out_size=out_size, color_mode=color_mode, preprocess_mode=PREPROCESS_MODE_NONE)}
+    roi: Any = None
     if mode == PREPROCESS_MODE_MANUAL_ROI:
-        return {
-            PREPROCESS_MODE_MANUAL_ROI: preprocess_manual_roi_array(
-                arr,
-                out_size=out_size,
-                color_mode=color_mode,
-                manual_roi=manual_roi,
+        src = _to_uint8_image(arr)
+        roi = manual_roi_to_pixels(src.shape[0], src.shape[1], manual_roi)
+    use_dark = int(bg_dark_thresh) if bg_dark_thresh is not None else 0
+    use_lum  = int(bg_lum_thresh)  if bg_lum_thresh  is not None else 100
+    use_dark = max(0, min(255, use_dark))
+    use_lum = max(1, min(255, use_lum))
+    # Crop selection — MUST match how the model was trained and how the
+    # device firmware crops (BG_ENABLE_FOCUS_SEARCH):
+    #   crop_mode = CROP_MODE_AUTO_SEARCH → auto shadow-search box is the
+    #       MODEL INPUT (background removed).  Mirrors the device C port
+    #       bit-for-bit.
+    #   crop_mode = CROP_MODE_CENTER → deterministic center 60 % crop
+    #       (legacy; old deployed models).
+    # A manual ROI still takes precedence in manual_roi mode.
+    auto_search = (str(crop_mode or CROP_MODE_CENTER) == CROP_MODE_AUTO_SEARCH)
+    if mode == PREPROCESS_MODE_MANUAL_ROI:
+        fast_mode = True  # roi box wins regardless
+    else:
+        fast_mode = not auto_search
+    result = preprocess_blue_diff_array(arr, out_size=out_size, color_mode=color_mode, roi=roi,
+                                        bg_dark_thresh=use_dark,
+                                        bg_lum_thresh=use_lum,
+                                        return_crop_box=True,
+                                        fast_mode=fast_mode,
+                                        return_stats=True)
+    out: Dict[str, Any] = {"default": None, "mask_stats": None}
+    stats: Any = None
+    crop_norm: Any = None
+    if isinstance(result, tuple):
+        image = result[0]
+        out["default"] = image
+        if len(result) >= 2:
+            crop_norm = result[1]
+        if len(result) >= 6 and isinstance(result[-1], dict):
+            stats = result[-1]
+            out["mask_stats"] = stats
+            result = result[:-1]
+        if len(result) >= 5 and result[2] is not None:
+            out["masked_preview"] = result[2]
+        if len(result) >= 5 and result[3] is not None:
+            out["crop_preview"] = result[3]
+        if len(result) >= 5 and result[4] is not None:
+            out["full_preview"] = result[4]
+        if len(result) >= 2 and len(result) < 4:
+            out["masked_preview"] = image
+    else:
+        out["default"] = result
+    if "masked_preview" not in out:
+        out["masked_preview"] = out.get("default")
+    if "crop_preview" not in out:
+        out["crop_preview"] = out.get("default")
+    if "full_preview" not in out:
+        out["full_preview"] = out.get("default")
+    # Auto search box for the UI (green box overlay + the ROI crop view
+    # tracks the search).  In CROP_MODE_AUTO_SEARCH the box IS the model
+    # crop — reuse the main run's crop_norm (no second search).  In center
+    # mode the model input keeps the center crop, but the preview variants
+    # (masked / crop / full) come from a focus-search run so the ROI view
+    # still shows the JUMPING auto-detected crop, like the pre-fast_mode
+    # era.  Manual mode reuses the manual box.
+    search_box: Any = None
+    if mode == PREPROCESS_MODE_MANUAL_ROI:
+        search_box = list(crop_norm) if crop_norm is not None else None
+    elif auto_search and roi is None:
+        search_box = list(crop_norm) if crop_norm is not None else None
+    elif roi is None:
+        try:
+            box_result = preprocess_blue_diff_array(
+                arr, out_size=out_size, color_mode=color_mode, roi=None,
+                bg_dark_thresh=use_dark, bg_lum_thresh=use_lum,
+                return_crop_box=True, fast_mode=False,
             )
-        }
-    if mode == PREPROCESS_MODE_SIGN:
-        return {"sign": preprocess_array(arr, out_size=out_size, color_mode=color_mode, clip_mode=CLIP_MODE_SIGN)}
-    if mode == PREPROCESS_MODE_JUNCTION:
-        return {"junction": preprocess_array(arr, out_size=out_size, color_mode=color_mode, clip_mode=CLIP_MODE_JUNCTION)}
-    return {
-        "sign": preprocess_array(arr, out_size=out_size, color_mode=color_mode, clip_mode=CLIP_MODE_SIGN),
-        "junction": preprocess_array(arr, out_size=out_size, color_mode=color_mode, clip_mode=CLIP_MODE_JUNCTION),
-    }
+            if isinstance(box_result, tuple):
+                if len(box_result) >= 2 and box_result[1] is not None:
+                    search_box = list(box_result[1])
+                if len(box_result) >= 5:
+                    if box_result[2] is not None:
+                        out["masked_preview"] = box_result[2]
+                    if box_result[3] is not None:
+                        out["crop_preview"] = box_result[3]
+                    if box_result[4] is not None:
+                        out["full_preview"] = box_result[4]
+        except Exception:
+            search_box = None
+    out["search_box"] = search_box
+    return out
 
 
 def focus_and_enhance_array(arr: np.ndarray, out_size: int, color_mode: str = "grayscale") -> np.ndarray:

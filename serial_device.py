@@ -3,9 +3,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import List, Optional
-import json
-import urllib.request
-import threading
 
 import numpy as np
 from PIL import Image
@@ -17,52 +14,6 @@ HEADER = bytes([0xAA, 0x55, 0xAA])  # default frame sync header
 DEFAULT_FRAME_SIDE = 96
 
 
-# #region debug-point A:serial-frame-reader
-def _dbg_device_frame_timeout(hypothesis_id: str, location: str, msg: str, data: dict) -> None:
-    _p = ".dbg/device-160-frame.env"
-    _u = "http://127.0.0.1:7777/event"
-    _s = "device-160-frame"
-    try:
-        try_paths = [".dbg/device-160-frame.env", ".dbg/device-frame-timeout.env"]
-        _c = ""
-        for _pp in try_paths:
-            try:
-                with open(_pp, "r", encoding="utf-8") as f:
-                    _c = f.read()
-                _p = _pp
-                break
-            except Exception:
-                continue
-        for _line in _c.splitlines():
-            if _line.startswith("DEBUG_SERVER_URL="):
-                _u = _line.split("=", 1)[1].strip() or _u
-            elif _line.startswith("DEBUG_SESSION_ID="):
-                _s = _line.split("=", 1)[1].strip() or _s
-    except Exception:
-        pass
-    try:
-        _payload = {
-            "sessionId": _s,
-            "runId": "pre-fix",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "msg": msg,
-            "data": data,
-            "ts": int(time.time() * 1000),
-        }
-        urllib.request.urlopen(
-            urllib.request.Request(
-                _u,
-                data=json.dumps(_payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            ),
-            timeout=0.4,
-        ).read()
-    except Exception:
-        pass
-# #endregion
-
-
 @dataclass(frozen=True)
 class SerialPortInfo:
     device: str
@@ -70,21 +21,20 @@ class SerialPortInfo:
 
 
 class SerialFrameReader:
-    def __init__(
-        self,
-        port: str,
-        baud: int,
-        sync_header: bytes | str | None = None,
-        frame_side: int = DEFAULT_FRAME_SIDE,
-    ) -> None:
+    def __init__(self, port: str, baud: int, sync_header: bytes | str | None = None,
+                 frame_side: int = DEFAULT_FRAME_SIDE, channels: int = 1) -> None:
         self._port = port
         self._baud = int(baud)
         self._header = parse_sync_header(sync_header)
         side = int(frame_side)
         if side < 8 or side > 512:
             raise ValueError("Invalid frame_side.")
+        ch = int(channels)
+        if ch not in (1, 3):
+            raise ValueError("channels must be 1 (grayscale) or 3 (RGB).")
         self._frame_side = side
-        self._frame_size = int(side) * int(side)
+        self._channels = ch
+        self._frame_size = int(side) * int(side) * ch
         self._ser = None
         self._buf = bytearray()
 
@@ -94,76 +44,52 @@ class SerialFrameReader:
         except Exception as e:
             raise RuntimeError("pyserial is missing (serial module not available).") from e
 
-        _dbg_device_frame_timeout(
-            "A",
-            "serial_device.py:open",
-            "[DEBUG] serial open requested",
-            {
-                "port": self._port,
-                "baud": int(self._baud),
-                "header_hex": self._header.hex(" ").upper(),
-                "thread": threading.current_thread().name,
-            },
-        )
         self._ser = serial.Serial(port=self._port, baudrate=self._baud, timeout=0.1)
         self._buf = bytearray()
         try:
             self._ser.reset_input_buffer()
         except Exception:
             pass
-        _dbg_device_frame_timeout(
-            "A",
-            "serial_device.py:open",
-            "[DEBUG] serial open completed",
-            {
-                "port": self._port,
-                "baud": int(self._baud),
-                "thread": threading.current_thread().name,
-            },
-        )
 
     def close(self) -> None:
         if self._ser is not None:
             try:
-                _dbg_device_frame_timeout(
-                    "C",
-                    "serial_device.py:close",
-                    "[DEBUG] serial close requested",
-                    {
-                        "port": self._port,
-                        "thread": threading.current_thread().name,
-                        "buf_len": len(self._buf),
-                    },
-                )
                 self._ser.close()
             finally:
                 self._ser = None
 
-    def read_frame(self, timeout_s: float = 3.0) -> bytes:
+    def read_frame(self, timeout_s: Optional[float] = None) -> bytes:
         if self._ser is None:
             raise RuntimeError("Serial not opened")
+        # Auto-scale: one frame takes frame_size * ~12 bits/byte at baud.
+        # 96×96×3 @ 921600 ≈ 0.3s, 160×160×3 @ 115200 ≈ 6.7s — the old
+        # fixed 2-3s timeout was too short for large frames at low baud.
+        min_timeout = max(3.0, float(self._frame_size) * 12.0 / max(1, self._baud))
+        if timeout_s is None:
+            timeout_s = min_timeout
+        else:
+            # Floor caller-supplied timeouts: a fixed 2s timeout cannot
+            # transfer a 160×160 frame at 115200, so it would time out
+            # every frame and recording would stall.
+            timeout_s = max(float(timeout_s), min_timeout)
         start = time.time()
         header = self._header
         header_len = len(header)
-        _dbg_device_frame_timeout(
-            "B",
-            "serial_device.py:read_frame",
-            "[DEBUG] serial read_frame started",
-            {
-                "port": self._port,
-                "timeout_s": float(timeout_s),
-                "header_hex": header.hex(" ").upper(),
-                "frame_side": int(self._frame_side),
-                "thread": threading.current_thread().name,
-                "buf_len": len(self._buf),
-            },
-        )
         while time.time() - start < timeout_s:
-            chunk = self._ser.read(4096)
+            # Scale the read size with frame size so large frames (160×160×3
+            # = 76800 bytes) are consumed in few reads instead of many
+            # 4096-byte chunks; reads return as soon as bytes are available.
+            read_size = min(max(4096, self._frame_size), 65536)
+            chunk = self._ser.read(read_size)
             if chunk:
                 self._buf.extend(chunk)
-                if len(self._buf) > 262144:
-                    self._buf = self._buf[-65536:]
+                # Keep at least 4× frame_size so we never discard a pending frame.
+                # For 384×384×3 RGB that is ~1.7 MB — fine on a desktop.
+                keep = int(self._frame_size) * 4
+                if keep < 65536:
+                    keep = 65536
+                if len(self._buf) > keep * 2:
+                    self._buf = self._buf[-keep:]
             else:
                 time.sleep(0.004)
             while True:
@@ -184,36 +110,9 @@ class SerialFrameReader:
                         del self._buf[: idx + 1]
                         continue
                 frame = bytes(self._buf[after:need])
-                _dbg_device_frame_timeout(
-                    "B",
-                    "serial_device.py:read_frame",
-                    "[DEBUG] serial read_frame succeeded",
-                    {
-                        "port": self._port,
-                        "elapsed_ms": int((time.time() - start) * 1000),
-                        "frame_len": len(frame),
-                        "frame_side": int(self._frame_side),
-                        "buf_remaining": max(0, len(self._buf) - need),
-                        "thread": threading.current_thread().name,
-                    },
-                )
                 del self._buf[:need]
                 return frame
-        _dbg_device_frame_timeout(
-            "A",
-            "serial_device.py:read_frame",
-            "[DEBUG] serial read_frame timed out",
-            {
-                "port": self._port,
-                "elapsed_ms": int((time.time() - start) * 1000),
-                "header_hex": header.hex(" ").upper(),
-                "frame_side": int(self._frame_side),
-                "buf_len": len(self._buf),
-                "buf_tail_hex": bytes(self._buf[-24:]).hex(" ").upper(),
-                "thread": threading.current_thread().name,
-            },
-        )
-        raise TimeoutError("Timeout waiting for frame header")
+        raise TimeoutError(f"Timeout waiting for frame header (need {self._frame_size} bytes, buf has {len(self._buf)}, waited {timeout_s:.1f}s)")
 
 
 def list_serial_ports() -> List[SerialPortInfo]:
@@ -253,18 +152,24 @@ def read_frame_png_from_serial(
     port: str,
     baud: int,
     sync_header: bytes | str | None = None,
+    timeout_s: Optional[float] = None,
     frame_side: int = DEFAULT_FRAME_SIDE,
-    timeout_s: float = 3.0,
+    channels: int = 1,
 ) -> bytes:
-    reader = SerialFrameReader(port=port, baud=baud, sync_header=sync_header, frame_side=frame_side)
+    reader = SerialFrameReader(port=port, baud=baud, sync_header=sync_header, frame_side=frame_side, channels=channels)
     reader.open()
     try:
         frame = reader.read_frame(timeout_s=timeout_s)
     finally:
         reader.close()
     side = int(frame_side)
-    arr = np.frombuffer(frame, dtype=np.uint8).reshape((side, side))
-    img = Image.fromarray(arr, mode="L")
+    ch = int(channels)
+    if ch == 3:
+        arr = np.frombuffer(frame, dtype=np.uint8).reshape((side, side, 3))
+        img = Image.fromarray(arr, mode="RGB")
+    else:
+        arr = np.frombuffer(frame, dtype=np.uint8).reshape((side, side))
+        img = Image.fromarray(arr, mode="L")
     return _to_png_bytes(img)
 
 

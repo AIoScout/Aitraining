@@ -34,12 +34,14 @@ def inject_teachable_style() -> None:
   [data-testid="stAppViewContainer"] > .main > div,
   .block-container {
     width: 100%;
-    max-width: none !important;
+    max-width: 1100px !important;
     box-sizing: border-box;
   }
   .block-container {
-    padding-top: 0.65rem;
-    padding-bottom: 2rem;
+    max-width: 1100px !important;
+    margin: 0 auto !important;
+    padding-top: 3rem !important;
+    padding-bottom: 4rem !important;
     padding-left: 18px;
     padding-right: 18px;
   }
@@ -111,6 +113,25 @@ def inject_teachable_style() -> None:
   }
 
   .tm-title { font-size: 44px; font-weight: 800; margin: 0 0 10px 0; letter-spacing: -0.03em; }
+  .tm-hero-main-title {
+    font-size: 56px;
+    font-weight: 900;
+    margin: 0 0 14px 0;
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+  }
+  .tm-hero, .tm-hero-main-sub, .tm-chip-row, .tm-flow-lane {
+    text-align: left !important;
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+  }
+  .tm-hero-main-sub {
+    font-size: 19px;
+    line-height: 1.5;
+    color: var(--tm-muted);
+    margin: 0 0 2rem 0 !important;
+    max-width: 540px !important;
+  }
   .tm-sub { color: var(--tm-muted); margin: 0 0 20px 0; font-size: 16px; line-height: 1.6; }
   .tm-eyebrow {
     display: inline-flex;
@@ -121,15 +142,270 @@ def inject_teachable_style() -> None:
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--tm-primary);
-    margin-bottom: 8px;
+    margin-bottom: 4px;
+  }
+  .tm-section-head-lg {
+    font-size: 30px;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    color: var(--tm-text);
+    margin: 0 0 4px 0;
+  }
+  .tm-section-sub {
+    color: var(--tm-muted);
+    font-size: 15px;
+    line-height: 1.6;
+    margin: 0 0 18px 0;
+  }
+  /* ── Linear horizontal workflow stepper (bulletproof against Streamlit wrappers) ── */
+  [data-testid="stMarkdownContainer"] > .tm-hero .tm-flow-lane,
+  .tm-flow-lane {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0 10px 0;
+  }
+  .tm-flow-lane-step {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 18px;
+    background: rgba(255,255,255,0.98);
+    border: 1px solid rgba(16, 35, 63, 0.08);
+    box-shadow: var(--tm-shadow-soft);
+    border-radius: 16px;
+  }
+  .tm-flow-arrow {
+    flex: 0 0 auto;
+    margin: 0 12px;
+    font-size: 22px;
+    font-weight: 900;
+    color: #888;
+    line-height: 1;
+  }
+  .tm-flow-lane-step .num {
+    flex: 0 0 auto;
+    width: 44px;
+    height: 44px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--tm-primary) 12%, transparent);
+    color: var(--tm-primary-strong);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+  }
+  .tm-flow-lane-step .text strong {
+    display: block;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--tm-text);
+    margin-bottom: 3px;
+  }
+  .tm-flow-lane-step .text small {
+    display: block;
+    color: var(--tm-muted);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  /* ── Image project card (expanded, visual-weight dominant) ── */
+  .tm-image-project-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.85fr);
+    gap: 24px;
+    align-items: center;
+    padding: 28px 30px;
+    border-radius: 22px;
+    background: linear-gradient(135deg, color-mix(in srgb, var(--tm-primary) 6%, var(--tm-surface)) 0%, var(--tm-surface) 60%);
+    border: 1px solid color-mix(in srgb, var(--tm-primary) 22%, var(--tm-border));
+    box-shadow: var(--tm-shadow);
+  }
+  .tm-image-project-hero .left h3 {
+    font-size: 30px;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    margin: 0 0 8px 0;
+  }
+  .tm-image-project-hero .left p {
+    color: var(--tm-muted);
+    font-size: 15px;
+    line-height: 1.7;
+    margin: 0 0 18px 0;
+  }
+  .tm-image-project-hero .left .tm-eyebrow {
+    font-size: 13px;
+    margin-bottom: 10px;
+  }
+  .tm-image-project-hero .right {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .tm-image-project-hero .right .stButton > button,
+  .tm-image-project-hero .right [data-testid="stPopoverButton"] button,
+  .tm-hero-action-stack + div [data-testid="stPopoverButton"] button {
+    min-height: 52px !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+  }
+  .tm-image-project-hero-single {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .tm-image-project-hero .left h3 .tm-badge {
+    vertical-align: middle;
+    margin-top: -3px;
+  }
+  .tm-badge-primary {
+    background: rgba(34, 197, 94, 0.13) !important;
+    color: rgb(21, 128, 61) !important;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    border: 1px solid rgba(34, 197, 94, 0.32);
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    vertical-align: middle;
+    margin-left: 8px;
+  }
+  /* ── Compact centered Image Project card (CTA lives inside) ── */
+  [data-testid="stContainer"]:has(> div > .tm-start-card),
+  [data-testid="stContainer"]:has(.tm-start-card),
+  [data-testid="stColumn"]:has(.tm-start-card) {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 0 2rem 0;
+    padding: 20px !important;
+    background: #FFFFFF !important;
+    border: 1px solid #E5E7EB !important;
+    border-radius: 12px !important;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05) !important;
+    text-align: left;
+    height: fit-content;
+  }
+  .tm-start-card-head h3 {
+    font-size: 22px;
+    font-weight: 800;
+    margin: 0;
+  }
+  .tm-start-card-head p {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--tm-muted);
+    margin: 4px 0 16px 0;
+  }
+  [data-testid="stContainer"]:has(.tm-start-card) .stButton > button,
+  [data-testid="stContainer"]:has(.tm-start-card) [data-testid="stPopoverButton"] > button,
+  [data-testid="stColumn"]:has(.tm-start-card) .stButton > button,
+  [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stPopoverButton"] > button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    line-height: normal !important;
+    width: 100% !important;
+    margin-bottom: 8px !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
+  }
+  /* Refine Text Input borders */
+  [data-testid="stTextInput"] input {
+    border-radius: 8px !important;
+    border: 1px solid #CBD5E1 !important;
+    padding: 12px 16px !important;
+  }
+  [data-testid="stTextInput"] input:focus {
+    border-color: #3169FF !important;
+    box-shadow: 0 0 0 1px #3169FF !important;
+  }
+  /* Refine File Uploader */
+  [data-testid="stFileUploader"] section {
+    border-radius: 12px !important;
+    background-color: #F8FAFC !important;
+    border: 2px dashed #CBD5E1 !important;
+  }
+  /* Primary button: override Streamlit red/orange default (must come after tertiary to win) */
+  [data-testid="stButton"] button[kind="primary"],
+  [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stButton"] button[kind="primary"],
+  [data-testid="stContainer"]:has(.tm-start-card) [data-testid="stButton"] button[kind="primary"] {
+    background-color: #3169FF !important;
+    border-color: #3169FF !important;
+    color: white !important;
+    text-decoration: none !important;
+  }
+  /* Secondary button: kill Streamlit's jarring red/pink border, use neutral gray + brand blue on hover */
+  [data-testid="stButton"] button[kind="secondary"],
+  [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"],
+  [data-testid="stContainer"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"] {
+    border-color: #94A3B8 !important;
+    color: #334155 !important;
+    background: #FFFFFF !important;
+    transition: all 0.2s ease-in-out !important;
+  }
+  [data-testid="stButton"] button[kind="secondary"]:hover,
+  [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"]:hover,
+  [data-testid="stContainer"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"]:hover {
+    border-color: #3169FF !important;
+    color: #3169FF !important;
+    background: #FFFFFF !important;
+  }
+  @media (max-width: 960px) {
+    .tm-image-project-hero {
+      grid-template-columns: 1fr;
+      gap: 18px;
+    }
+    .tm-flow-lane {
+      flex-direction: column;
+      gap: 12px;
+    }
+    .tm-flow-arrow {
+      transform: rotate(90deg);
+    }
+  }
+  @media (prefers-color-scheme: dark) {
+    .tm-flow-lane-step {
+      background: #18202a;
+      border-color: rgba(255,255,255,0.1);
+    }
+    .tm-image-project-hero {
+      background: linear-gradient(135deg, color-mix(in srgb, var(--tm-primary) 14%, var(--tm-surface)) 0%, var(--tm-surface) 60%);
+      border-color: rgba(255,255,255,0.14);
+    }
+    .tm-badge-primary {
+      background: rgba(52, 211, 153, 0.16) !important;
+      color: rgb(110, 231, 183) !important;
+      border-color: rgba(52, 211, 153, 0.34);
+    }
+    [data-testid="stContainer"]:has(.tm-start-card) {
+      background: linear-gradient(160deg, rgba(49, 105, 255, 0.14) 0%, #18202a 100%);
+      border-color: rgba(138, 180, 248, 0.22);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.2);
+    }
+    [data-testid="stColumn"]:has(.tm-start-card) {
+      background: linear-gradient(160deg, rgba(49, 105, 255, 0.14) 0%, #18202a 100%);
+      border-color: rgba(138, 180, 248, 0.22);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.2);
+    }
   }
   .tm-hero {
-    border: 1px solid var(--tm-border);
-    border-radius: 20px;
-    padding: 20px 24px;
-    background: var(--tm-surface);
-    box-shadow: var(--tm-shadow);
-    margin-bottom: 16px;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    text-align: left;
+  }
+  .tm-hero-main-sub {
+    margin-left: 0;
+    margin-right: 0;
   }
   .tm-hero-grid {
     display: grid;
@@ -156,7 +432,7 @@ def inject_teachable_style() -> None:
     padding: 10px 12px;
     border-radius: 14px;
     background: rgba(255,255,255,0.96);
-    border: 1px solid var(--tm-border);
+    border: 1px solid rgba(16, 35, 63, 0.08);
     box-shadow: var(--tm-shadow-soft);
   }
   .tm-flow-step span {
@@ -221,8 +497,8 @@ def inject_teachable_style() -> None:
   .tm-hero-panel {
     border-radius: 16px;
     padding: 14px 16px;
-    background: var(--tm-surface);
-    border: 1px solid var(--tm-border);
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgba(16, 35, 63, 0.06);
     box-shadow: var(--tm-shadow-soft);
   }
   .tm-hero-panel h4 {
@@ -238,8 +514,8 @@ def inject_teachable_style() -> None:
   .tm-stat {
     border-radius: 14px;
     padding: 12px 14px;
-    background: var(--tm-surface);
-    border: 1px solid var(--tm-border);
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgba(16, 35, 63, 0.06);
   }
   .tm-stat-label {
     font-size: 12px;
@@ -260,23 +536,27 @@ def inject_teachable_style() -> None:
     color: var(--tm-muted);
   }
   .tm-chip-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-top: 16px;
+    display: flex !important;
+    flex-wrap: wrap !important;
+    justify-content: flex-start;
+    gap: 8px !important;
+    margin-top: 0;
+    margin-bottom: 1.5rem !important;
+    padding-left: 0 !important;
   }
   .tm-chip {
-    display: inline-flex;
-    align-items: center;
-    padding: 6px 10px;
-    border-radius: 999px;
-    background: rgba(49, 105, 255, 0.08);
-    color: var(--tm-primary-strong);
-    font-size: 12px;
-    font-weight: 600;
+    display: inline-block;
+    padding: 4px 12px !important;
+    border-radius: 100px !important;
+    background-color: #F1F5F9 !important;
+    border: 1px solid #E2E8F0 !important;
+    color: #475569 !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    cursor: default;
   }
   .tm-card {
-    border: 1px solid var(--tm-border);
+    border: 1px solid rgba(16, 35, 63, 0.08);
     border-radius: 18px;
     padding: 18px 18px 16px 18px;
     background: var(--tm-surface);
@@ -315,8 +595,8 @@ def inject_teachable_style() -> None:
     padding: 10px 12px;
     margin: 12px 0 8px 0;
     border-radius: 14px;
-    background: var(--tm-surface);
-    border: 1px solid var(--tm-border);
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgba(16, 35, 63, 0.06);
     box-shadow: var(--tm-shadow-soft);
   }
   .tm-class-header strong {
@@ -331,7 +611,7 @@ def inject_teachable_style() -> None:
     border-radius: 14px;
     padding: 12px 14px;
     background: rgba(255,255,255,0.94);
-    border: 1px solid var(--tm-border);
+    border: 1px solid rgba(16, 35, 63, 0.06);
     color: var(--tm-muted);
     margin: 8px 0 12px 0;
   }
@@ -673,7 +953,7 @@ def inject_teachable_style() -> None:
     border: 1px solid rgba(49, 105, 255, 0.10);
   }
   .tm-panel {
-    border: 1px solid var(--tm-border);
+    border: 1px solid rgba(16, 35, 63, 0.08);
     border-radius: 16px;
     padding: 10px;
     background: var(--tm-surface-strong);
@@ -1041,104 +1321,68 @@ def inject_teachable_style() -> None:
     }
   }
 
-</style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def inject_dark_mode_patch() -> None:
-    """Dark-mode patch for the Streamlit chrome.
-
-    The embedded workspace (app.py's HTML blob) already follows the system
-    theme via prefers-color-scheme, but Streamlit itself has no dark theme
-    configured — in macOS dark mode the page stayed light behind dark
-    components. Align the Streamlit surfaces with the blob's dark palette
-    and let component iframes show the page background through.
-    """
-    import streamlit as st
-
-    st.markdown(
-        """
-<style>
-  /* The embedded workspace iframe must never paint its own background. */
-  .stComponent, .stComponent iframe,
-  [data-testid="stComponentBody"],
-  [data-testid="element-container"] .stComponent {
-    background: transparent !important;
-  }
-
+  /* Dark mode: keep the Teachable-style surfaces consistent with the in-app
+     SPA (app.py) so text does not stay light-mode black on dark backgrounds. */
   @media (prefers-color-scheme: dark) {
-    /* Palette mirrors the workspace blob's own dark variables. */
-    .stApp, [data-testid="stAppViewContainer"] {
-      background: #0f141a;
-      color: #e8eaed;
-    }
-    [data-testid="stAppViewContainer"] > .main,
-    .block-container,
-    section[data-testid="stSidebar"] {
-      background: transparent;
-      color: #e8eaed;
-    }
     :root {
+      color-scheme: dark;
       --tm-bg: #0f141a;
       --tm-flow-bg: #111821;
-      --tm-surface: #1a212b;
+      --tm-surface: #18202a;
       --tm-surface-strong: #202833;
       --tm-text: #e8eaed;
       --tm-muted: #a8b0ba;
       --tm-border: rgba(255, 255, 255, 0.12);
-      --tm-accent: rgba(138, 180, 248, 0.10);
-      --tm-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
-      --tm-shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.24);
+      --tm-primary: #8ab4f8;
+      --tm-primary-strong: #aecbfa;
+      --tm-accent: rgba(138, 180, 248, 0.12);
+      --tm-success: #34a853;
+      --tm-shadow: 0 2px 8px rgba(0, 0, 0, 0.40);
+      --tm-shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.32);
     }
-    .stApp p, .stApp span, .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
-      color: var(--tm-text);
+
+    .tm-hero,
+    .tm-card {
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
+    .tm-flow-step,
+    .tm-hero-panel,
+    .tm-stat,
+    .tm-class-header,
+    .tm-inline-note {
+      background: #18202a;
+      border-color: rgba(255, 255, 255, 0.10);
+    }
+
+    .tm-kv {
+      background: rgba(138, 180, 248, 0.12);
+      border-color: rgba(138, 180, 248, 0.20);
+    }
+
+    .stTabs [data-baseweb="tab"] {
+      background: #18202a;
+    }
+    .stTabs [aria-selected="true"] {
+      background: rgba(138, 180, 248, 0.20);
+      color: #aecbfa;
+    }
+
+    /* Streamlit/baseweb form controls inherit light-theme text color; force it
+       to follow the dark surface so typed text is readable. */
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stSelectbox"] [data-baseweb="select"],
+    [data-baseweb="select"] div,
+    [data-baseweb="select"] span,
+    [data-baseweb="select"] p {
+      color: #e8eaed !important;
+      -webkit-text-fill-color: #e8eaed !important;
     }
   }
+
 </style>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-def inject_workspace_fullcanvas() -> None:
-    """Pin the embedded workspace to a full-viewport, non-scrolling canvas.
-
-    The workspace blob renders inside a Streamlit component iframe sized to
-    its content; together with the page scrollbar that produced a fixed-width
-    layout with endless blank space below. Restore the original Teachable
-    Machine behavior: the iframe fills the window and the page never scrolls.
-    Only injected on the workspace page.
-    """
-    import streamlit as st
-
-    st.markdown(
-        """
-<style>
-  [data-testid="stAppViewContainer"] > .main,
-  section[data-testid="stSidebar"] {
-    overflow: hidden !important;
-  }
-  [data-testid="stAppViewContainer"] > .main > div,
-  .block-container {
-    height: 100vh;
-    max-height: 100vh;
-    overflow: hidden !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    max-width: none !important;
-  }
-  .stComponent iframe,
-  iframe.stIFrame,
-  [data-testid="stComponentBody"] iframe,
-  iframe[title^="streamlit_component"] {
-    height: 100vh !important;
-    min-height: 100vh !important;
-    max-height: 100vh !important;
-    display: block;
-  }
-</style>
-""",
+        """,
         unsafe_allow_html=True,
     )
