@@ -21,6 +21,90 @@ COMMON_SPLIT_NAMES = {
     "testing",
 }
 
+# ── Project types ───────────────────────────────────────────────────────
+# The ONE place a project type is named.  Everything downstream (session
+# config, train config, .tmproj manifest, sample transform dispatch) carries
+# this string rather than a boolean or a parallel code path, so adding a
+# project type never means forking the persistence or training lifecycle.
+PROJECT_TYPE_IMAGE = "image"
+PROJECT_TYPE_OCR = "ocr"
+# The classified-import page is an image-project variant, not a third
+# pipeline: it produces the same workspace and trains with the same code.
+PROJECT_TYPE_CLASSIFIED_IMPORT = "image_classified_import"
+
+KNOWN_PROJECT_TYPES = (
+    PROJECT_TYPE_IMAGE,
+    PROJECT_TYPE_OCR,
+    PROJECT_TYPE_CLASSIFIED_IMPORT,
+)
+
+# Model input size per project type.  The image project's 96 is the default
+# in TrainConfig/SessionConfig; OCR works on 28x28 glyphs and reuses the SAME
+# img_size plumbing rather than introducing a second size concept.
+DEFAULT_IMG_SIZE_BY_PROJECT = {
+    PROJECT_TYPE_IMAGE: 96,
+    PROJECT_TYPE_CLASSIFIED_IMPORT: 96,
+    PROJECT_TYPE_OCR: 28,
+}
+
+
+def default_img_size(project_type: object) -> int:
+    """Model input side for a project type (falls back to the image project)."""
+    key = str(project_type or PROJECT_TYPE_IMAGE).strip().lower()
+    return int(DEFAULT_IMG_SIZE_BY_PROJECT.get(key, 96))
+
+
+# ── App data directory ──────────────────────────────────────────────────
+# Lives here, not in app.py, because the training worker and the EMNIST
+# cache also need it and neither may import streamlit.  app.py and
+# desktop_launcher.py resolve through this function so there is exactly one
+# definition of "where the app keeps its files".
+APP_NAME = "TFLiteTraining"
+
+
+def app_data_dir() -> Path:
+    """Writable per-user app data dir (env override, else platform default).
+
+    Falls through to the temp dir if the preferred location cannot be
+    written, so a sandboxed or read-only home does not make the app
+    unusable — it just makes it forgetful.
+    """
+    import os
+    import sys
+    import tempfile
+
+    candidates: List[Path] = []
+    env_override = os.getenv("TFLITE_TRAINING_DATA_DIR")
+    if env_override:
+        candidates.append(Path(env_override).expanduser().resolve())
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+        candidates.append((base / APP_NAME).resolve())
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        candidates.append((base / APP_NAME).resolve())
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+        candidates.append((base / APP_NAME).resolve())
+    candidates.append((Path(tempfile.gettempdir()) / APP_NAME).resolve())
+
+    last_err: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            (candidate / "workspace").mkdir(parents=True, exist_ok=True)
+            (candidate / "datasets").mkdir(parents=True, exist_ok=True)
+            probe_dir = candidate / "workspace" / "_probe_dir"
+            probe_dir.mkdir(parents=True, exist_ok=True)
+            probe = probe_dir / ".write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            probe_dir.rmdir()
+            return candidate
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Failed to prepare app data dir. Last error: {last_err}")
+
 
 @dataclass(frozen=True)
 class ImportedData:

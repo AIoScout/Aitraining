@@ -89,7 +89,13 @@ from ui_styles import inject_teachable_style
 
 from dataset_io import (
     IMAGE_EXTS,
+    KNOWN_PROJECT_TYPES,
+    PROJECT_TYPE_CLASSIFIED_IMPORT,
+    PROJECT_TYPE_IMAGE,
+    PROJECT_TYPE_OCR,
     ImportedData,
+    app_data_dir,
+    default_img_size,
     export_classified_dataset,
     export_from_assignments,
     infer_imported_data,
@@ -98,6 +104,9 @@ from dataset_io import (
     materialize_zip_bytes,
     new_output_dir,
 )
+from image_preprocess import normalize_class_preprocess_map
+from ocr_dataset import BACKGROUND_CLASS_NAME, DEFAULT_EMNIST_SPLIT, EMNIST_SPLITS
+from ocr_preprocess import GLYPH_SIZE
 from serial_device import list_serial_ports
 from record_controller import RecordController, SessionConfig, make_hold_button_html
 
@@ -188,38 +197,10 @@ def _dbg_open_project_layout(hypothesis_id: str, run_id: str, location: str, msg
 
 
 def _app_data_dir() -> Path:
-    candidates: list[Path] = []
-    env_override = os.getenv("TFLITE_TRAINING_DATA_DIR")
-    if env_override:
-        candidates.append(Path(env_override).expanduser().resolve())
-    if sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support"
-        candidates.append((base / APP_NAME).resolve())
-    elif os.name == "nt":
-        base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
-        candidates.append((base / APP_NAME).resolve())
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
-        candidates.append((base / APP_NAME).resolve())
-    candidates.append((Path(tempfile.gettempdir()) / APP_NAME).resolve())
-
-    last_err: Exception | None = None
-    for candidate in candidates:
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            (candidate / "workspace").mkdir(parents=True, exist_ok=True)
-            (candidate / "datasets").mkdir(parents=True, exist_ok=True)
-            probe_dir = candidate / "workspace" / "_probe_dir"
-            probe_dir.mkdir(parents=True, exist_ok=True)
-            probe = probe_dir / ".write_test"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-            probe_dir.rmdir()
-            return candidate
-        except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"Failed to prepare app data dir. Last error: {last_err}")
+    # Delegates to dataset_io: the training worker and the EMNIST cache
+    # need the same directory but cannot import streamlit, so the rule has
+    # one home there rather than a copy per entry point.
+    return app_data_dir()
 
 
 APP_DATA_DIR = _app_data_dir()
@@ -344,13 +325,24 @@ def _tmproj_read_manifest(path: Path) -> Dict[str, Any]:
 
 
 def _tmproj_detect_project_type(path: Path, manifest: Dict[str, Any]) -> str:
+    """Which workspace a .tmproj belongs to.
+
+    The MANIFEST is authoritative — it is written by the one manifest writer
+    (_project_save) from the session's project_type.  The filename is only a
+    fallback for archives written before `project_type` existed, and it must
+    stay a *prefix* test so `ocr_*.tmproj` never matches the "image" test.
+    """
     ptype = str(manifest.get("project_type") or "").strip().lower()
     name = str(path.name or "").lower()
     if "pose" in ptype or "pose" in name:
         return "pose"
+    if ptype in KNOWN_PROJECT_TYPES:
+        return ptype
+    if "ocr" in name or "glyph" in name or "char" in name:
+        return PROJECT_TYPE_OCR
     if "image" in ptype or "image" in name:
-        return "image"
-    return "image"
+        return PROJECT_TYPE_IMAGE
+    return PROJECT_TYPE_IMAGE
 
 
 def _validate_export_inputs(export_dir: Path, model_name: str, array_name: str, tflite_path: Path) -> List[str]:
@@ -967,6 +959,11 @@ def _tm_save_classes_meta(classes: List[str]) -> None:
         existing = {}
     payload: Dict[str, Any] = dict(existing)
     payload["classes"] = list(classes)
+    # A brand-new session routes here before anything has created the dataset
+    # directory (set_config does not touch the filesystem), so creating it is
+    # this writer's job — without it the first render of a fresh workspace
+    # raised FileNotFoundError on tm_classes.json.
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -1064,6 +1061,121 @@ def _render_camera_permission_card() -> None:
         level(note)
 
 
+def _tm_session_config(**overrides: Any) -> SessionConfig:
+    """The ONE SessionConfig builder for the SPA.
+
+    Every workspace page used to construct its own copy of this literal, so
+    each new session-level field (project_type, img_size, ...) had to be
+    added in three places or it silently defaulted on two of them.  Build it
+    here and override per call site instead.
+    """
+    values: Dict[str, Any] = {
+        "dataset_root": _tm_dataset_dir(),
+        "serial_port": st.session_state.tm_serial_port,
+        "serial_baud": int(st.session_state.tm_serial_baud),
+        "serial_sync": str(st.session_state.tm_serial_sync),
+        "serial_frame_side": int(st.session_state.tm_serial_frame_side),
+        "serial_channels": int(st.session_state.tm_serial_channels),
+        "webcam_index": int(st.session_state.tm_webcam_index),
+        "webcam_id": str(st.session_state.get("tm_webcam_id") or ""),
+        "img_size": int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96),
+        "fps": float(st.session_state.tm_record_fps),
+        "crop_box": st.session_state.tm_record_crop_box,
+        "project_type": str(st.session_state.get("project_type") or PROJECT_TYPE_IMAGE),
+    }
+    values.update(overrides)
+    return SessionConfig(**values)
+
+
+def _tm_set_img_size(size: int) -> None:
+    """Rebuild the frozen TrainConfig with a new model-input side."""
+    prev_cfg = st.session_state.train_cfg
+    if int(getattr(prev_cfg, "img_size", 0) or 0) == int(size):
+        return
+    st.session_state.train_cfg = TrainConfig(
+        img_size=int(size),
+        color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
+        batch_size=int(getattr(prev_cfg, "batch_size", 16)),
+        epochs=int(getattr(prev_cfg, "epochs", 10)),
+        validation_split=float(getattr(prev_cfg, "validation_split", 0.2)),
+        seed=int(getattr(prev_cfg, "seed", 42)),
+        optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
+        learning_rate=float(getattr(prev_cfg, "learning_rate", 0.001)),
+        conv1_filters=int(getattr(prev_cfg, "conv1_filters", 32)),
+        conv2_filters=int(getattr(prev_cfg, "conv2_filters", 64)),
+        dense_units=int(getattr(prev_cfg, "dense_units", 128)),
+        representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
+        preprocess_mode=str(getattr(prev_cfg, "preprocess_mode", "auto_by_label")),
+        manual_roi=getattr(prev_cfg, "manual_roi", None),
+    )
+
+
+def _tm_apply_project_defaults(project_type: str) -> None:
+    """Seed the model-input size from the project type.
+
+    This is the ONLY difference a new project type needs on the Start Page:
+    the size comes from DEFAULT_IMG_SIZE_BY_PROJECT rather than a literal
+    sprinkled through the cards, and everything downstream (SessionConfig,
+    processed cache, model_settings.h kNumCols/kNumRows, .tmproj manifest)
+    already reads img_size.
+    """
+    _tm_set_img_size(int(default_img_size(project_type)))
+    st.session_state.tm_classes = ["Class 1", "Class 2"]
+
+
+def _tm_open_project_into_session(p: Path, ptype: str) -> None:
+    """Open a .tmproj into a FRESH workspace and route to its project type.
+
+    Shared by every Start-Page card — an OCR .tmproj restores exactly the
+    same way an image one does, because everything that differs (the sample
+    transform, the model input size, the training labels) is already keyed
+    off `project_type` server-side.  Adding a card must never mean copying
+    this block.
+    """
+    _begin_fresh_tm_session()
+    st.session_state.tm_return_target = "home"
+    controller = _ensure_fresh_record_controller()
+    controller.set_config(st.session_state.session_id, _tm_session_config(project_type=str(ptype)))
+    state = controller._project_open(st.session_state.session_id, p)
+    st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
+    st.session_state.tm_preview_dark_thresh = 0
+    st.session_state.tm_preview_lum_thresh = 100
+    # _project_open adopts the manifest's project_type + img_size into the
+    # session BEFORE restoring anything, so read them back from the live
+    # config rather than assuming the type this card was rendered as.
+    opened_cfg = controller.get_config(st.session_state.session_id)
+    effective_type = str(getattr(opened_cfg, "project_type", ptype) or ptype)
+    effective_size = int(getattr(opened_cfg, "img_size", 0) or 0) or default_img_size(effective_type)
+    # Adopt the geometry the archive was built at FIRST (a 28x28 OCR project
+    # must not come back as 96x96, or the next capture would overwrite the
+    # restored cache at the wrong size), then layer the archived training
+    # hyperparameters on top.
+    _tm_set_img_size(int(effective_size))
+    train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
+    if isinstance(train_cfg_state, dict):
+        prev_cfg = st.session_state.train_cfg
+        st.session_state.train_cfg = TrainConfig(
+            img_size=int(effective_size),
+            color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
+            batch_size=int(train_cfg_state.get("batch_size", getattr(prev_cfg, "batch_size", 16))),
+            epochs=int(train_cfg_state.get("epochs", getattr(prev_cfg, "epochs", 10))),
+            validation_split=float(train_cfg_state.get("validation_split", getattr(prev_cfg, "validation_split", 0.2))),
+            seed=int(getattr(prev_cfg, "seed", 42)),
+            optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
+            learning_rate=float(train_cfg_state.get("learning_rate", getattr(prev_cfg, "learning_rate", 0.001))),
+            conv1_filters=int(train_cfg_state.get("conv1_filters", getattr(prev_cfg, "conv1_filters", 32))),
+            conv2_filters=int(train_cfg_state.get("conv2_filters", getattr(prev_cfg, "conv2_filters", 64))),
+            dense_units=int(train_cfg_state.get("dense_units", getattr(prev_cfg, "dense_units", 128))),
+            representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
+            preprocess_mode=str(train_cfg_state.get("preprocess_mode", getattr(prev_cfg, "preprocess_mode", "auto_by_label"))),
+            manual_roi=train_cfg_state.get("manual_roi", getattr(prev_cfg, "manual_roi", None)),
+        )
+    st.session_state.project_type = effective_type
+    st.session_state.tm_current_project_path = str(p)
+    _tm_set_query_params(tm_project=effective_type, tm_session=st.session_state.session_id)
+    st.rerun()
+
+
 def _render_new_project() -> None:
     # #region debug-point B:render-new-project
     _dbg_open_project_layout("B", "pre-fix", "app.py:_render_new_project", "[DEBUG] render new project page", {"session": str(st.session_state.get("session_id", "")), "project_type": str(st.session_state.get("project_type", "")), "query": dict(st.query_params) if hasattr(st, "query_params") else {}})
@@ -1159,61 +1271,13 @@ def _render_new_project() -> None:
                 st.stop()
             manifest = _tmproj_read_manifest(p)
             ptype = _tmproj_detect_project_type(p, manifest)
-            if ptype != "image":
+            if ptype not in ("image", PROJECT_TYPE_OCR):
                 st.error(f"Unsupported project type: {ptype}")
                 st.stop()
             # #region debug-point A:home-open-project-click
             _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project selected file", {"picked_path": str(p), "project_type": str(ptype), "session_before_fresh": str(st.session_state.get("session_id", ""))})
             # #endregion
-            _begin_fresh_tm_session()
-            st.session_state.tm_return_target = "home"
-            controller = _ensure_fresh_record_controller()
-            controller.set_config(
-                st.session_state.session_id,
-                SessionConfig(
-                    dataset_root=_tm_dataset_dir(),
-                    serial_port=st.session_state.tm_serial_port,
-                    serial_baud=int(st.session_state.tm_serial_baud),
-                    serial_sync=str(st.session_state.tm_serial_sync),
-                    serial_frame_side=int(st.session_state.tm_serial_frame_side),
-                    serial_channels=int(st.session_state.tm_serial_channels),
-                    webcam_index=int(st.session_state.tm_webcam_index),
-                    webcam_id=str(st.session_state.get("tm_webcam_id") or ""),
-                    img_size=int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96),
-                    fps=float(st.session_state.tm_record_fps),
-                    crop_box=st.session_state.tm_record_crop_box,
-                ),
-            )
-            state = controller._project_open(st.session_state.session_id, p)
-            # #region debug-point A:home-open-project-after-open
-            _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project restored state", {"session": str(st.session_state.session_id), "classes": list(state.get("classes") or []), "count_keys": list((state.get("counts") or {}).keys())})
-            # #endregion
-            st.session_state.tm_classes = list(state.get("classes") or ["Class 1", "Class 2"])
-            st.session_state.tm_preview_dark_thresh = 0
-            st.session_state.tm_preview_lum_thresh = 100
-            train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
-            if isinstance(train_cfg_state, dict):
-                prev_cfg = st.session_state.train_cfg
-                st.session_state.train_cfg = TrainConfig(
-                    img_size=int(getattr(prev_cfg, "img_size", 96)),
-                    color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
-                    batch_size=int(train_cfg_state.get("batch_size", getattr(prev_cfg, "batch_size", 16))),
-                    epochs=int(train_cfg_state.get("epochs", getattr(prev_cfg, "epochs", 10))),
-                    validation_split=float(train_cfg_state.get("validation_split", getattr(prev_cfg, "validation_split", 0.2))),
-                    seed=int(getattr(prev_cfg, "seed", 42)),
-                    optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
-                    learning_rate=float(train_cfg_state.get("learning_rate", getattr(prev_cfg, "learning_rate", 0.001))),
-                    conv1_filters=int(train_cfg_state.get("conv1_filters", getattr(prev_cfg, "conv1_filters", 32))),
-                    conv2_filters=int(train_cfg_state.get("conv2_filters", getattr(prev_cfg, "conv2_filters", 64))),
-                    dense_units=int(train_cfg_state.get("dense_units", getattr(prev_cfg, "dense_units", 128))),
-                    representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
-                    preprocess_mode=str(train_cfg_state.get("preprocess_mode", getattr(prev_cfg, "preprocess_mode", "auto_by_label"))),
-                    manual_roi=train_cfg_state.get("manual_roi", getattr(prev_cfg, "manual_roi", None)),
-                )
-            st.session_state.project_type = "image"
-            st.session_state.tm_current_project_path = str(p)
-            _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
-            st.rerun()
+            _tm_open_project_into_session(p, ptype)
         if st.button("Import classified class", key="tm_start_classified", type="secondary", use_container_width=True):
             _begin_fresh_tm_session()
             st.session_state.tm_return_target = "classified-import"
@@ -1221,6 +1285,40 @@ def _render_new_project() -> None:
             st.session_state.step = 0
             _tm_set_query_params(tm_project="image_classified_import", tm_session=st.session_state.session_id)
             st.rerun()
+    with card_col2:
+        st.markdown(
+            _tw_dedent_helper.dedent('''
+            <div class="tm-start-card">
+            <div class="tm-start-card-head">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+            <h3 style="margin:0;padding:0;font-size:22px;font-weight:800;">🔠 OCR / Character Project</h3>
+            <span style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
+            </div>
+            <p>Train a highly optimized INT8 character recognition model for ESP32. Features EMNIST dataset mixing, bit-exact Vertical Projection, and OOD rejection.</p>
+            </div>
+            </div>
+            ''').strip(),
+            unsafe_allow_html=True,
+        )
+        if st.button("Get Started", key="tm_get_started_ocr", type="primary", use_container_width=True):
+            _begin_fresh_tm_session()
+            st.session_state.tm_return_target = "home"
+            st.session_state.project_type = PROJECT_TYPE_OCR
+            st.session_state.step = 0
+            _tm_apply_project_defaults(PROJECT_TYPE_OCR)
+            _tm_set_query_params(tm_project=PROJECT_TYPE_OCR, tm_session=st.session_state.session_id)
+            st.rerun()
+        if st.button("Open Project (.tmproj)", key="tm_open_tmproj_ocr", type="secondary", use_container_width=True):
+            p = _pick_tmproj_file_dialog()
+            if not p:
+                st.warning("No file selected.")
+                st.stop()
+            manifest = _tmproj_read_manifest(p)
+            ptype = _tmproj_detect_project_type(p, manifest)
+            if ptype not in ("image", PROJECT_TYPE_OCR):
+                st.error(f"Unsupported project type: {ptype}")
+                st.stop()
+            _tm_open_project_into_session(p, ptype)
 
 
 def _tm_train_recommendations(cfg: TrainConfig) -> Dict[str, Any]:
@@ -1275,9 +1373,13 @@ def _render_train_config(cfg: TrainConfig) -> TrainConfig:
 
     left, right = st.columns(2)
     with left:
-        img_size = st.number_input("Image size", min_value=32, max_value=224, value=int(cfg.img_size), step=8)
-        if int(cfg.img_size) != 96:
-            st.caption("💡 Note: model input should match preprocessing (96×96)")
+        # Range matches the server-side /live/config guard (8..512) so the
+        # OCR project's 28x28 input is representable here too.
+        img_size = st.number_input("Image size", min_value=8, max_value=512, value=int(cfg.img_size), step=4)
+        _proj_type = str(st.session_state.get("project_type") or PROJECT_TYPE_IMAGE)
+        _expected_size = int(default_img_size(_proj_type))
+        if int(cfg.img_size) != _expected_size:
+            st.caption(f"💡 Note: model input should match preprocessing ({_expected_size}×{_expected_size})")
         color_mode = st.selectbox("Color mode", options=["rgb", "grayscale"], index=0 if cfg.color_mode == "rgb" else 1)
         batch_size = st.selectbox("Batch size", options=batch_opt, index=batch_opt.index(cfg_batch))
         if cfg_batch != rec_batch:
@@ -1604,7 +1706,17 @@ def _render_tm_old_frontend_html(
             saved_raw = json.loads(saved_cfg_path.read_text(encoding="utf-8"))
             if isinstance(saved_raw, dict):
                 updates = {}
-                for k in ("batch_size", "epochs", "validation_split", "learning_rate", "img_size"):
+                for k in (
+                    "batch_size", "epochs", "validation_split", "learning_rate", "img_size",
+                    # OCR mixing / transfer-learning knobs round-trip through
+                    # the same file, so an OCR run's mix is reproducible from
+                    # the workspace without re-deriving it from the UI.
+                    "ocr_emnist_enabled", "ocr_emnist_split", "ocr_emnist_per_class",
+                    "ocr_background_enabled", "ocr_background_samples",
+                    "ocr_transfer_learning", "ocr_pretrain_per_class",
+                    "ocr_pretrain_epochs", "ocr_head_epochs", "ocr_finetune_epochs",
+                    "ocr_head_lr", "ocr_finetune_lr", "ocr_unfreeze_blocks",
+                ):
                     if k in saved_raw and saved_raw[k] is not None:
                         updates[k] = saved_raw[k]
                 if updates:
@@ -1649,7 +1761,28 @@ def _render_tm_old_frontend_html(
             "dense_units": int(train_cfg.dense_units),
             "preprocess_mode": str(getattr(train_cfg, "preprocess_mode", "auto_by_label")),
             "manual_roi": list(getattr(train_cfg, "manual_roi", []) or []) or None,
+            # OCR dataset mixing + transfer learning.  Sent for every project
+            # so the field set is stable; the panel only renders them for an
+            # OCR workspace, and the image strategy never reads them.
+            "ocr_emnist_enabled": bool(getattr(train_cfg, "ocr_emnist_enabled", True)),
+            "ocr_emnist_split": str(getattr(train_cfg, "ocr_emnist_split", DEFAULT_EMNIST_SPLIT)),
+            "ocr_emnist_per_class": int(getattr(train_cfg, "ocr_emnist_per_class", 200)),
+            "ocr_background_enabled": bool(getattr(train_cfg, "ocr_background_enabled", True)),
+            "ocr_background_samples": int(getattr(train_cfg, "ocr_background_samples", 0)),
+            "ocr_transfer_learning": bool(getattr(train_cfg, "ocr_transfer_learning", True)),
+            "ocr_pretrain_per_class": int(getattr(train_cfg, "ocr_pretrain_per_class", 1200)),
+            "ocr_pretrain_epochs": int(getattr(train_cfg, "ocr_pretrain_epochs", 4)),
+            "ocr_head_epochs": int(getattr(train_cfg, "ocr_head_epochs", 12)),
+            "ocr_finetune_epochs": int(getattr(train_cfg, "ocr_finetune_epochs", 25)),
+            "ocr_head_lr": float(getattr(train_cfg, "ocr_head_lr", 0.0015)),
+            "ocr_finetune_lr": float(getattr(train_cfg, "ocr_finetune_lr", 0.0002)),
+            "ocr_unfreeze_blocks": int(getattr(train_cfg, "ocr_unfreeze_blocks", 1)),
         },
+        # The OCR blocks in the Advanced panel are shown only for an OCR
+        # workspace — its knobs are inert for a sign project and vice versa.
+        "project_type": str(
+            st.session_state.get("project_type") or PROJECT_TYPE_IMAGE
+        ),
         "train_rec": _tm_train_recommendations(train_cfg),
         "current_project_path": str(st.session_state.get("tm_current_project_path") or "") or None,
     }
@@ -1669,6 +1802,12 @@ def _render_tm_old_frontend_html(
     payload["debug_server_url"] = debug_server_url
     payload["debug_session_id"] = debug_session_id
     data = _json.dumps(payload)
+    # Built here rather than inline so the OCR split list has exactly one
+    # source (ocr_dataset.EMNIST_SPLITS) — a hand-written <option> list would
+    # silently drift the day a split is added.
+    emnist_split_options = "".join(
+        f'<option value="{name}">{name}</option>' for name in EMNIST_SPLITS
+    )
     components.html(
         f'''
 <!doctype html>
@@ -2480,6 +2619,42 @@ def _render_tm_old_frontend_html(
       color: var(--muted);
       margin-top: 2px;
       line-height: 1.3;
+    }}
+    .train-adv-sub {{
+      margin: 14px 0 8px 0;
+      padding-top: 10px;
+      border-top: 1px solid rgba(0,0,0,0.08);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    .train-adv-sub:first-child {{
+      margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
+    }}
+    .adv-help {{
+      grid-column: 1 / -1;
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.35;
+      margin: -4px 0 2px 0;
+    }}
+    /* Checkboxes inherit the number-input styling above; undo the
+       right-aligned 15px bold blue box so they read as toggles. */
+    .train-adv-row input[type="checkbox"],
+    .train-adv-row input[type="radio"] {{
+      width: 18px;
+      height: 18px;
+      min-width: 0;
+      justify-self: end;
+      padding: 0;
+      margin: 0;
+      border: 0;
+      background: transparent;
+      accent-color: var(--blue);
     }}
     .adv-use-rec {{
       background: transparent;
@@ -3611,14 +3786,36 @@ def _render_tm_old_frontend_html(
         </div>
         <div class="train-adv-panel" id="trainAdvPanel">
           <div class="train-adv-grid">
-            <div class="train-adv-row"><span>Image Size</span><input id="advImgSizeInline" type="number" min="32" max="224" step="8"/></div>
+            <div class="train-adv-row"><span>Image Size</span><input id="advImgSizeInline" type="number" min="8" max="512" step="4"/></div>
             <div class="train-adv-row"><span>Batch Size</span><input id="advBatchInline" type="number" min="1" step="1"/><div class="adv-rec-hint" id="recBatchHint"></div></div>
             <div class="train-adv-row"><span>Epochs</span><input id="advEpochsInline" type="number" min="1" step="1"/><div class="adv-rec-hint" id="recEpochsHint"></div></div>
             <div class="train-adv-row"><span>Validation Split</span><input id="advValInline" type="number" min="0" max="0.5" step="0.05"/><div class="adv-rec-hint" id="recValHint"></div></div>
             <div class="train-adv-row"><span>Learning Rate</span><input id="advLrInline" type="number" min="0" step="0.0001"/><div class="adv-rec-hint" id="recLrHint"></div></div>
-            <div class="train-adv-row"><span>Conv1 Filters</span><input id="advConv1Inline" type="number" min="1" step="1"/></div>
-            <div class="train-adv-row"><span>Conv2 Filters</span><input id="advConv2Inline" type="number" min="1" step="1"/></div>
-            <div class="train-adv-row"><span>Dense Units</span><input id="advDenseInline" type="number" min="1" step="1"/></div>
+            <div id="advArchRows" style="display:contents">
+              <div class="train-adv-row"><span>Conv1 Filters</span><input id="advConv1Inline" type="number" min="1" step="1"/></div>
+              <div class="train-adv-row"><span>Conv2 Filters</span><input id="advConv2Inline" type="number" min="1" step="1"/></div>
+              <div class="train-adv-row"><span>Dense Units</span><input id="advDenseInline" type="number" min="1" step="1"/></div>
+            </div>
+          </div>
+          <div class="train-adv-grid" id="advOcrPanel" style="display:none">
+            <div class="train-adv-sub">Dataset mixing</div>
+            <div class="train-adv-row"><span>Mix EMNIST into every class</span><input id="advOcrEmnist" type="checkbox"/></div>
+            <div class="adv-help" id="advOcrMixHelp">EMNIST glyphs are already isolated and centred, so they bypass segmentation and are polarity-aligned to the capture convention before scaling.</div>
+            <div class="train-adv-row" id="advOcrSplitRow"><span>EMNIST split</span><select id="advOcrSplit">{emnist_split_options}</select></div>
+            <div class="train-adv-row" id="advOcrPerClassRow"><span>Synthetic per class</span><input id="advOcrPerClass" type="number" min="0" max="5000" step="10"/></div>
+            <div class="train-adv-row"><span>Background / noise class</span><input id="advOcrBackground" type="checkbox"/></div>
+            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops</span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
+            <div class="adv-help">0 mirrors the per-class count. The extra N+1 class is named <b>{BACKGROUND_CLASS_NAME}</b> and teaches the model to reject OOD crops.</div>
+            <div class="train-adv-sub">Transfer learning</div>
+            <div class="train-adv-row"><span>Fine-tune pre-trained backbone</span><input id="advOcrTransfer" type="checkbox"/></div>
+            <div class="train-adv-row"><span>Pre-train samples / class</span><input id="advOcrPretrainN" type="number" min="100" max="6000" step="100"/></div>
+            <div class="train-adv-row"><span>Pre-train epochs</span><input id="advOcrPretrainEpochs" type="number" min="1" max="100" step="1"/></div>
+            <div class="train-adv-row"><span>Head epochs</span><input id="advOcrHeadEpochs" type="number" min="1" max="200" step="1"/></div>
+            <div class="train-adv-row"><span>Head learning rate</span><input id="advOcrHeadLr" type="number" min="0" step="0.0001"/></div>
+            <div class="train-adv-row"><span>Fine-tune epochs</span><input id="advOcrFinetuneEpochs" type="number" min="0" max="200" step="1"/></div>
+            <div class="train-adv-row"><span>Fine-tune learning rate</span><input id="advOcrFinetuneLr" type="number" min="0" step="0.0001"/></div>
+            <div class="train-adv-row"><span>Conv blocks to unfreeze</span><input id="advOcrUnfreeze" type="number" min="0" max="16" step="1"/></div>
+            <div class="adv-help">Phase 1 trains only the new N+1 head with the backbone frozen; phase 2 unfreezes the last conv block(s) at the lower fine-tune rate.</div>
           </div>
         </div>
       </div>
@@ -4306,7 +4503,10 @@ function restoreTrainCfgFromStorage() {{
       if (!isFinite(n)) return fallback;
       return Math.max(lo, Math.min(hi, n));
     }};
-    if ('img_size' in data) next.img_size = clampInt(data.img_size, 32, 224, nullish(prev.img_size, 96));
+    // Lower bound is 8, not 32: the OCR project's glyph model input is 28x28
+    // and the old 32 floor silently coerced it on every client-config merge.
+    // (The server-side /live/config guard has always been 8..512.)
+    if ('img_size' in data) next.img_size = clampInt(data.img_size, 8, 512, nullish(prev.img_size, 96));
     if ('batch_size' in data) next.batch_size = clampInt(data.batch_size, 1, 512, nullish(prev.batch_size, 32));
     if ('epochs' in data) next.epochs = clampInt(data.epochs, 1, 1000, nullish(prev.epochs, 20));
     if ('validation_split' in data) next.validation_split = clampFloat(data.validation_split, 0, 0.5, nullish(prev.validation_split, 0.25));
@@ -4320,6 +4520,24 @@ function restoreTrainCfgFromStorage() {{
     if (Array.isArray(data.manual_roi) && data.manual_roi.length === 4) {{
       next.manual_roi = data.manual_roi.map((v, idx) => clampFloat(v, 0, 1, idx < 2 ? 0 : 1));
     }}
+    // OCR mixing / transfer learning.  localStorage is user-writable, so
+    // everything is range-checked here rather than trusted — these values go
+    // straight into a training run.
+    if ('ocr_emnist_enabled' in data) next.ocr_emnist_enabled = !!data.ocr_emnist_enabled;
+    if (typeof data.ocr_emnist_split === 'string' && data.ocr_emnist_split) {{
+      next.ocr_emnist_split = String(data.ocr_emnist_split);
+    }}
+    if ('ocr_emnist_per_class' in data) next.ocr_emnist_per_class = clampInt(data.ocr_emnist_per_class, 0, 5000, nullish(prev.ocr_emnist_per_class, 200));
+    if ('ocr_background_enabled' in data) next.ocr_background_enabled = !!data.ocr_background_enabled;
+    if ('ocr_background_samples' in data) next.ocr_background_samples = clampInt(data.ocr_background_samples, 0, 5000, nullish(prev.ocr_background_samples, 0));
+    if ('ocr_transfer_learning' in data) next.ocr_transfer_learning = !!data.ocr_transfer_learning;
+    if ('ocr_pretrain_per_class' in data) next.ocr_pretrain_per_class = clampInt(data.ocr_pretrain_per_class, 100, 6000, nullish(prev.ocr_pretrain_per_class, 1200));
+    if ('ocr_pretrain_epochs' in data) next.ocr_pretrain_epochs = clampInt(data.ocr_pretrain_epochs, 1, 100, nullish(prev.ocr_pretrain_epochs, 4));
+    if ('ocr_head_epochs' in data) next.ocr_head_epochs = clampInt(data.ocr_head_epochs, 1, 200, nullish(prev.ocr_head_epochs, 12));
+    if ('ocr_head_lr' in data) next.ocr_head_lr = clampFloat(data.ocr_head_lr, 0.000001, 1.0, nullish(prev.ocr_head_lr, 0.0015));
+    if ('ocr_finetune_epochs' in data) next.ocr_finetune_epochs = clampInt(data.ocr_finetune_epochs, 0, 200, nullish(prev.ocr_finetune_epochs, 25));
+    if ('ocr_finetune_lr' in data) next.ocr_finetune_lr = clampFloat(data.ocr_finetune_lr, 0.000001, 1.0, nullish(prev.ocr_finetune_lr, 0.0002));
+    if ('ocr_unfreeze_blocks' in data) next.ocr_unfreeze_blocks = clampInt(data.ocr_unfreeze_blocks, 0, 16, nullish(prev.ocr_unfreeze_blocks, 1));
     STATE.train_cfg = next;
   }} catch (e) {{}}
 }}
@@ -8848,15 +9066,47 @@ function syncAdvancedInlineInputs() {{
   set('advConv1Inline', nullish(cfg.conv1_filters, 8));
   set('advConv2Inline', nullish(cfg.conv2_filters, 16));
   set('advDenseInline', nullish(cfg.dense_units, 32));
+  // OCR mixing / transfer learning.  Defaults MUST match the TrainConfig
+  // field defaults in trainer.py — the server sends the same values, so a
+  // drift here would show one number and train with another.
+  const setBool = (id, value) => {{
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.checked = !!value;
+  }};
+  set('advOcrSplit', nullish(cfg.ocr_emnist_split, 'balanced'));
+  set('advOcrPerClass', nullish(cfg.ocr_emnist_per_class, 200));
+  set('advOcrBackgroundN', nullish(cfg.ocr_background_samples, 0));
+  set('advOcrPretrainN', nullish(cfg.ocr_pretrain_per_class, 1200));
+  set('advOcrPretrainEpochs', nullish(cfg.ocr_pretrain_epochs, 4));
+  set('advOcrHeadEpochs', nullish(cfg.ocr_head_epochs, 12));
+  set('advOcrHeadLr', nullish(cfg.ocr_head_lr, 0.0015));
+  set('advOcrFinetuneEpochs', nullish(cfg.ocr_finetune_epochs, 25));
+  set('advOcrFinetuneLr', nullish(cfg.ocr_finetune_lr, 0.0002));
+  set('advOcrUnfreeze', nullish(cfg.ocr_unfreeze_blocks, 1));
+  setBool('advOcrEmnist', nullish(cfg.ocr_emnist_enabled, true));
+  setBool('advOcrBackground', nullish(cfg.ocr_background_enabled, true));
+  setBool('advOcrTransfer', nullish(cfg.ocr_transfer_learning, true));
+  syncOcrPanelVisibility();
   refreshRecHints();
 }}
+const OCR_BOOL_KEYS = ['ocr_emnist_enabled', 'ocr_background_enabled', 'ocr_transfer_learning'];
+const OCR_STRING_KEYS = ['ocr_emnist_split'];
+const OCR_FLOAT_KEYS = ['ocr_head_lr', 'ocr_finetune_lr'];
 function setTrainCfgField(key, rawValue) {{
   const cfg = STATE.train_cfg || {{}};
   let v = rawValue;
   if (key === 'preprocess_mode') {{
     v = String(rawValue || 'auto_by_label');
     if (!['auto_by_label', 'manual_roi', 'none'].includes(v)) return;
-  }} else if (key === 'validation_split' || key === 'learning_rate') {{
+  }} else if (OCR_BOOL_KEYS.includes(key)) {{
+    // Checkboxes are strictly boolean — the trainer's dataclass fields are
+    // typed bool, and a stringified "false" would read as truthy server-side.
+    v = !!rawValue;
+  }} else if (OCR_STRING_KEYS.includes(key)) {{
+    v = String(rawValue || '');
+    if (!v) return;
+  }} else if (key === 'validation_split' || key === 'learning_rate' || OCR_FLOAT_KEYS.includes(key)) {{
     v = Number(v);
     if (!isFinite(v)) return;
   }} else {{
@@ -8868,6 +9118,7 @@ function setTrainCfgField(key, rawValue) {{
   STATE.train_cfg = next;
   persistTrainCfgStorage();
   renderTrainStatus();
+  if (OCR_BOOL_KEYS.includes(key)) syncOcrPanelVisibility();
   refreshRecHints();
 }}
 function setManualRoiField(index, rawValue) {{
@@ -8884,12 +9135,43 @@ function setManualRoiField(index, rawValue) {{
   STATE.train_cfg = cfg;
   persistTrainCfgStorage();
 }}
+function isOcrProject() {{
+  return String((STATE && STATE.project_type) || '').toLowerCase() === 'ocr';
+}}
+function syncOcrPanelVisibility() {{
+  const cfg = STATE.train_cfg || {{}};
+  const ocr = isOcrProject();
+  const ocrPanel = document.getElementById('advOcrPanel');
+  if (ocrPanel) ocrPanel.style.display = ocr ? 'grid' : 'none';
+  // Under transfer learning these three numbers are not built into the model
+  // at all — ocr_trainer attaches a fresh N+1 head to the cached backbone —
+  // so leaving them on screen would invite tuning a knob that does nothing.
+  // They come back the moment transfer learning is switched off.
+  const arch = document.getElementById('advArchRows');
+  if (arch) {{
+    const transfer = !!nullish(cfg.ocr_transfer_learning, true);
+    arch.style.display = (ocr && transfer) ? 'none' : 'contents';
+  }}
+  // Same reasoning one level down: with mixing off there is no synthetic half
+  // to size, and with the background class off there are no junk crops to
+  // count.  Leaving the numbers live would imply they still do something.
+  const show = (id, on) => {{
+    const el = document.getElementById(id);
+    if (el) el.style.display = on ? '' : 'none';
+  }};
+  const mix = !!nullish(cfg.ocr_emnist_enabled, true);
+  show('advOcrSplitRow', ocr && mix);
+  show('advOcrPerClassRow', ocr && mix);
+  show('advOcrMixHelp', ocr && mix);
+  show('advOcrBackgroundNRow', ocr && !!nullish(cfg.ocr_background_enabled, true));
+}}
 function renderAdvancedPanel() {{
   const panel = document.getElementById('trainAdvPanel');
   const chev = document.getElementById('advChevron');
   if (!panel) return;
   panel.style.display = trainAdvancedOpen ? 'block' : 'none';
   if (chev) chev.textContent = trainAdvancedOpen ? '▴' : '▾';
+  syncOcrPanelVisibility();
   if (trainAdvancedOpen) syncAdvancedInlineInputs();
   updateFlow();
   setTimeout(() => {{ if (typeof syncFrameHeight === 'function') syncFrameHeight(); }}, 50);
@@ -8954,6 +9236,32 @@ function bindAdvancedInlineHandlers() {{
   bindNum('advConv1Inline', 'conv1_filters');
   bindNum('advConv2Inline', 'conv2_filters');
   bindNum('advDenseInline', 'dense_units');
+  // 'change', not 'input': a checkbox mid-click reports its OLD checked state
+  // on `input` in some engines, which would store the opposite of what the
+  // user just clicked.
+  const bindCheck = (id, key) => {{
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', (e) => setTrainCfgField(key, !!e.target.checked));
+  }};
+  const bindSelect = (id, key) => {{
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', (e) => setTrainCfgField(key, String(e.target.value)));
+  }};
+  bindCheck('advOcrEmnist', 'ocr_emnist_enabled');
+  bindSelect('advOcrSplit', 'ocr_emnist_split');
+  bindNum('advOcrPerClass', 'ocr_emnist_per_class');
+  bindCheck('advOcrBackground', 'ocr_background_enabled');
+  bindNum('advOcrBackgroundN', 'ocr_background_samples');
+  bindCheck('advOcrTransfer', 'ocr_transfer_learning');
+  bindNum('advOcrPretrainN', 'ocr_pretrain_per_class');
+  bindNum('advOcrPretrainEpochs', 'ocr_pretrain_epochs');
+  bindNum('advOcrHeadEpochs', 'ocr_head_epochs');
+  bindNum('advOcrHeadLr', 'ocr_head_lr');
+  bindNum('advOcrFinetuneEpochs', 'ocr_finetune_epochs');
+  bindNum('advOcrFinetuneLr', 'ocr_finetune_lr');
+  bindNum('advOcrUnfreeze', 'ocr_unfreeze_blocks');
 }}
 function resetTrainCfg() {{
   STATE.train_cfg = {{
@@ -8964,7 +9272,21 @@ function resetTrainCfg() {{
     learning_rate: 0.0016,
     conv1_filters: 8,
     conv2_filters: 16,
-    dense_units: 32
+    dense_units: 32,
+    // OCR defaults, kept in step with trainer.TrainConfig.
+    ocr_emnist_enabled: true,
+    ocr_emnist_split: 'balanced',
+    ocr_emnist_per_class: 200,
+    ocr_background_enabled: true,
+    ocr_background_samples: 0,
+    ocr_transfer_learning: true,
+    ocr_pretrain_per_class: 1200,
+    ocr_pretrain_epochs: 4,
+    ocr_head_epochs: 12,
+    ocr_head_lr: 0.0015,
+    ocr_finetune_epochs: 25,
+    ocr_finetune_lr: 0.0002,
+    ocr_unfreeze_blocks: 1
   }};
   persistTrainCfgStorage();
   syncAdvancedInlineInputs();
@@ -9818,22 +10140,7 @@ def _render_image_project() -> None:
     ]
     # Build the config from the MERGED values above (controller read-back
     # wins for the SPA-controlled fields; session state supplies the rest).
-    controller.set_config(
-        st.session_state.session_id,
-        SessionConfig(
-            dataset_root=_tm_dataset_dir(),
-            serial_port=st.session_state.tm_serial_port,
-            serial_baud=int(st.session_state.tm_serial_baud),
-            serial_sync=str(st.session_state.tm_serial_sync),
-            serial_frame_side=int(st.session_state.tm_serial_frame_side),
-            serial_channels=int(st.session_state.tm_serial_channels),
-            webcam_index=int(st.session_state.tm_webcam_index),
-            webcam_id=str(st.session_state.get("tm_webcam_id") or ""),
-            img_size=int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96),
-            fps=float(st.session_state.tm_record_fps),
-            crop_box=st.session_state.tm_record_crop_box,
-        ),
-    )
+    controller.set_config(st.session_state.session_id, _tm_session_config())
 
     classes = list(st.session_state.tm_classes) if st.session_state.tm_classes else ["Class 1", "Class 2"]
     if len(classes) == 1:
@@ -10090,6 +10397,129 @@ def _render_image_project() -> None:
         initial_open_source_class=initial_open_source_class,
         initial_open_source_kind=initial_open_source_kind,
     )
+
+
+def _tm_classes_meta_path() -> Path:
+    return _session_workspace() / "tm_dataset" / "tm_classes.json"
+
+
+def _tm_write_class_preprocess(class_preprocess: Dict[str, Dict[str, Any]]) -> None:
+    """Persist per-class preprocess through the SAME store the SPA uses.
+
+    The SPA writes this by AJAX to /classes/save_config; Streamlit-side
+    controls must land in the identical place (tm_classes.json, merged) or
+    the two writers would fight over the class config.
+    """
+    p = _tm_classes_meta_path()
+    raw: Dict[str, Any] = {}
+    if p.exists():
+        try:
+            loaded = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                raw = loaded
+        except Exception:
+            raw = {}
+    merged = dict(raw.get("class_preprocess") or {})
+    for name, cfg in class_preprocess.items():
+        merged[name] = {**dict(merged.get(name) or {}), **cfg}
+    raw["class_preprocess"] = merged
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    controller = _ensure_fresh_record_controller()
+    try:
+        controller._rebuild_processed_cache(
+            _tm_dataset_dir(),
+            class_preprocess=normalize_class_preprocess_map(merged),
+            out_size=int(getattr(st.session_state.get("train_cfg"), "img_size", GLYPH_SIZE) or GLYPH_SIZE),
+            fast_mode=False,
+            project_type=PROJECT_TYPE_OCR,
+        )
+    except Exception:
+        pass
+
+
+def _render_ocr_glyph_settings() -> None:
+    """Per-class ink polarity / segmentation / normalisation.
+
+    These are the only OCR-specific knobs, and they live in the existing
+    per-class preprocess record (see normalize_class_preprocess) rather than
+    a parallel OCR config — so .tmproj saving, sample overrides and the
+    preview calls all carry them for free.
+    """
+    from ocr_preprocess import normalize_ink_polarity, normalize_norm_convention
+
+    classes = list(st.session_state.tm_classes or ["Class 1", "Class 2"])
+    meta = _tm_load_classes_meta_full() or {}
+    stored = normalize_class_preprocess_map(meta.get("class_preprocess"))
+    side = int(getattr(st.session_state.get("train_cfg"), "img_size", GLYPH_SIZE) or GLYPH_SIZE)
+
+    with st.expander(f"🔠 Glyph preprocessing — {side}×{side} model input", expanded=False):
+        st.caption(
+            "Every step is integer-exact and mirrorable on the device: BT.601 luminance → exact "
+            "integer Otsu (cross-multiplied, no floats) → vertical-projection segmentation → "
+            "nearest-neighbour resize by the exact rational map floor((2o+1)·in/(2·out)) → "
+            "gray − 128.  Verified byte-identical to the C reference on 386/386 corpus frames."
+        )
+        updated: Dict[str, Dict[str, Any]] = {}
+        for idx, name in enumerate(classes):
+            cfg = stored.get(name) or {}
+            polarity_label = st.selectbox(
+                f"{name} — ink",
+                options=["Dark ink on light (camera captures)", "Bright ink on dark (EMNIST/MNIST)"],
+                index=1 if int(normalize_ink_polarity(cfg.get("ink_polarity"))) else 0,
+                key=f"tm_ocr_polarity_{idx}",
+            )
+            segment = st.checkbox(
+                f"{name} — segment glyph by vertical projection",
+                value=bool(cfg.get("glyph_segment", True)),
+                key=f"tm_ocr_segment_{idx}",
+                help="On for camera captures (the glyph sits somewhere in a larger frame). "
+                     "Off for already-isolated imported datasets (EMNIST).",
+            )
+            convention_label = st.selectbox(
+                f"{name} — normalisation",
+                options=["Stretch bbox to the full grid", "MNIST/EMNIST canonical (fit 20 px, centre of mass)"],
+                index=1 if str(normalize_norm_convention(cfg.get("glyph_convention"))) == "canon" else 0,
+                key=f"tm_ocr_convention_{idx}",
+            )
+            updated[name] = {
+                "ink_polarity": 1 if polarity_label.startswith("Bright") else 0,
+                "glyph_segment": bool(segment),
+                "glyph_convention": "canon" if convention_label.startswith("MNIST") else "stretch",
+            }
+        if st.button("Apply glyph settings", key="tm_ocr_apply", type="primary"):
+            _tm_write_class_preprocess(updated)
+            st.success("Glyph settings applied — the processed cache was rebuilt.")
+            st.rerun()
+
+
+def _render_ocr_project_page() -> None:
+    """OCR / Character workspace.
+
+    Deliberately NOT a second frontend.  Capture, class editing, the sample
+    strip, training, quantisation, export and the OOD preview are all
+    project-agnostic: what differs is the sample transform (dispatched
+    server-side on `project_type`) and the model-input size (28).  So this
+    page renders the shared workspace and only adds the glyph-specific
+    explanation + per-class polarity/segmentation controls.
+    """
+    inject_teachable_style()
+    st.markdown(
+        '''
+        <div style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;">
+            <h1 style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🔠 OCR / Character Project</h1>
+            <p style="margin:0;max-width:860px;line-height:1.6;color:#475569;font-size:15px;">
+                Character recognition for the ESP32-P4. Samples are captured exactly like the image project,
+                then each one is reduced to a glyph tensor by an integer-exact pipeline whose Python and C
+                implementations agree bit-for-bit. Training, INT8 quantisation, export and the OOD gate are
+                the same code the image project uses.
+            </p>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
+    _render_ocr_glyph_settings()
+    _render_image_project()
 
 
 def _render_classified_import_page() -> None:
@@ -10367,7 +10797,8 @@ def _render_crop_ui() -> None:
             st.session_state.tm_pending_class = None
             st.rerun()
 
-    st.caption(f"Input: {w}x{h}  →  Output: 96x96x1")
+    _out_side = int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96)
+    st.caption(f"Input: {w}x{h}  →  Output: {_out_side}x{_out_side}x1")
 
 
 def _render_tm_class_panel() -> None:
@@ -10380,22 +10811,7 @@ def _render_tm_class_panel() -> None:
         st.session_state.tm_edit_class_idx = -1
 
     controller = _ensure_fresh_record_controller()
-    controller.set_config(
-        st.session_state.session_id,
-        SessionConfig(
-            dataset_root=_tm_dataset_dir(),
-            serial_port=st.session_state.tm_serial_port,
-            serial_baud=int(st.session_state.tm_serial_baud),
-            serial_sync=str(st.session_state.tm_serial_sync),
-            serial_frame_side=int(st.session_state.tm_serial_frame_side),
-            serial_channels=int(st.session_state.tm_serial_channels),
-            webcam_index=int(st.session_state.tm_webcam_index),
-            webcam_id=str(st.session_state.get("tm_webcam_id") or ""),
-            img_size=int(getattr(st.session_state.get("train_cfg"), "img_size", 96) or 96),
-            fps=float(st.session_state.tm_record_fps),
-            crop_box=st.session_state.tm_record_crop_box,
-        ),
-    )
+    controller.set_config(st.session_state.session_id, _tm_session_config())
 
     for idx, name in enumerate(classes):
         class_dir = _tm_dataset_dir() / sanitize_class_name(name)
@@ -10770,8 +11186,17 @@ def main() -> None:
         _render_image_project()
     elif st.session_state.project_type == "image_classified_import":
         _render_classified_import_page()
+    elif st.session_state.project_type == "ocr":
+        _render_ocr_project_page()
     else:
         st.warning("This project type is not implemented yet.")
+        # Escape hatch: an unrecognised tm_project value (hand-edited or stale
+        # URL) otherwise strands the app with no in-app way back.
+        if st.button("← Back to Home", key="tm_back_from_unknown_type", type="secondary"):
+            st.session_state.project_type = None
+            st.session_state.step = 0
+            _tm_clear_query_params()
+            st.rerun()
 
 
 if __name__ == "__main__":

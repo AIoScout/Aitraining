@@ -63,7 +63,15 @@ from PIL import Image, ImageOps
 
 from camera_permission import ensure_camera_access
 from serial_device import SerialFrameReader, list_serial_ports, parse_sync_header
-from dataset_io import IMAGE_EXTS, sanitize_class_name
+from dataset_io import (
+    DEFAULT_IMG_SIZE_BY_PROJECT,
+    IMAGE_EXTS,
+    KNOWN_PROJECT_TYPES,
+    PROJECT_TYPE_IMAGE,
+    PROJECT_TYPE_OCR,
+    default_img_size,
+    sanitize_class_name,
+)
 from image_preprocess import (
     CROP_MODE_AUTO_SEARCH,
     CROP_MODE_CENTER,
@@ -78,6 +86,16 @@ from image_preprocess import (
     manual_roi_to_pixels,
     preprocess_blue_diff_array,
     prepare_inference_inputs,
+)
+# The OCR project's integer-exact glyph transform.  Imported here (not
+# lazily) because the dispatch in _preprocess_image_png is on the hot path
+# for every captured sample.
+from ocr_preprocess import (
+    GLYPH_SIZE,
+    INK_DARK,
+    NORM_CANON,
+    NORM_STRETCH,
+    preprocess_glyph,
 )
 
 
@@ -111,6 +129,12 @@ class SessionConfig:
     # uploaded samples and their processed-cache previews are stored at this
     # size so 160×160 (or 48/128/192) projects are never downsampled to 96.
     img_size: int = 96
+    # Which project owns this session.  Selects the sample transform used by
+    # _preprocess_image_png (and therefore by the processed cache, the class
+    # previews and training): "image" = the sign pipeline in image_preprocess,
+    # "ocr" = the integer-exact glyph pipeline in ocr_preprocess.  It is a
+    # single dispatch key, not a fork of the surrounding lifecycle.
+    project_type: str = PROJECT_TYPE_IMAGE
 
 
 def _persist_webcam_choice(cfg: "SessionConfig") -> None:
@@ -330,6 +354,7 @@ class RecordController:
         serial_frame_side: Optional[int] = None,
         serial_channels: Optional[int] = None,
         direct_tensor_stream: Optional[bool] = None,
+        project_type: Optional[str] = None,
     ) -> SessionConfig:
         with self._lock:
             cfg = self._configs.get(session_id)
@@ -337,6 +362,7 @@ class RecordController:
                 raise RuntimeError("missing config")
             updated = replace(
                 cfg,
+                project_type=str(cfg.project_type if project_type is None else project_type),
                 webcam_index=int(cfg.webcam_index if webcam_index is None else webcam_index),
                 webcam_id=(str(cfg.webcam_id) if cfg.webcam_id else "") if webcam_id is None else str(webcam_id),
                 img_size=int(cfg.img_size if img_size is None else img_size),
@@ -593,7 +619,7 @@ class RecordController:
                 _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
                 return
             p = _save_png(cfg.dataset_root, class_name, png)
-            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             _send_json(req, {"ok": "1", "class": class_name, "filename": p.name}, cors=True)
             return
         if path == "/live/open":
@@ -629,6 +655,7 @@ class RecordController:
             serial_frame_side_raw = (qs.get("serial_frame_side") or [None])[0]
             serial_channels_raw = (qs.get("serial_channels") or [None])[0]
             direct_tensor_raw = (qs.get("direct_tensor_stream") or [None])[0]
+            project_type_raw = (qs.get("project_type") or [None])[0]
             try:
                 if serial_sync_raw not in (None, ""):
                     parse_sync_header(serial_sync_raw)
@@ -651,6 +678,7 @@ class RecordController:
                     serial_frame_side=None if serial_frame_side_raw in (None, "") else int(float(serial_frame_side_raw)),
                     serial_channels=None if serial_channels_raw in (None, "") else int(float(serial_channels_raw)),
                     direct_tensor_stream=None if direct_tensor_raw in (None, "") else direct_tensor_raw in ("1", "true", "True"),
+                    project_type=None if project_type_raw in (None, "") else str(project_type_raw).strip().lower(),
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -668,6 +696,7 @@ class RecordController:
                     "webcam_actual_backend": str(wc_actual.get("backend") or ""),
                     "webcam_actual_uid": str(wc_actual.get("unique_id") or ""),
                     "img_size": str(int(cfg.img_size)),
+                    "project_type": str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
                     "serial_port": str(cfg.serial_port),
                     "serial_baud": str(int(cfg.serial_baud)),
                     "serial_sync": str(cfg.serial_sync),
@@ -950,7 +979,7 @@ class RecordController:
                 _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
                 return
             p = _save_png(cfg.dataset_root, class_name, png)
-            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             _send_json(
                 req,
                 {
@@ -1068,7 +1097,7 @@ class RecordController:
                     except Exception:
                         pass
                 p = _save_png(cfg.dataset_root, class_name, png)
-                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
@@ -1191,6 +1220,7 @@ class RecordController:
                         class_preprocess=normalize_class_preprocess_map(class_preprocess) if class_preprocess else None,
                         fast_mode=False,
                         out_size=int(sess_cfg.img_size),
+                        project_type=str(sess_cfg.project_type),
                     )
                 except Exception:
                     pass
@@ -1427,7 +1457,7 @@ class RecordController:
         img = img.resize((int(cfg.img_size), int(cfg.img_size)))
         out_png = _to_png_bytes(img)
         p = _save_png(cfg.dataset_root, class_name, out_png)
-        self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+        self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
         _send_json(
             req,
             {
@@ -1965,10 +1995,21 @@ class RecordController:
                 meta = {}
 
         merged_project_state = self._project_state_payload(dataset_root, project_state=project_state)
+        # The session's project type is what decides every transform below
+        # AND what the Start Page needs in order to route the reopened file
+        # back to the right workspace — so it is written here, in the one
+        # manifest writer, rather than inferred from the payload later.
+        project_type = str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE)
+        merged_project_state["project_type"] = project_type
         manifest = {
             "format": "tmproj",
             "version": 1,
-            "project_type": "image",
+            "project_type": project_type,
+            # Persisted alongside the type so reopening restores the model
+            # input size too (the processed cache in the archive is already
+            # at this size — a reopen that guessed 96 would silently let a
+            # later capture overwrite it with the wrong geometry).
+            "img_size": int(cfg.img_size),
             "created_at": int(time.time()),
             "dataset_dir": "dataset",
             "dataset_labels_txt": "dataset/labels.txt",
@@ -1993,6 +2034,8 @@ class RecordController:
             class_preprocess=class_preprocess,
             sample_preprocess=sample_preprocess,
             global_preprocess_mode=str(merged_project_state.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL),
+            out_size=int(cfg.img_size),
+            project_type=project_type,
         )
         if processed_cache_dir.exists():
             manifest["processed_cache_dir"] = "processed_cache"
@@ -2093,6 +2136,22 @@ class RecordController:
             in_dataset = tmp_dir / dataset_dir
             if not in_dataset.exists():
                 raise ValueError("missing dataset")
+
+            # Adopt the archived project type BEFORE anything re-preprocesses
+            # a sample, so every later capture / preview / training of this
+            # session uses the transform the file was built with.  Old
+            # archives have no such key and stay image projects.
+            archived_type = str(manifest.get("project_type") or "").strip().lower()
+            if archived_type in KNOWN_PROJECT_TYPES:
+                self.update_config(session_id, project_type=archived_type)
+            archived_size = manifest.get("img_size")
+            if archived_size not in (None, ""):
+                try:
+                    size = int(archived_size)
+                    if 8 <= size <= 512:
+                        self.update_config(session_id, img_size=size)
+                except Exception:
+                    pass
 
             self._project_reset(session_id=session_id)
 
@@ -2273,6 +2332,9 @@ class RecordController:
             sample_preprocess = normalize_sample_preprocess_map(src.get("sample_preprocess"))
             if sample_preprocess:
                 out["sample_preprocess"] = sample_preprocess
+            project_type = str(src.get("project_type") or "").strip().lower()
+            if project_type in KNOWN_PROJECT_TYPES:
+                out["project_type"] = project_type
             return out
 
         if isinstance(project_state, dict):
@@ -2360,7 +2422,14 @@ class RecordController:
     def _processed_preview_item_payload(self, path: Path) -> Dict[str, str]:
         return _preview_item_payload(path)
 
-    def _cache_one_sample(self, dataset_root: Path, class_name: str, sample_path: Path, img_size: int = 96) -> None:
+    def _cache_one_sample(
+        self,
+        dataset_root: Path,
+        class_name: str,
+        sample_path: Path,
+        img_size: int = 96,
+        project_type: str = PROJECT_TYPE_IMAGE,
+    ) -> None:
         """Process one newly saved sample into the processed cache so the
         class-edit previews and the next training see it immediately."""
         try:
@@ -2372,6 +2441,7 @@ class RecordController:
                 class_config=config,
                 fast_mode=False,
                 out_size=int(img_size),
+                project_type=project_type,
             )
             dst_dir = self._processed_cache_dir(dataset_root) / sanitize_class_name(class_name)
             dst_dir.mkdir(parents=True, exist_ok=True)
@@ -2379,9 +2449,16 @@ class RecordController:
         except Exception:
             pass
 
-    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96):
+    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96, project_type: str = PROJECT_TYPE_IMAGE):
         class_cfg = class_config if isinstance(class_config, dict) else {}
         src_cfg = sample_config if isinstance(sample_config, dict) else {}
+        # Project dispatch — ONE key, at the ONE place every sample enters the
+        # pipeline (incremental cache writes, full cache rebuilds, class
+        # previews, training).  The OCR branch reuses all of the surrounding
+        # lifecycle (cache dirs, class dirs, naming, previews) and only swaps
+        # the pixel transform.
+        if str(project_type or PROJECT_TYPE_IMAGE).strip().lower() == PROJECT_TYPE_OCR:
+            return self._preprocess_image_png_ocr(png, class_config, sample_config, return_crop, out_size)
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
         mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
         # User-adjustable thresholds from class-level config (shared across samples)
@@ -2432,6 +2509,76 @@ class RecordController:
             return {"png": png_bytes, "crop": list(crop_norm), "processed_png": mp_png, "crop_png": cp_png}
         return png_bytes
 
+    def _preprocess_image_png_ocr(
+        self,
+        png: bytes,
+        class_config: Any,
+        sample_config: Any = None,
+        return_crop: bool = False,
+        out_size: int = GLYPH_SIZE,
+    ):
+        """OCR project sample transform: the glyph pipeline in ocr_preprocess.
+
+        Deliberately a *branch* of _preprocess_image_png, not a parallel
+        lifecycle: the caller has already done the file I/O, the class-name
+        sanitising, the cache-directory choice and the preview plumbing.  All
+        this swaps is the pixel transform — exactly what `project_type` is
+        for.
+
+        Every step below is integer-only so the device's C port can be
+        bit-identical (see ocr_preprocess for the derivations): Otsu by
+        cross-multiplied integer variance, vertical projection by int64
+        column sums, nearest-neighbour by an exact rational index map.
+        """
+        config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
+        polarity = int(config.get("ink_polarity", INK_DARK))
+        # NORM_CANON, not NORM_STRETCH: the OCR project mixes EMNIST into
+        # every training set, EMNIST ships as 28x28, and CANON is the
+        # aspect-preserving convention that keeps a stretched camera
+        # capture comparable to it.  STRETCH squashes a tall thin glyph
+        # ('1', 'I', 'l') onto the square grid — measured, a 26x48 crop of
+        # a '1' became an unreadable blob while the EMNIST half of the SAME
+        # class stayed a clean glyph.  See ocr_preprocess.normalise_glyph.
+        convention = str(config.get("glyph_convention", NORM_CANON))
+        apply_segmentation = bool(config.get("glyph_segment", True))
+
+        src_img = Image.open(_bytes_io(png)).convert("L")
+        gray = np.asarray(src_img, dtype=np.uint8)
+        result = preprocess_glyph(
+            gray,
+            out_size=int(out_size),
+            polarity=polarity,
+            apply_segmentation=apply_segmentation,
+            convention=convention,
+        )
+        glyph = np.asarray(result["glyph"], dtype=np.uint8)
+        png_bytes = _to_png_bytes(Image.fromarray(glyph, mode="L"))
+
+        if not return_crop:
+            return png_bytes
+
+        # Previews mirror the image branch's contract so the same UI code
+        # renders both projects:
+        #   processed_png -> the decision mask (what the threshold chose)
+        #   crop_png      -> the pre-decision region (what the camera saw)
+        ink = result.get("ink")
+        if ink is not None:
+            mp_png = _to_png_bytes(Image.fromarray((np.asarray(ink).astype(np.uint8) * 255), mode="L"))
+        else:
+            mp_png = png_bytes
+        h, w = gray.shape[:2]
+        box = result.get("box")
+        crop_norm = [0.0, 0.0, 1.0, 1.0]
+        cp_png = png_bytes
+        if box is not None:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            crop = np.ascontiguousarray(gray[y1:y2, x1:x2])
+            if crop.size:
+                cp_png = _to_png_bytes(Image.fromarray(crop, mode="L"))
+            if w and h:
+                crop_norm = [x1 / w, y1 / h, x2 / w, y2 / h]
+        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png}
+
     def _rebuild_processed_cache(
         self,
         dataset_root: Path,
@@ -2440,6 +2587,7 @@ class RecordController:
         global_preprocess_mode: str = PREPROCESS_MODE_AUTO_BY_LABEL,
         out_size: int = 96,
         fast_mode: bool = True,
+        project_type: str = PROJECT_TYPE_IMAGE,
     ) -> None:
         classes = self._classes_load(dataset_root)
         cache_root = self._processed_cache_dir(dataset_root)
@@ -2469,6 +2617,7 @@ class RecordController:
                         fast_mode=fast_mode,
                         sample_config=sample_cfg,
                         out_size=int(out_size),
+                        project_type=project_type,
                     )
                     (dst_dir / f"{src.stem}.png").write_bytes(out_png)
                     processed_count += 1
@@ -2517,6 +2666,7 @@ class RecordController:
             sample_config=sample_config,
             return_crop=True,
             out_size=int(cfg.img_size),
+            project_type=str(cfg.project_type),
         )
         return {
             "image_b64": base64.b64encode(result["png"]).decode("ascii"),
@@ -2578,6 +2728,9 @@ class RecordController:
                 payload["bg_dark_thresh"] = int(project_state["bg_dark_thresh"])
             if "bg_lum_thresh" in project_state:
                 payload["bg_lum_thresh"] = int(project_state["bg_lum_thresh"])
+            project_type = str(project_state.get("project_type") or "").strip().lower()
+            if project_type in KNOWN_PROJECT_TYPES:
+                payload["project_type"] = project_type
         return payload
 
     def _preview_model_lock(self, session_id: str) -> threading.Lock:
@@ -3163,6 +3316,25 @@ class RecordController:
                 class_names_order=list(project_classes) if project_classes else None,
                 min_steps_per_epoch=int(cfg_dict.get("min_steps_per_epoch") or 4),
                 auto_adjust_batch_and_epochs=bool(cfg_dict.get("auto_adjust_batch_and_epochs", True)),
+                # The session owns the project type; a stray cfg_dict must not
+                # be able to train an OCR workspace with the sign transform.
+                project_type=str(getattr(sess_cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                # OCR: dataset mixing + transfer learning.  Read only by the
+                # OCR strategy, so an image project is unaffected by their
+                # presence (and by their absence).
+                ocr_emnist_enabled=bool(cfg_dict.get("ocr_emnist_enabled", True)),
+                ocr_emnist_split=str(cfg_dict.get("ocr_emnist_split") or "balanced"),
+                ocr_emnist_per_class=int(cfg_dict.get("ocr_emnist_per_class") or 200),
+                ocr_background_enabled=bool(cfg_dict.get("ocr_background_enabled", True)),
+                ocr_background_samples=int(cfg_dict.get("ocr_background_samples") or 0),
+                ocr_transfer_learning=bool(cfg_dict.get("ocr_transfer_learning", True)),
+                ocr_pretrain_per_class=int(cfg_dict.get("ocr_pretrain_per_class") or 1200),
+                ocr_pretrain_epochs=int(cfg_dict.get("ocr_pretrain_epochs") or 4),
+                ocr_head_epochs=int(cfg_dict.get("ocr_head_epochs") or 12),
+                ocr_finetune_epochs=int(cfg_dict.get("ocr_finetune_epochs") or 25),
+                ocr_head_lr=float(cfg_dict.get("ocr_head_lr") or 0.0015),
+                ocr_finetune_lr=float(cfg_dict.get("ocr_finetune_lr") or 0.0002),
+                ocr_unfreeze_blocks=int(cfg_dict.get("ocr_unfreeze_blocks") or 1),
             )
 
             workspace_root = sess_cfg.dataset_root.parent
@@ -3177,6 +3349,7 @@ class RecordController:
                 global_preprocess_mode=cfg.preprocess_mode,
                 out_size=int(cfg.img_size),
                 fast_mode=(str(cfg.crop_mode or CROP_MODE_CENTER) != CROP_MODE_AUTO_SEARCH),
+                project_type=str(cfg.project_type),
             )
 
             def on_progress(p: float, msg: str) -> None:
@@ -3224,6 +3397,7 @@ class RecordController:
                 "class_accuracies": dict(result.class_accuracies) if result.class_accuracies else {},
                 "warnings": list(result.warnings) if result.warnings else [],
                 "img_size": int(cfg.img_size),
+                "project_type": str(cfg.project_type),
                 "color_mode": str(cfg.color_mode),
                 "preprocess_mode": str(cfg.preprocess_mode),
                 "crop_mode": str(cfg.crop_mode or CROP_MODE_AUTO_SEARCH),
@@ -3231,6 +3405,10 @@ class RecordController:
                 "class_preprocess": normalize_class_preprocess_map(cfg.class_preprocess),
                 "sample_preprocess": normalize_sample_preprocess_map(cfg.sample_preprocess),
                 "trained_dataset_dir": str(processed_dataset_dir),
+                # Strategy-supplied manifest.  For OCR this is the EMNIST /
+                # background mix actually used, so a run can be explained
+                # after the fact without re-deriving it from the filenames.
+                "ocr_mix": dict(result.meta) if str(cfg.project_type) == PROJECT_TYPE_OCR else {},
             }
             # Atomic write: a torn meta read by a concurrent /preview/predict
             # used to 400 every prediction until the next training.
@@ -3837,7 +4015,7 @@ class RecordController:
                 raw = reader.read_frame()  # auto-scaled timeout (frame_size × 12 bits/byte / baud)
                 png = _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=int(cfg.serial_frame_side), out_side=int(cfg.serial_frame_side))
                 p = _save_png(cfg.dataset_root, class_name, png)
-                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
                 with self._lock:
                     cur = self._active.get(session_id)
                     if cur is not None and cur.get("recording") == "1":
@@ -3892,7 +4070,7 @@ class RecordController:
                 img = img.resize((int(cfg.img_size), int(cfg.img_size)))
                 png = _to_png_bytes(img)
                 p = _save_png(cfg.dataset_root, class_name, png)
-                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
                 with self._lock:
                     cur = self._active.get(session_id)
                     if cur is not None and cur.get("recording") == "1":
@@ -3972,7 +4150,7 @@ class RecordController:
                 time.sleep(max(0.015, float(interval) * 0.35))
                 continue
             p = _save_png(cfg.dataset_root, class_name, capture_png)
-            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             with self._lock:
                 cur = self._active.get(session_id)
                 if cur is not None and cur.get("recording") == "1":

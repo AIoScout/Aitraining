@@ -4,7 +4,7 @@ import json
 import math
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -20,11 +20,20 @@ from image_preprocess import (
     normalize_manual_roi,
     preprocess_for_label,
 )
+from dataset_io import PROJECT_TYPE_IMAGE, PROJECT_TYPE_OCR
+from ocr_dataset import BACKGROUND_CLASS_NAME, DEFAULT_EMNIST_SPLIT
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     img_size: int = 96
+    # Which project produced this run.  Purely provenance for the trainer —
+    # every project feeds it the SAME processed-cache PNGs at
+    # img_size x img_size, so the training/export code below is shared
+    # unchanged.  It is recorded in the run's train_config.json / metadata
+    # so the UI and the .tmproj manifest can route the run back to the right
+    # workspace after a reopen.
+    project_type: str = PROJECT_TYPE_IMAGE
     color_mode: str = "grayscale"
     batch_size: int = 32
     epochs: int = 20
@@ -50,6 +59,27 @@ class TrainConfig:
     min_steps_per_epoch: int = 4
     auto_adjust_batch_and_epochs: bool = True
 
+    # ── OCR / character project ─────────────────────────────────────────
+    # Only consulted when project_type == PROJECT_TYPE_OCR; the image
+    # project's path never reads them, so their presence cannot perturb an
+    # existing sign model.
+    #
+    # Dataset mixing (ocr_dataset.build_mixed_dataset)
+    ocr_emnist_enabled: bool = True
+    ocr_emnist_split: str = DEFAULT_EMNIST_SPLIT
+    ocr_emnist_per_class: int = 200
+    ocr_background_enabled: bool = True
+    ocr_background_samples: int = 0          # 0 -> mirror ocr_emnist_per_class
+    # Transfer learning (ocr_trainer)
+    ocr_transfer_learning: bool = True
+    ocr_pretrain_per_class: int = 1200       # EMNIST samples/class for the cached backbone
+    ocr_pretrain_epochs: int = 4
+    ocr_head_epochs: int = 12                # phase 1: head only, backbone frozen
+    ocr_finetune_epochs: int = 25            # phase 2: last conv block unfrozen
+    ocr_head_lr: float = 0.0015
+    ocr_finetune_lr: float = 0.0002
+    ocr_unfreeze_blocks: int = 1
+
 
 @dataclass(frozen=True)
 class TrainResult:
@@ -62,6 +92,10 @@ class TrainResult:
     metrics: Dict[str, float]
     class_accuracies: Optional[Dict[str, float]] = None
     warnings: Optional[List[str]] = None
+    # Whatever the strategy wants recorded about how it built the set — the
+    # OCR project puts its EMNIST/background mix manifest here.  Typed as a
+    # plain dict so the trainer needs to know nothing about any one project.
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 def _channels(color_mode: str) -> int:
@@ -241,40 +275,96 @@ def load_datasets(
     return train_ds, val_ds, calibration_ds, class_names, input_shape, class_weights
 
 
-def build_model(input_shape: Tuple[int, int, int], num_classes: int, cfg: TrainConfig) -> tf.keras.Model:
+def conv_backbone_kwargs(cfg: TrainConfig) -> Dict[str, int]:
+    """Filter widths of the shared conv stack.
+
+    Conv3 is DERIVED from conv2 (`max(conv2*2, 64)`), not configured
+    separately.  That derivation lived inline in build_model before; it is
+    hoisted here because the OCR path has to reproduce the exact same stack
+    to be able to load a pretrained version of it.
+    """
+    return {
+        "conv1": cfg.conv1_filters,
+        "conv2": cfg.conv2_filters,
+        "conv3": max(int(cfg.conv2_filters) * 2, 64),
+        "dense": max(int(cfg.dense_units), 64),
+    }
+
+
+def conv_backbone_layers(cfg: TrainConfig) -> List[Any]:
+    """The conv feature extractor as FRESH layer instances, no Input, no head.
+
+    One definition, two consumers:
+      * build_model()             — stacks it with a head for the image
+                                    project's from-scratch classifier;
+      * ocr_trainer.build_transfer_model() — uses it as the backbone it
+                                    pretrains on EMNIST, freezes, and
+                                    grafts a new N+1-way head onto.
+    Because both projects share the stack, they also share its arena
+    profile on the device — a second architecture would need its own
+    memory budget and its own INT8 conversion verification.
+
+    Layers are constructed per call on purpose: a Keras layer instance owns
+    weights and cannot belong to two models.
+    """
     reg = tf.keras.regularizers.l2(1e-4)
-    conv3_filters = max(int(cfg.conv2_filters) * 2, 64)
+    f = conv_backbone_kwargs(cfg)
+    return [
+        tf.keras.layers.Conv2D(f["conv1"], (3, 3), activation="relu", padding="same", kernel_regularizer=reg),
+        tf.keras.layers.MaxPooling2D((2, 2)),
+        tf.keras.layers.Dropout(0.10),
+        tf.keras.layers.Conv2D(f["conv2"], (3, 3), activation="relu", padding="same", kernel_regularizer=reg),
+        tf.keras.layers.MaxPooling2D((2, 2)),
+        tf.keras.layers.Dropout(0.15),
+        tf.keras.layers.Conv2D(f["conv3"], (3, 3), activation="relu", padding="same", kernel_regularizer=reg),
+        tf.keras.layers.MaxPooling2D((2, 2)),
+    ]
+
+
+def classifier_head_layers(num_classes: int, cfg: TrainConfig) -> List[Any]:
+    """Flatten + Dense + Dropout + softmax, as fresh layer instances.
+
+    Shared by the image project's model and — after surgery replaces the
+    pretrained EMNIST head — by the OCR model.  The OCR head has
+    `num_classes = N + 1`: the user's characters plus the reserved
+    background/_background reject class, which is why its index is exactly N.
+    """
+    reg = tf.keras.regularizers.l2(1e-4)
     dense_units = max(int(cfg.dense_units), 64)
-    model = tf.keras.Sequential(
-        [
-            tf.keras.layers.Input(shape=input_shape, name="input"),
-            tf.keras.layers.Conv2D(cfg.conv1_filters, (3, 3), activation="relu", padding="same", kernel_regularizer=reg),
-            tf.keras.layers.MaxPooling2D((2, 2)),
-            tf.keras.layers.Dropout(0.10),
-            tf.keras.layers.Conv2D(cfg.conv2_filters, (3, 3), activation="relu", padding="same", kernel_regularizer=reg),
-            tf.keras.layers.MaxPooling2D((2, 2)),
-            tf.keras.layers.Dropout(0.15),
-            tf.keras.layers.Conv2D(conv3_filters, (3, 3), activation="relu", padding="same", kernel_regularizer=reg),
-            tf.keras.layers.MaxPooling2D((2, 2)),
-            tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(dense_units, activation="relu", kernel_regularizer=reg),
-            tf.keras.layers.Dropout(0.35),
-            tf.keras.layers.Dense(num_classes, activation="softmax", name="output"),
-        ]
-    )
+    return [
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(dense_units, activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.Dropout(0.35),
+        tf.keras.layers.Dense(num_classes, activation="softmax", name="output"),
+    ]
 
-    opt_name = cfg.optimizer.lower()
+
+def make_optimizer(cfg: TrainConfig, learning_rate: Optional[float] = None) -> tf.keras.optimizers.Optimizer:
+    """Build the configured optimizer, optionally at an overridden LR.
+
+    The override matters for transfer learning: head warm-up and
+    backbone fine-tuning need the SAME optimizer family at two different
+    learning rates, so the lookup lives here instead of being re-derived.
+    """
+    lr = float(cfg.learning_rate if learning_rate is None else learning_rate)
+    opt_name = str(cfg.optimizer).lower()
     if opt_name == "adam":
-        optimizer = tf.keras.optimizers.Adam(learning_rate=cfg.learning_rate)
-    elif opt_name == "sgd":
-        optimizer = tf.keras.optimizers.SGD(learning_rate=cfg.learning_rate, momentum=0.9)
-    elif opt_name == "rmsprop":
-        optimizer = tf.keras.optimizers.RMSprop(learning_rate=cfg.learning_rate)
-    else:
-        raise ValueError(f"Unsupported optimizer: {cfg.optimizer}")
+        return tf.keras.optimizers.Adam(learning_rate=lr)
+    if opt_name == "sgd":
+        return tf.keras.optimizers.SGD(learning_rate=lr, momentum=0.9)
+    if opt_name == "rmsprop":
+        return tf.keras.optimizers.RMSprop(learning_rate=lr)
+    raise ValueError(f"Unsupported optimizer: {cfg.optimizer}")
 
+
+def build_model(input_shape: Tuple[int, int, int], num_classes: int, cfg: TrainConfig) -> tf.keras.Model:
+    model = tf.keras.Sequential(
+        [tf.keras.layers.Input(shape=input_shape, name="input")]
+        + conv_backbone_layers(cfg)
+        + classifier_head_layers(num_classes, cfg)
+    )
     loss = tf.keras.losses.SparseCategoricalCrossentropy()
-    model.compile(optimizer=optimizer, loss=loss, metrics=["accuracy"])
+    model.compile(optimizer=make_optimizer(cfg), loss=loss, metrics=["accuracy"])
     return model
 
 
@@ -527,6 +617,129 @@ def recommend_train_params(total_samples: int, cfg: TrainConfig) -> Tuple[Dict[s
     return recommended_kwargs, reasons
 
 
+@dataclass
+class DatasetBundle:
+    """Everything the training path needs from a prepared dataset.
+
+    A project strategy returns this instead of the old 6-tuple so a strategy
+    can carry extra provenance (`meta`) — e.g. the OCR path records how many
+    samples came from EMNIST vs the user's captures — without widening a
+    positional return value that every caller would then have to unpack.
+    """
+
+    train_ds: Any
+    val_ds: Any
+    calibration_ds: Any
+    class_names: List[str]
+    input_shape: Tuple[int, int, int]
+    class_weights: Dict[int, float]
+    train_count: int = 0
+    total_files: int = 0
+    meta: Dict[str, Any] = field(default_factory=dict)
+    # Where the post-training per-class self-check reads its images from.
+    # Defaults to `dataset_dir`, which is right whenever training reads the
+    # same directory it was handed.  The OCR project trains on a MIXED
+    # directory it materialised itself, and the self-check must grade
+    # against that one — grading a 28x28 model on 96x96 raw captures would
+    # report every class at 0 %.
+    eval_dir: Optional[Path] = None
+
+
+@dataclass
+class FitContext:
+    """What a strategy's fit function is allowed to use.
+
+    `make_callbacks` is a FACTORY rather than a list because the OCR path
+    fits in two phases and each phase needs fresh EarlyStopping /
+    ReduceLROnPlateau state — reusing a callback instance across phases
+    would carry the first phase's best-weights decision into the second.
+    """
+
+    progress: Optional[Callable[[float, str], None]]
+    make_callbacks: Callable[..., List[Any]]
+    train_ds: Any = None
+    val_ds: Any = None
+    class_weights: Optional[Dict[int, float]] = None
+
+
+@dataclass(frozen=True)
+class TrainStrategy:
+    """One project type's dataset + model + fit policy.
+
+    `train_and_export` below is the shared spine: adjust → prepare → build →
+    fit → evaluate → quantise → export → self-check.  Nothing about the
+    export, quantisation, per-class self-check or metadata writing is
+    project-specific, so a project swaps in a strategy and inherits all of
+    it.  This is the seam that keeps the OCR project from becoming a
+    parallel copy of the training pipeline.
+    """
+
+    name: str
+    adjust_cfg: Callable[[Path, TrainConfig], TrainConfig]
+    prepare: Callable[[Path, TrainConfig], DatasetBundle]
+    build_model: Callable[[DatasetBundle, TrainConfig], tf.keras.Model]
+    fit: Callable[[Any, DatasetBundle, TrainConfig, FitContext], None]
+
+
+def _default_adjust_cfg(dataset_dir: Path, cfg: TrainConfig) -> TrainConfig:
+    return _adjust_cfg_for_dataset_size(dataset_dir, cfg)[0]
+
+
+def _default_prepare(dataset_dir: Path, cfg: TrainConfig) -> DatasetBundle:
+    train_ds, val_ds, calibration_ds, class_names, input_shape, class_weights = load_datasets(
+        Path(dataset_dir), cfg
+    )
+    _, total_files, train_count = _adjust_cfg_for_dataset_size(Path(dataset_dir), cfg)
+    return DatasetBundle(
+        train_ds=train_ds,
+        val_ds=val_ds,
+        calibration_ds=calibration_ds,
+        class_names=class_names,
+        input_shape=input_shape,
+        class_weights=class_weights,
+        train_count=int(train_count),
+        total_files=int(total_files),
+    )
+
+
+def _default_build_model(bundle: DatasetBundle, cfg: TrainConfig) -> tf.keras.Model:
+    return build_model(bundle.input_shape, len(bundle.class_names), cfg)
+
+
+def _default_fit(model: Any, bundle: DatasetBundle, cfg: TrainConfig, ctx: FitContext) -> None:
+    epochs = int(cfg.epochs)
+    fit_kwargs: Dict[str, Any] = {
+        "epochs": epochs,
+        "verbose": 1,
+        "callbacks": ctx.make_callbacks(epochs),
+    }
+    if bundle.val_ds is not None:
+        fit_kwargs["validation_data"] = bundle.val_ds
+    fit_kwargs["class_weight"] = bundle.class_weights
+    model.fit(bundle.train_ds, **fit_kwargs)
+
+
+DEFAULT_STRATEGY = TrainStrategy(
+    name=PROJECT_TYPE_IMAGE,
+    adjust_cfg=_default_adjust_cfg,
+    prepare=_default_prepare,
+    build_model=_default_build_model,
+    fit=_default_fit,
+)
+
+
+def get_train_strategy(project_type: object) -> TrainStrategy:
+    """The strategy for a project type; unknown types get the image one."""
+    key = str(project_type or PROJECT_TYPE_IMAGE).strip().lower()
+    if key == PROJECT_TYPE_OCR:
+        # Imported lazily: ocr_trainer imports THIS module for the shared
+        # conv stack and head, so a module-level import would be a cycle.
+        from ocr_trainer import OCR_STRATEGY
+
+        return OCR_STRATEGY
+    return DEFAULT_STRATEGY
+
+
 def train_and_export(
     dataset_dir: Path,
     run_dir: Path,
@@ -538,66 +751,77 @@ def train_and_export(
     run_dir = run_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg, total_files, train_count = _adjust_cfg_for_dataset_size(dataset_dir, cfg)
-
-    train_ds, val_ds, calibration_ds, labels, input_shape, class_weights = load_datasets(Path(dataset_dir), cfg)
-    model = build_model(input_shape, len(labels), cfg)
+    dataset_dir = Path(dataset_dir)
+    strategy = get_train_strategy(cfg.project_type)
+    cfg = strategy.adjust_cfg(dataset_dir, cfg)
 
     if progress is not None:
         progress(0.02, "Building datasets...")
 
-    fit_kwargs = {"epochs": cfg.epochs, "verbose": 1}
-    if val_ds is not None:
-        fit_kwargs["validation_data"] = val_ds
-    fit_kwargs["class_weight"] = class_weights
-    if progress is not None:
-        epochs_total = max(1, int(cfg.epochs))
+    bundle = strategy.prepare(dataset_dir, cfg)
+    labels = bundle.class_names
+    model = strategy.build_model(bundle, cfg)
 
-        class _Progress(tf.keras.callbacks.Callback):
-            def on_epoch_end(self, epoch, logs=None):
-                try:
-                    p = 0.05 + 0.75 * (float(epoch + 1) / float(epochs_total))
-                    progress(p, f"Training epoch {int(epoch + 1)}/{epochs_total}...")
-                except Exception:
-                    pass
+    def make_callbacks(epochs_total: int, tag: str = "", lo: float = 0.05, hi: float = 0.80):
+        """Fresh callbacks for one fit phase.
 
-        callbacks: List[tf.keras.callbacks.Callback] = [_Progress()]
-    else:
-        callbacks = []
+        The patience heuristic keys off steps-per-epoch, so it is computed
+        here rather than baked in: a short phase needs a longer patience or
+        it stops before the head has moved.
+        """
+        callbacks: List[Any] = []
+        if progress is not None:
+            total = max(1, int(epochs_total))
+            label = f" {tag}" if tag else ""
 
-    monitor_loss = "val_loss" if val_ds is not None else "loss"
-    steps_per_epoch_est = max(1, int(train_count // max(1, int(cfg.batch_size))))
-    if steps_per_epoch_est <= 4:
-        es_patience = 12
-        rlr_patience = 6
-    elif steps_per_epoch_est <= 8:
-        es_patience = 9
-        rlr_patience = 4
-    else:
-        es_patience = 6
-        rlr_patience = 3
-    callbacks.append(
-        tf.keras.callbacks.EarlyStopping(
-            monitor=monitor_loss,
-            patience=int(es_patience),
-            min_delta=1e-4,
-            restore_best_weights=True,
-            verbose=0,
+            class _Progress(tf.keras.callbacks.Callback):
+                def on_epoch_end(self, epoch, logs=None):
+                    try:
+                        p = lo + (hi - lo) * (float(epoch + 1) / float(total))
+                        progress(p, f"Training{label} epoch {int(epoch + 1)}/{total}...")
+                    except Exception:
+                        pass
+
+            callbacks.append(_Progress())
+
+        monitor_loss = "val_loss" if bundle.val_ds is not None else "loss"
+        steps_per_epoch_est = max(1, int(bundle.train_count // max(1, int(cfg.batch_size))))
+        if steps_per_epoch_est <= 4:
+            es_patience, rlr_patience = 12, 6
+        elif steps_per_epoch_est <= 8:
+            es_patience, rlr_patience = 9, 4
+        else:
+            es_patience, rlr_patience = 6, 3
+        callbacks.append(
+            tf.keras.callbacks.EarlyStopping(
+                monitor=monitor_loss,
+                patience=int(es_patience),
+                min_delta=1e-4,
+                restore_best_weights=True,
+                verbose=0,
+            )
         )
-    )
-    callbacks.append(
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor=monitor_loss,
-            factor=0.5,
-            patience=int(rlr_patience),
-            min_lr=1e-5,
-            verbose=0,
+        callbacks.append(
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor=monitor_loss,
+                factor=0.5,
+                patience=int(rlr_patience),
+                min_lr=1e-5,
+                verbose=0,
+            )
         )
-    )
-    fit_kwargs["callbacks"] = callbacks
+        return callbacks
 
-    model.fit(train_ds, **fit_kwargs)
-    eval_ds = val_ds if val_ds is not None else train_ds
+    ctx = FitContext(
+        progress=progress,
+        make_callbacks=make_callbacks,
+        train_ds=bundle.train_ds,
+        val_ds=bundle.val_ds,
+        class_weights=bundle.class_weights,
+    )
+    strategy.fit(model, bundle, cfg, ctx)
+
+    eval_ds = bundle.val_ds if bundle.val_ds is not None else bundle.train_ds
     if progress is not None:
         progress(0.85, "Evaluating...")
     loss, acc = model.evaluate(eval_ds, verbose=0)
@@ -607,7 +831,7 @@ def train_and_export(
 
     if progress is not None:
         progress(0.9, "Converting to int8 TFLite...")
-    tflite_bytes = convert_to_int8_tflite(model, calibration_ds, cfg)
+    tflite_bytes = convert_to_int8_tflite(model, bundle.calibration_ds, cfg)
     tflite_path = run_dir / f"{model_base_name}.tflite"
     tflite_path.write_bytes(tflite_bytes)
 
@@ -615,11 +839,12 @@ def train_and_export(
     # Catches the silent single-class collapse (val_acc 1.0 while one class
     # scores ~30 % on its own training images).  Compares float32 vs int8
     # so quantization degradation is surfaced too.
-    warnings_out: List[str] = []
+    warnings_out: List[str] = [str(w) for w in (bundle.meta.get("warnings") or [])]
     accs_f32: Dict[str, float] = {}
+    self_check_dir = Path(bundle.eval_dir) if bundle.eval_dir is not None else Path(dataset_dir)
     try:
-        accs_f32 = evaluate_class_accuracies(_keras_predict_fn(model), Path(dataset_dir), labels)
-        accs_i8 = evaluate_class_accuracies(_tflite_predict_fn(tflite_bytes), Path(dataset_dir), labels)
+        accs_f32 = evaluate_class_accuracies(_keras_predict_fn(model), self_check_dir, labels)
+        accs_i8 = evaluate_class_accuracies(_tflite_predict_fn(tflite_bytes), self_check_dir, labels)
         for label in labels:
             a32 = accs_f32.get(label)
             a8 = accs_i8.get(label)
@@ -665,7 +890,21 @@ def train_and_export(
         metrics={"val_loss": float(loss), "val_accuracy": float(acc)},
         class_accuracies=accs_f32,
         warnings=warnings_out,
+        meta=_json_safe_meta(bundle.meta),
     )
+
+
+def _json_safe_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip non-serialisable entries (the OCR strategy carries a live Keras
+    backbone in its meta) so the run metadata always writes cleanly."""
+    out: Dict[str, Any] = {}
+    for k, v in (meta or {}).items():
+        try:
+            json.dumps(v)
+        except (TypeError, ValueError):
+            continue
+        out[str(k)] = v
+    return out
 
 
 def new_run_dir(base_dir: Path) -> Path:
