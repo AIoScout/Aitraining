@@ -68,10 +68,12 @@ from dataset_io import IMAGE_EXTS, sanitize_class_name
 from image_preprocess import (
     CROP_MODE_AUTO_SEARCH,
     CROP_MODE_CENTER,
+    CLIP_MODE_JUNCTION,
     PREPROCESS_MODE_AUTO_BY_LABEL,
     PREPROCESS_MODE_MANUAL_ROI,
     _BG_LUM_THRESH,
     _BG_DIFF_MIN,
+    class_clip_mode,
     normalize_class_preprocess,
     normalize_class_preprocess_map,
     normalize_sample_preprocess_map,
@@ -1839,11 +1841,50 @@ class RecordController:
         outbox.mkdir(parents=True, exist_ok=True)
         shutil.copy2(tflite_path, outbox / "model.tflite")
         (outbox / "labels.txt").write_text(("\n".join(labels) + "\n") if labels else "", encoding="utf-8")
+        preprocess_info = self._blockcoding_preprocess_info(cfg.dataset_root, labels)
+        (outbox / "preprocess.json").write_text(json.dumps(preprocess_info, indent=2), encoding="utf-8")
         return {
             "outbox_dir": str(outbox),
             "labels": labels,
             "model_bytes": tflite_path.stat().st_size,
+            "preprocess": {"mode": preprocess_info["mode"], "uniform": preprocess_info["uniform"]},
         }
+
+    def _blockcoding_preprocess_info(self, dataset_root: Path, labels: List[str]) -> Dict[str, Any]:
+        """Bake the class filter (preprocess) settings into the block-coding export.
+
+        The block-coding compiler turns this into the on-device crop pipeline:
+        dark/lum thresholds drive the sign search box (mirroring
+        preprocess_blue_diff_array in image_preprocess.py), so the deployed
+        model sees the same input distribution it was trained on.  Runtime
+        inference cannot know the class before predicting, so a single device
+        pipeline requires uniform settings — mixed configs export mode
+        "none" (legacy full-frame) with uniform=False.
+        """
+        class_pre = self._class_preprocess_load(dataset_root)
+        per_class: Dict[str, Any] = {}
+        for name in labels:
+            cfg = normalize_class_preprocess(class_pre.get(name) or {})
+            if cfg.get("mode") == PREPROCESS_MODE_MANUAL_ROI and cfg.get("manual_roi"):
+                eff = {"mode": "manual", "roi": [float(v) for v in cfg["manual_roi"]]}
+            elif class_clip_mode(name) == CLIP_MODE_JUNCTION:
+                eff = {"mode": "junction"}
+            else:
+                eff = {"mode": "sign", "dark": int(cfg.get("bg_dark_thresh", 0)), "lum": int(cfg.get("bg_lum_thresh", 100))}
+            per_class[name] = eff
+        if not per_class:
+            per_class = {"": {"mode": "sign", "dark": 0, "lum": 100}}
+        distinct = {json.dumps(v, sort_keys=True) for v in per_class.values()}
+        uniform = len(distinct) == 1
+        effective = next(iter(per_class.values())) if uniform else {"mode": "none"}
+        info: Dict[str, Any] = {"version": 1, "mode": effective["mode"], "uniform": uniform}
+        if effective["mode"] == "sign":
+            info["dark"] = int(effective["dark"])
+            info["lum"] = int(effective["lum"])
+        elif effective["mode"] == "manual":
+            info["roi"] = [float(v) for v in effective["roi"]]
+        info["classes"] = per_class
+        return info
 
     def _train_result_path(self, dataset_root: Path) -> Path:
         return dataset_root.parent / "tm_train_latest.json"
