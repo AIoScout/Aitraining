@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import shutil
 import time
@@ -90,6 +91,8 @@ from ui_styles import inject_teachable_style
 from dataset_io import (
     IMAGE_EXTS,
     KNOWN_PROJECT_TYPES,
+    PROJECT_FORMAT_LEGACY,
+    PROJECT_MAGIC,
     PROJECT_TYPE_CLASSIFIED_IMPORT,
     PROJECT_TYPE_IMAGE,
     PROJECT_TYPE_OCR,
@@ -99,12 +102,13 @@ from dataset_io import (
     export_classified_dataset,
     export_from_assignments,
     infer_imported_data,
+    read_project_header,
     sanitize_class_name,
     materialize_files,
     materialize_zip_bytes,
     new_output_dir,
 )
-from image_preprocess import normalize_class_preprocess_map
+from image_preprocess import normalize_class_preprocess_map, normalize_manual_roi
 from ocr_dataset import BACKGROUND_CLASS_NAME, DEFAULT_EMNIST_SPLIT, EMNIST_SPLITS
 from ocr_preprocess import GLYPH_SIZE
 from serial_device import list_serial_ports
@@ -343,6 +347,58 @@ def _tmproj_detect_project_type(path: Path, manifest: Dict[str, Any]) -> str:
     if "image" in ptype or "image" in name:
         return PROJECT_TYPE_IMAGE
     return PROJECT_TYPE_IMAGE
+
+
+def _tmproj_manifest_status(manifest: Dict[str, Any]) -> str:
+    """How much of a picked .tmproj we actually recognise.
+
+    `current` — carries the format magic, so every field in it is one this
+    build wrote.  `legacy` — no magic, but it is ours: our v1 writer stamped
+    "format": "tmproj" plus the dataset/state path keys, and an archive with
+    those is readable field-by-field with the defaults filling the gaps.
+    `unreadable`/`foreign` — a ZIP that was never one of ours, which is worth
+    saying at the picker instead of failing deep inside the import with
+    "missing dataset".
+    """
+    if not manifest:
+        return "unreadable"
+    if read_project_header(manifest)["known"]:
+        return "current"
+    if str(manifest.get("format") or "").strip() == "tmproj" or manifest.get("dataset_dir"):
+        return "legacy"
+    return "foreign"
+
+
+def _tmproj_pick_and_classify() -> Optional[Tuple[Path, str]]:
+    """Pick a .tmproj, decide which workspace it belongs to, or say why not.
+
+    The one gate every "Open Project" card shares: choose a file, read its
+    manifest, check the format header, resolve the project type.  A file that
+    is not one of ours is refused HERE, where the message can name the file,
+    instead of surfacing three layers down as "missing dataset".  Returns
+    None (after reporting) when the picker was cancelled or the file is not
+    openable.
+    """
+    p = _pick_tmproj_file_dialog()
+    if not p:
+        st.warning("No file selected.")
+        return None
+    manifest = _tmproj_read_manifest(p)
+    status = _tmproj_manifest_status(manifest)
+    if status == "unreadable":
+        st.error(f"'{p.name}' has no readable manifest.json — it is not a project file this app wrote.")
+        return None
+    if status == "foreign":
+        st.error(
+            f"'{p.name}' is not a project file this app wrote: its manifest has neither the "
+            f"{PROJECT_MAGIC} header nor the older format marker."
+        )
+        return None
+    ptype = _tmproj_detect_project_type(p, manifest)
+    if ptype not in ("image", PROJECT_TYPE_OCR):
+        st.error(f"Unsupported project type: {ptype}")
+        return None
+    return p, ptype
 
 
 def _validate_export_inputs(export_dir: Path, model_name: str, array_name: str, tflite_path: Path) -> List[str]:
@@ -1087,27 +1143,100 @@ def _tm_session_config(**overrides: Any) -> SessionConfig:
     return SessionConfig(**values)
 
 
+# ── TrainConfig plumbing ────────────────────────────────────────────────
+# TrainConfig is frozen and every field has a default, so `TrainConfig(...)`
+# silently resets whatever the call site forgets to pass.  Three places here
+# used to construct it from a hand-picked list of ~14 fields, which meant
+# switching project type, changing the model-input size, or reopening a
+# saved project all reset crop_mode (the model-input geometry!) and all 13
+# ocr_* mixing / two-phase knobs to their dataclass defaults — the settings
+# the archive was saved with were read back, then overwritten.
+#
+# These two helpers are the only sanctioned ways to build one, and both
+# derive the field list from the dataclass, so a field added to TrainConfig
+# is carried through without an edit here.
+
+# Not part of the SPA's train_cfg, with the reason each time.  The first two
+# are published as their own top-level payload keys and normalised by their
+# own code paths — a second copy inside train_cfg would be a second thing to
+# keep in sync; the other two are decided by routing / derived at train time.
+_TRAIN_CFG_SESSION_KEYS = (
+    "class_preprocess",
+    "sample_preprocess",
+    "project_type",
+    "class_names_order",
+)
+
+
+def _tm_train_cfg_state_keys() -> Tuple[str, ...]:
+    """TrainConfig fields the SPA's train_cfg carries — and therefore saves.
+
+    The save payload is `STATE.train_cfg` sent verbatim, so this list IS the
+    set of training parameters a project file can hold.
+    """
+    return tuple(f.name for f in dataclasses.fields(TrainConfig) if f.name not in _TRAIN_CFG_SESSION_KEYS)
+
+
+def _tm_train_cfg_replace(cfg: TrainConfig, **overrides: Any) -> TrainConfig:
+    """Rebuild `cfg` with `overrides` applied, preserving every other field."""
+    values = {f.name: getattr(cfg, f.name, f.default) for f in dataclasses.fields(TrainConfig)}
+    values.update(overrides)
+    return TrainConfig(**values)
+
+
+def _tm_train_cfg_from_state(state_cfg: Any, base: TrainConfig, **overrides: Any) -> TrainConfig:
+    """Layer an archived train_cfg over `base`, then apply `overrides`.
+
+    The archive is what the user actually chose when they saved; `base` fills
+    only the gaps.  Values are taken as stored rather than re-validated — the
+    record controller's pick_train_cfg is the one place they were coerced and
+    checked, on the way into the archive.
+    """
+    src = state_cfg if isinstance(state_cfg, dict) else {}
+    values = {f.name: getattr(base, f.name, f.default) for f in dataclasses.fields(TrainConfig)}
+    for name in list(values):
+        if name in src and src[name] is not None:
+            values[name] = src[name]
+    values.update(overrides)
+    try:
+        return TrainConfig(**values)
+    except TypeError:
+        # A file written by a NEWER build can name a field this one does not
+        # have.  Keep the fields both sides know rather than refusing to open
+        # the project over an unknown extra.
+        known = {f.name for f in dataclasses.fields(TrainConfig)}
+        return TrainConfig(**{k: v for k, v in values.items() if k in known})
+
+
+def _tm_train_cfg_payload(cfg: TrainConfig) -> Dict[str, Any]:
+    """The SPA's train_cfg: every round-trippable field, JSON-safe.
+
+    Derived from the dataclass for the same reason as the helpers above — v1
+    hand-listed 19 of the 35 fields here, so the other 16 were not merely
+    unsaved, they were unreachable: the Advanced panel renders from this
+    dict, and a field that never arrives is a field no user can set.
+    """
+    out: Dict[str, Any] = {}
+    for name in _tm_train_cfg_state_keys():
+        value = getattr(cfg, name, None)
+        if name == "manual_roi":
+            roi = normalize_manual_roi(value)
+            out[name] = list(roi) if roi is not None else None
+        elif value is None or isinstance(value, (str, bool, int, float)):
+            out[name] = value
+        elif isinstance(value, (list, tuple)):
+            out[name] = list(value)
+        else:
+            out[name] = None
+    return out
+
+
 def _tm_set_img_size(size: int) -> None:
     """Rebuild the frozen TrainConfig with a new model-input side."""
     prev_cfg = st.session_state.train_cfg
     if int(getattr(prev_cfg, "img_size", 0) or 0) == int(size):
         return
-    st.session_state.train_cfg = TrainConfig(
-        img_size=int(size),
-        color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
-        batch_size=int(getattr(prev_cfg, "batch_size", 16)),
-        epochs=int(getattr(prev_cfg, "epochs", 10)),
-        validation_split=float(getattr(prev_cfg, "validation_split", 0.2)),
-        seed=int(getattr(prev_cfg, "seed", 42)),
-        optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
-        learning_rate=float(getattr(prev_cfg, "learning_rate", 0.001)),
-        conv1_filters=int(getattr(prev_cfg, "conv1_filters", 32)),
-        conv2_filters=int(getattr(prev_cfg, "conv2_filters", 64)),
-        dense_units=int(getattr(prev_cfg, "dense_units", 128)),
-        representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
-        preprocess_mode=str(getattr(prev_cfg, "preprocess_mode", "auto_by_label")),
-        manual_roi=getattr(prev_cfg, "manual_roi", None),
-    )
+    st.session_state.train_cfg = _tm_train_cfg_replace(prev_cfg, img_size=int(size))
 
 
 def _tm_apply_project_defaults(project_type: str) -> None:
@@ -1121,6 +1250,38 @@ def _tm_apply_project_defaults(project_type: str) -> None:
     """
     _tm_set_img_size(int(default_img_size(project_type)))
     st.session_state.tm_classes = ["Class 1", "Class 2"]
+
+
+def _tm_notice_opened_project(path: Path, state: Any, project_type: str) -> None:
+    """Queue the one-shot toast for the page the open lands on.
+
+    A v1 archive predates the complete train_cfg snapshot, so part of what the
+    reopened workspace is now configured with came from THIS build's defaults
+    rather than from the file.  Which settings, and that it happened at all,
+    is the user's business: silently retraining with a different EMNIST mix or
+    a different crop geometry than the file implies is exactly the kind of
+    difference nobody notices until the model behaves differently.
+    """
+    fmt = state.get("project_format") if isinstance(state, dict) else None
+    fmt = fmt if isinstance(fmt, dict) else {}
+    raw_missing = fmt.get("missing_train_cfg_fields")
+    missing = [str(m) for m in raw_missing] if isinstance(raw_missing, list) else []
+    if not missing:
+        if fmt.get("legacy"):
+            st.session_state.tm_frontend_notice = (
+                f"Opened “{path.name}” — a project saved before this version. "
+                "Its settings were restored where it recorded them."
+            )
+        return
+    # Only the ones that change what gets TRAINED are worth naming; the rest
+    # are recorded in the file either way.
+    named = [n for n in ("crop_mode", "ocr_emnist_per_class", "ocr_emnist_enabled", "ocr_transfer_learning") if n in missing]
+    detail = f" ({', '.join(named)})" if named else ""
+    st.session_state.tm_frontend_notice = (
+        f"Opened “{path.name}” — a v1.0 project. It predates {len(missing)} training "
+        f"settings{detail}, which came back at this version's defaults; check Advanced "
+        "settings before retraining."
+    )
 
 
 def _tm_open_project_into_session(p: Path, ptype: str) -> None:
@@ -1152,26 +1313,16 @@ def _tm_open_project_into_session(p: Path, ptype: str) -> None:
     # hyperparameters on top.
     _tm_set_img_size(int(effective_size))
     train_cfg_state = state.get("train_cfg") if isinstance(state, dict) else None
-    if isinstance(train_cfg_state, dict):
-        prev_cfg = st.session_state.train_cfg
-        st.session_state.train_cfg = TrainConfig(
-            img_size=int(effective_size),
-            color_mode=str(getattr(prev_cfg, "color_mode", "grayscale")),
-            batch_size=int(train_cfg_state.get("batch_size", getattr(prev_cfg, "batch_size", 16))),
-            epochs=int(train_cfg_state.get("epochs", getattr(prev_cfg, "epochs", 10))),
-            validation_split=float(train_cfg_state.get("validation_split", getattr(prev_cfg, "validation_split", 0.2))),
-            seed=int(getattr(prev_cfg, "seed", 42)),
-            optimizer=str(getattr(prev_cfg, "optimizer", "adam")),
-            learning_rate=float(train_cfg_state.get("learning_rate", getattr(prev_cfg, "learning_rate", 0.001))),
-            conv1_filters=int(train_cfg_state.get("conv1_filters", getattr(prev_cfg, "conv1_filters", 32))),
-            conv2_filters=int(train_cfg_state.get("conv2_filters", getattr(prev_cfg, "conv2_filters", 64))),
-            dense_units=int(train_cfg_state.get("dense_units", getattr(prev_cfg, "dense_units", 128))),
-            representative_samples=int(getattr(prev_cfg, "representative_samples", 200)),
-            preprocess_mode=str(train_cfg_state.get("preprocess_mode", getattr(prev_cfg, "preprocess_mode", "auto_by_label"))),
-            manual_roi=train_cfg_state.get("manual_roi", getattr(prev_cfg, "manual_roi", None)),
-        )
+    st.session_state.train_cfg = _tm_train_cfg_from_state(
+        train_cfg_state, st.session_state.train_cfg, img_size=int(effective_size)
+    )
     st.session_state.project_type = effective_type
     st.session_state.tm_current_project_path = str(p)
+    # Tell the user what the file could NOT tell us.  A v1 archive carries a
+    # 12-field train_cfg, so its OCR mixing / two-phase settings are not "the
+    # project's" — they are this build's defaults, and a retrain would use
+    # them.  Saying so is the difference between a restore and a quiet reset.
+    _tm_notice_opened_project(p, state, effective_type)
     _tm_set_query_params(tm_project=effective_type, tm_session=st.session_state.session_id)
     st.rerun()
 
@@ -1265,15 +1416,10 @@ def _render_new_project() -> None:
             _tm_set_query_params(tm_project="image", tm_session=st.session_state.session_id)
             st.rerun()
         if st.button("Open Project (.tmproj)", key="tm_open_tmproj", type="secondary", use_container_width=True):
-            p = _pick_tmproj_file_dialog()
-            if not p:
-                st.warning("No file selected.")
-                st.stop()
-            manifest = _tmproj_read_manifest(p)
-            ptype = _tmproj_detect_project_type(p, manifest)
-            if ptype not in ("image", PROJECT_TYPE_OCR):
-                st.error(f"Unsupported project type: {ptype}")
-                st.stop()
+            picked = _tmproj_pick_and_classify()
+            if picked is None:
+                return
+            p, ptype = picked
             # #region debug-point A:home-open-project-click
             _dbg_open_project_layout("A", "pre-fix", "app.py:_render_new_project", "[DEBUG] home open project selected file", {"picked_path": str(p), "project_type": str(ptype), "session_before_fresh": str(st.session_state.get("session_id", ""))})
             # #endregion
@@ -1309,15 +1455,10 @@ def _render_new_project() -> None:
             _tm_set_query_params(tm_project=PROJECT_TYPE_OCR, tm_session=st.session_state.session_id)
             st.rerun()
         if st.button("Open Project (.tmproj)", key="tm_open_tmproj_ocr", type="secondary", use_container_width=True):
-            p = _pick_tmproj_file_dialog()
-            if not p:
-                st.warning("No file selected.")
-                st.stop()
-            manifest = _tmproj_read_manifest(p)
-            ptype = _tmproj_detect_project_type(p, manifest)
-            if ptype not in ("image", PROJECT_TYPE_OCR):
-                st.error(f"Unsupported project type: {ptype}")
-                st.stop()
+            picked = _tmproj_pick_and_classify()
+            if picked is None:
+                return
+            p, ptype = picked
             _tm_open_project_into_session(p, ptype)
 
 
@@ -1704,27 +1845,19 @@ def _render_tm_old_frontend_html(
         saved_cfg_path = _tm_dataset_dir().parent / "runs" / "latest" / "train_config.json"
         if saved_cfg_path.exists():
             saved_raw = json.loads(saved_cfg_path.read_text(encoding="utf-8"))
-            if isinstance(saved_raw, dict):
-                updates = {}
-                for k in (
-                    "batch_size", "epochs", "validation_split", "learning_rate", "img_size",
-                    # OCR mixing / transfer-learning knobs round-trip through
-                    # the same file, so an OCR run's mix is reproducible from
-                    # the workspace without re-deriving it from the UI.
-                    "ocr_emnist_enabled", "ocr_emnist_split", "ocr_emnist_per_class",
-                    "ocr_background_enabled", "ocr_background_samples",
-                    "ocr_transfer_learning", "ocr_pretrain_per_class",
-                    "ocr_pretrain_epochs", "ocr_head_epochs", "ocr_finetune_epochs",
-                    "ocr_head_lr", "ocr_finetune_lr", "ocr_unfreeze_blocks",
-                ):
-                    if k in saved_raw and saved_raw[k] is not None:
-                        updates[k] = saved_raw[k]
-                if updates:
-                    train_cfg = TrainConfig(**{**train_cfg.__dict__, **updates})
+            # The run's own train_config.json is a full TrainConfig dump, so
+            # every key it carries is restorable — the field list comes from
+            # the dataclass rather than from a list here that has to be kept
+            # in step with it.
+            train_cfg = _tm_train_cfg_from_state(saved_raw, train_cfg)
     except Exception:
         pass
 
     meta = _tm_load_classes_meta_full() or {}
+    # Read once: the project type decides both the reset baseline's img_size
+    # and the OCR panel's visibility, and those must not disagree inside one
+    # payload.
+    payload_project_type = str(st.session_state.get("project_type") or PROJECT_TYPE_IMAGE)
     payload = {
         "port": int(port),
         "session": str(session_id),
@@ -1750,39 +1883,24 @@ def _render_tm_old_frontend_html(
         "initial_open_source_kind": str(initial_open_source_kind or ""),
         "class_preprocess": dict(meta.get("class_preprocess") or {}),
         "sample_preprocess": dict(meta.get("sample_preprocess") or {}),
-        "train_cfg": {
-            "img_size": int(train_cfg.img_size),
-            "batch_size": int(train_cfg.batch_size),
-            "epochs": int(train_cfg.epochs),
-            "validation_split": float(train_cfg.validation_split),
-            "learning_rate": float(train_cfg.learning_rate),
-            "conv1_filters": int(train_cfg.conv1_filters),
-            "conv2_filters": int(train_cfg.conv2_filters),
-            "dense_units": int(train_cfg.dense_units),
-            "preprocess_mode": str(getattr(train_cfg, "preprocess_mode", "auto_by_label")),
-            "manual_roi": list(getattr(train_cfg, "manual_roi", []) or []) or None,
-            # OCR dataset mixing + transfer learning.  Sent for every project
-            # so the field set is stable; the panel only renders them for an
-            # OCR workspace, and the image strategy never reads them.
-            "ocr_emnist_enabled": bool(getattr(train_cfg, "ocr_emnist_enabled", True)),
-            "ocr_emnist_split": str(getattr(train_cfg, "ocr_emnist_split", DEFAULT_EMNIST_SPLIT)),
-            "ocr_emnist_per_class": int(getattr(train_cfg, "ocr_emnist_per_class", 200)),
-            "ocr_background_enabled": bool(getattr(train_cfg, "ocr_background_enabled", True)),
-            "ocr_background_samples": int(getattr(train_cfg, "ocr_background_samples", 0)),
-            "ocr_transfer_learning": bool(getattr(train_cfg, "ocr_transfer_learning", True)),
-            "ocr_pretrain_per_class": int(getattr(train_cfg, "ocr_pretrain_per_class", 1200)),
-            "ocr_pretrain_epochs": int(getattr(train_cfg, "ocr_pretrain_epochs", 4)),
-            "ocr_head_epochs": int(getattr(train_cfg, "ocr_head_epochs", 12)),
-            "ocr_finetune_epochs": int(getattr(train_cfg, "ocr_finetune_epochs", 25)),
-            "ocr_head_lr": float(getattr(train_cfg, "ocr_head_lr", 0.0015)),
-            "ocr_finetune_lr": float(getattr(train_cfg, "ocr_finetune_lr", 0.0002)),
-            "ocr_unfreeze_blocks": int(getattr(train_cfg, "ocr_unfreeze_blocks", 1)),
-        },
+        "train_cfg": _tm_train_cfg_payload(train_cfg),
+        # The dataclass's own defaults, sent so "Reset to defaults" in the
+        # Advanced panel resets to what the TRAINER calls default.  The button
+        # used to write its own literal list, which had drifted to the old
+        # 8/16/32 architecture TrainConfig's comment records as collapsing to
+        # a single class.
+        # ...except img_size, which is the WORKSPACE's geometry rather than a
+        # training knob: the dataclass default is the image project's 96, and
+        # resetting an OCR workspace to it would point the next capture at the
+        # wrong input size.  The project's own default is the right baseline.
+        "train_cfg_defaults": _tm_train_cfg_payload(
+            _tm_train_cfg_replace(
+                TrainConfig(), img_size=int(default_img_size(payload_project_type))
+            )
+        ),
         # The OCR blocks in the Advanced panel are shown only for an OCR
         # workspace — its knobs are inert for a sign project and vice versa.
-        "project_type": str(
-            st.session_state.get("project_type") or PROJECT_TYPE_IMAGE
-        ),
+        "project_type": payload_project_type,
         "train_rec": _tm_train_recommendations(train_cfg),
         "current_project_path": str(st.session_state.get("tm_current_project_path") or "") or None,
     }
@@ -2176,6 +2294,48 @@ def _render_tm_old_frontend_html(
       gap: 10px;
       border-top: 1px solid rgba(0,0,0,0.08);
       padding-top: 14px;
+    }}
+    .tm-settings-advanced {{
+      margin-top: 16px;
+      border: 1px solid #E2E8F0;
+      border-radius: 12px;
+      background: #F8FAFC;
+      overflow: hidden;
+    }}
+    .tm-settings-advanced-toggle {{
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      text-align: left;
+    }}
+    .tm-settings-advanced-toggle:hover {{ background: rgba(0,0,0,0.03); }}
+    .tm-settings-advanced-chevron {{
+      display: inline-block;
+      transition: transform 0.15s ease;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .tm-settings-advanced-toggle[aria-expanded="true"] .tm-settings-advanced-chevron {{ transform: rotate(90deg); }}
+    .tm-settings-advanced-body {{
+      padding: 0 16px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }}
+    .tm-settings-field small {{
+      display: block;
+      margin-top: 4px;
+      font-size: 11.5px;
+      color: var(--muted);
+      line-height: 1.4;
     }}
     .tm-btn {{
       padding: 9px 14px;
@@ -2651,6 +2811,121 @@ def _render_tm_old_frontend_html(
     }}
     .charsel-input:focus {{ outline: none; border-color: #3169FF; }}
     .charsel-input::placeholder {{ color: #94A3B8; }}
+    /* ── OCR empty state ─────────────────────────────────────────────────
+       Replaces the card column entirely while an OCR project holds nothing but
+       untouched "Class N" placeholders.  It occupies the same slot as the
+       cards, so the workspace keeps its shape when the first character lands
+       and the hero is swapped for real cards. */
+    .ocr-empty {{
+      border: 1px dashed #CBD5E1;
+      background: #F8FAFC;
+      border-radius: 14px;
+      padding: 42px 28px 38px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 10px;
+    }}
+    .ocr-empty-icon {{
+      width: 46px;
+      height: 46px;
+      border-radius: 12px;
+      background: #E8F0FE;
+      color: #1a73e8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 2px;
+    }}
+    .ocr-empty-icon svg {{ width: 24px; height: 24px; display: block; }}
+    .ocr-empty-title {{ font-family: inherit; font-size: 17px; font-weight: 700; color: #0F172A; }}
+    .ocr-empty-sub {{ font-family: inherit; font-size: 13px; line-height: 1.5; color: #475569; max-width: 32em; }}
+    .ocr-empty-cta {{
+      appearance: none;
+      -webkit-appearance: none;
+      border: 0;
+      border-radius: 10px;
+      background: #1a73e8;
+      color: #fff;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 12px 20px;
+      margin-top: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      transition: background 0.15s ease, box-shadow 0.15s ease;
+    }}
+    .ocr-empty-cta:hover {{ background: #1765cc; box-shadow: 0 2px 10px rgba(26,115,232,0.32); }}
+    .ocr-empty-cta svg {{ width: 16px; height: 16px; display: block; }}
+    /* The character modal reuses .modal; these three rules only strip the
+       panel's own card chrome (the modal already provides a surface) and give
+       the grid room to breathe at the modal's width. */
+    .ocr-char-modal .modal-body {{ padding: 16px 18px 18px; }}
+    .ocr-char-modal .charsel {{ border: 0; background: transparent; padding: 0; gap: 12px; }}
+    .ocr-char-modal .charsel-grid {{ gap: 8px; }}
+    .ocr-char-modal .charchip {{ height: 40px; font-size: 15px; }}
+    /* ── OCR glyph settings modal ────────────────────────────────────────
+       One row per class.  This is what used to be 3 Streamlit widgets per
+       class in the main document flow; at 36 characters that was 108
+       controls stacked down the page.  Four fixed columns keep the rows
+       aligned as a table so the eye can scan a single column of values. */
+    /* Compound, not descendant: the SPA sets the card's className to
+       "modal ocr-glyph-modal", so `.ocr-glyph-modal .modal` would need a
+       SECOND .modal inside the card and would never match — the width would
+       silently fall back to the base 820px. */
+    .modal.ocr-glyph-modal {{ width: min(920px, 94vw); }}
+    .glyph-note {{ font-family: inherit; font-size: 12px; line-height: 1.5; color: #475569; margin: 0 0 12px; }}
+    .glyph-scroll {{ max-height: 46vh; overflow-y: auto; padding-right: 4px; }}
+    .glyph-row {{
+      display: grid;
+      grid-template-columns: minmax(84px, 1fr) 214px 132px 236px;
+      gap: 10px;
+      align-items: center;
+      padding: 7px 0;
+      border-top: 1px solid #EEF2F6;
+    }}
+    .glyph-row:first-child {{ border-top: 0; }}
+    .glyph-row.is-head {{
+      position: sticky;
+      top: 0;
+      background: #fff;
+      border-top: 0;
+      border-bottom: 1px solid #E2E8F0;
+      padding-bottom: 6px;
+    }}
+    .glyph-row.is-head span {{
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #64748B;
+    }}
+    .glyph-name {{
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      color: #0F172A;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .glyph-select {{
+      font-family: inherit;
+      font-size: 12px;
+      padding: 6px 8px;
+      border: 1px solid #CBD5E1;
+      border-radius: 8px;
+      background: #fff;
+      color: #0F172A;
+      width: 100%;
+    }}
+    .glyph-check {{ display: flex; align-items: center; gap: 6px; font-family: inherit; font-size: 12px; color: #475569; cursor: pointer; }}
+    .glyph-empty {{ font-family: inherit; font-size: 13px; color: #475569; padding: 10px 0; }}
     .train-card, .preview-card {{ padding: 16px 18px 18px 18px; position: relative; }}
     .card-head {{
       display: flex;
@@ -2681,7 +2956,7 @@ def _render_tm_old_frontend_html(
       margin-top: 10px;
       padding-top: 8px;
       border-top: 1px solid rgba(0,0,0,0.08);
-      display: none;
+      display: block;
     }}
     .train-adv-grid {{
       display: grid;
@@ -2750,13 +3025,61 @@ def _render_tm_old_frontend_html(
       font-size: 13px;
       color: rgba(0,0,0,0.62);
       font-weight: 600;
+      min-width: 0;
     }}
     .train-adv-row span {{
       line-height: 1.2;
       word-break: normal;
       overflow-wrap: normal;
       white-space: normal;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
     }}
+    /* Inline help tooltip: a small "?" circle whose hover reveals data-tooltip. */
+    .tm-help {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.12);
+      color: rgba(0,0,0,0.55);
+      font-size: 10px;
+      font-weight: 700;
+      cursor: help;
+      position: relative;
+      flex: 0 0 auto;
+      line-height: 1;
+      vertical-align: middle;
+    }}
+    .tm-help:hover {{ background: var(--blue); color: #fff; }}
+    .tm-help[data-tooltip]::after {{
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 8px);
+      transform: translateX(-50%);
+      background: #1e293b;
+      color: #fff;
+      font-size: 11.5px;
+      font-weight: 500;
+      line-height: 1.4;
+      padding: 7px 10px;
+      border-radius: 6px;
+      white-space: normal;
+      width: max-content;
+      max-width: 220px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.15s ease;
+      z-index: 9999;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.22);
+    }}
+    .tm-help[data-tooltip]:hover::after {{ opacity: 1; }}
     .train-adv-row input,
     .train-adv-row select {{
       width: 100%;
@@ -2831,6 +3154,13 @@ def _render_tm_old_frontend_html(
       align-items: center;
       justify-content: space-between;
       gap: 10px;
+      flex-wrap: wrap;
+    }}
+    .tm-train-adv-actions {{
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
       flex-wrap: wrap;
     }}
     .adv-reset {{
@@ -3649,6 +3979,18 @@ def _render_tm_old_frontend_html(
       .charsel-btn:hover:not(:disabled) {{ border-color: #8ab4f8; color: #8ab4f8; background: rgba(138,180,248,0.12); }}
       .charsel-input {{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #e8eaed; }}
       .charsel-input::placeholder {{ color: #80868b; }}
+      .ocr-empty {{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.03); }}
+      .ocr-empty-icon {{ background: rgba(138,180,248,0.16); color: #8ab4f8; }}
+      .ocr-empty-title {{ color: #e8eaed; }}
+      .ocr-empty-sub {{ color: #9aa0a6; }}
+      .ocr-empty-cta {{ background: #8ab4f8; color: #202124; }}
+      .ocr-empty-cta:hover {{ background: #aecbfa; box-shadow: 0 2px 10px rgba(0,0,0,0.4); }}
+      .glyph-note, .glyph-check, .glyph-empty {{ color: #9aa0a6; }}
+      .glyph-name {{ color: #e8eaed; }}
+      .glyph-row {{ border-color: rgba(255,255,255,0.1); }}
+      .glyph-row.is-head {{ background: #202124; border-bottom-color: rgba(255,255,255,0.18); }}
+      .glyph-row.is-head span {{ color: #80868b; }}
+      .glyph-select {{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #e8eaed; }}
       /* Toolbar + settings modal dark overrides (Problem 2+3.2) */
       .topnav {{ border-color: rgba(255,255,255,0.08); }}
       .tm-toolbar-brand {{ border-color: rgba(255,255,255,0.1); }}
@@ -3709,6 +4051,9 @@ def _render_tm_old_frontend_html(
   <div class="tm-toolbar-menu" id="menuEdit">
     <button type="button" class="tm-toolbar-btn" id="menuEditBtn">Edit ▾</button>
     <div class="tm-toolbar-dropdown" id="menuEditDropdown">
+      <button type="button" id="navEditCharacters" style="display:none"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg></span>Edit characters</button>
+      <button type="button" id="navGlyphSettings" style="display:none"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="9" cy="6" r="2"></circle><circle cx="15" cy="12" r="2"></circle><circle cx="11" cy="18" r="2"></circle></svg></span>Glyph settings…</button>
+      <div class="dd-sep" id="navEditCharactersSep" style="display:none"></div>
       <button type="button" class="danger" id="navResetProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg></span>Reset project</button>
     </div>
   </div>
@@ -3750,6 +4095,8 @@ def _render_tm_old_frontend_html(
   </div>
 </div>
 <div class="modal-backdrop" id="classPreprocessModal"></div>
+<div class="modal-backdrop" id="ocrCharModal"></div>
+<div class="modal-backdrop" id="ocrGlyphModal"></div>
 <!-- Problem 3.2: Global Input Settings (Single Source of Truth) -->
 <div class="tm-settings-modal" id="globalSettingsModal" role="dialog" aria-modal="true">
   <div class="tm-settings-card">
@@ -3807,9 +4154,92 @@ def _render_tm_old_frontend_html(
             <option value="3">3 — RGB Color</option>
           </select>
         </div>
+      </div>
+      <div class="tm-settings-group">
+        <div class="tm-settings-group-head">
+          <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></span>
+          <h4>Preview</h4>
+        </div>
+        <div class="tm-settings-field">
+          <label>Preview Image Input Source</label>
+          <select id="settingsPreviewSource">
+            <option value="webcam">Webcam</option>
+            <option value="device">Device (MCU)</option>
+            <option value="upload">Local Image File</option>
+          </select>
+        </div>
+        <div class="tm-settings-field">
+          <label title="Minimum sign_pct before Preview treats the frame as empty / invalid.">OOD sign min %</label>
+          <input id="settingsOodSignPctMin" type="number" min="0" max="100" step="0.1"/>
+        </div>
+        <div class="tm-settings-field">
+          <label title="Maximum sign_pct before Preview treats the frame as too full / shadowed.">OOD sign max %</label>
+          <input id="settingsOodSignPctMax" type="number" min="0" max="100" step="0.1"/>
+        </div>
+        <div class="tm-settings-field">
+          <label title="Minimum softmax confidence required before Preview accepts a class result.">OOD max prob</label>
+          <input id="settingsOodMaxProbMin" type="number" min="0" max="1" step="0.01"/>
+        </div>
+        <div class="tm-settings-field">
+          <label title="Maximum entropy ratio allowed before Preview suppresses to No Sign.">OOD entropy max</label>
+          <input id="settingsOodEntropyRatioMax" type="number" min="0" max="1" step="0.01"/>
+        </div>
+      </div>
+      <div class="tm-settings-group">
+        <div class="tm-settings-group-head">
+          <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></span>
+          <h4>Training Hyperparameters</h4>
+        </div>
+        <div class="tm-train-adv-actions">
+          <button class="adv-reset" id="advReset" type="button">Reset</button>
+          <button class="adv-use-rec" id="advUseRec" type="button" title="Apply recommended hyperparameters">💡 Use recommended</button>
+        </div>
+        <div class="train-adv-panel" id="trainAdvPanel">
+          <div class="train-adv-grid">
+            <div class="train-adv-row"><span>Image Size <span class="tm-help" data-tooltip="Width &amp; height of the square input the model is trained on; larger sizes capture more detail but cost memory and latency on device.">?</span></span><input id="advImgSizeInline" type="number" min="8" max="512" step="4"/></div>
+            <div class="train-adv-row"><span>Batch Size <span class="tm-help" data-tooltip="How many samples the model sees per gradient step; bigger batches train more stably but use more RAM.">?</span></span><input id="advBatchInline" type="number" min="1" step="1"/><div class="adv-rec-hint" id="recBatchHint"></div></div>
+            <div class="train-adv-row"><span>Epochs <span class="tm-help" data-tooltip="Number of full passes over the training data; more epochs learn better but can overfit if too high.">?</span></span><input id="advEpochsInline" type="number" min="1" step="1"/><div class="adv-rec-hint" id="recEpochsHint"></div></div>
+            <div class="train-adv-row"><span>Validation Split <span class="tm-help" data-tooltip="Fraction of samples held out to measure accuracy; a larger split gives a more honest score but leaves less data to train on.">?</span></span><input id="advValInline" type="number" min="0" max="0.5" step="0.05"/><div class="adv-rec-hint" id="recValHint"></div></div>
+            <div class="train-adv-row"><span>Learning Rate <span class="tm-help" data-tooltip="Step size for each weight update; too large causes instability, too small slows or stalls learning.">?</span></span><input id="advLrInline" type="number" min="0" step="0.0001"/><div class="adv-rec-hint" id="recLrHint"></div></div>
+            <div id="advArchRows" style="display:contents">
+              <div class="train-adv-row"><span>Conv1 Filters <span class="tm-help" data-tooltip="Number of feature detectors in the first convolution layer; more filters learn richer features but increase model size.">?</span></span><input id="advConv1Inline" type="number" min="1" step="1"/></div>
+              <div class="train-adv-row"><span>Conv2 Filters <span class="tm-help" data-tooltip="Number of feature detectors in the second convolution layer; more filters increase capacity and flash footprint.">?</span></span><input id="advConv2Inline" type="number" min="1" step="1"/></div>
+              <div class="train-adv-row"><span>Dense Units <span class="tm-help" data-tooltip="Width of the final fully-connected layer; larger heads that map features to class logits.">?</span></span><input id="advDenseInline" type="number" min="1" step="1"/></div>
+            </div>
+          </div>
+          <div class="train-adv-grid" id="advOcrPanel" style="display:none">
+            <div class="train-adv-sub">Dataset mixing</div>
+            <div class="train-adv-row"><span>Mix EMNIST into every class <span class="tm-help" data-tooltip="Augments your captured samples with EMNIST glyphs so the model learns printed characters too.">?</span></span><input id="advOcrEmnist" type="checkbox"/></div>
+            <div class="adv-help" id="advOcrMixHelp">EMNIST glyphs are already isolated and centred, so they bypass segmentation and are polarity-aligned to the capture convention before scaling.</div>
+            <div class="train-adv-row" id="advOcrSplitRow"><span>EMNIST split <span class="tm-help" data-tooltip="Which EMNIST character set to sample from (ByClass, ByMerge, Letters, Digits, MNIST).">?</span></span><select id="advOcrSplit">{emnist_split_options}</select></div>
+            <div class="train-adv-row" id="advOcrPerClassRow"><span>Synthetic per class <span class="tm-help" data-tooltip="Extra EMNIST glyphs added per class to balance and enlarge the training set.">?</span></span><input id="advOcrPerClass" type="number" min="0" max="5000" step="10"/></div>
+            <div class="train-adv-row"><span>Background / noise class <span class="tm-help" data-tooltip="Adds a catch-all background class so the model learns to reject non-sign crops.">?</span></span><input id="advOcrBackground" type="checkbox"/></div>
+            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops <span class="tm-help" data-tooltip="Number of random background/noise crops used to train the rejector class.">?</span></span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
+            <div class="adv-help">0 mirrors the per-class count. The extra N+1 class is named <b>{BACKGROUND_CLASS_NAME}</b> and teaches the model to reject OOD crops.</div>
+            <div class="train-adv-sub">Transfer learning</div>
+            <div class="train-adv-row"><span>Fine-tune pre-trained backbone <span class="tm-help" data-tooltip="Uses a pre-trained EMNIST backbone and fine-tunes it on your data instead of training from scratch.">?</span></span><input id="advOcrTransfer" type="checkbox"/></div>
+            <div class="train-adv-row"><span>Pre-train samples / class <span class="tm-help" data-tooltip="Samples per class used to warm up the backbone before the head is attached.">?</span></span><input id="advOcrPretrainN" type="number" min="100" max="6000" step="100"/></div>
+            <div class="train-adv-row"><span>Pre-train epochs <span class="tm-help" data-tooltip="Epochs spent training the backbone on the warm-up data.">?</span></span><input id="advOcrPretrainEpochs" type="number" min="1" max="100" step="1"/></div>
+            <div class="train-adv-row"><span>Head epochs <span class="tm-help" data-tooltip="Epochs spent training only the new classification head with the backbone frozen.">?</span></span><input id="advOcrHeadEpochs" type="number" min="1" max="200" step="1"/></div>
+            <div class="train-adv-row"><span>Head learning rate <span class="tm-help" data-tooltip="Learning rate for the classification head during the frozen-backbone phase.">?</span></span><input id="advOcrHeadLr" type="number" min="0" step="0.0001"/></div>
+            <div class="train-adv-row"><span>Fine-tune epochs <span class="tm-help" data-tooltip="Epochs spent unfreezing the backbone's last conv block(s) at the lower fine-tune rate.">?</span></span><input id="advOcrFinetuneEpochs" type="number" min="0" max="200" step="1"/></div>
+            <div class="train-adv-row"><span>Fine-tune learning rate <span class="tm-help" data-tooltip="Lower learning rate used while fine-tuning the unfrozen backbone layers.">?</span></span><input id="advOcrFinetuneLr" type="number" min="0" step="0.0001"/></div>
+            <div class="train-adv-row"><span>Conv blocks to unfreeze <span class="tm-help" data-tooltip="How many of the backbone's last convolution blocks are unfrozen during fine-tuning.">?</span></span><input id="advOcrUnfreeze" type="number" min="0" max="16" step="1"/></div>
+            <div class="adv-help">Phase 1 trains only the new N+1 head with the backbone frozen; phase 2 unfreezes the last conv block(s) at the lower fine-tune rate.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tm-settings-advanced">
+      <button type="button" class="tm-settings-advanced-toggle" id="settingsAdvancedToggle" aria-expanded="false">
+        <span class="tm-settings-advanced-chevron" id="settingsAdvancedChevron">▸</span>
+        Advanced Settings
+      </button>
+      <div class="tm-settings-advanced-body" id="settingsAdvancedBody" style="display:none">
         <div class="tm-settings-field">
           <label>Frame sync word (hex, space separated)</label>
           <input id="settingsSerialSync" type="text" placeholder="AA 55 AA"/>
+          <small>Sync header used to align incoming MCU frames. Applied to both class capture and preview device source.</small>
         </div>
       </div>
     </div>
@@ -3862,45 +4292,6 @@ def _render_tm_old_frontend_html(
         <div class="train-progress" id="trainProgress">
           <div class="train-progress-bar"><div class="train-progress-fill" id="trainProgressFill"></div></div>
           <div class="train-progress-text" id="trainProgressText"></div>
-        </div>
-        <div class="advanced-row">
-          <div class="advanced" id="advBtn">Advanced <span id="advChevron">▾</span></div>
-          <button class="adv-reset" id="advReset" type="button">Reset</button>
-          <button class="adv-use-rec" id="advUseRec" type="button" title="Apply recommended hyperparameters">💡 Use recommended</button>
-        </div>
-        <div class="train-adv-panel" id="trainAdvPanel">
-          <div class="train-adv-grid">
-            <div class="train-adv-row"><span>Image Size</span><input id="advImgSizeInline" type="number" min="8" max="512" step="4"/></div>
-            <div class="train-adv-row"><span>Batch Size</span><input id="advBatchInline" type="number" min="1" step="1"/><div class="adv-rec-hint" id="recBatchHint"></div></div>
-            <div class="train-adv-row"><span>Epochs</span><input id="advEpochsInline" type="number" min="1" step="1"/><div class="adv-rec-hint" id="recEpochsHint"></div></div>
-            <div class="train-adv-row"><span>Validation Split</span><input id="advValInline" type="number" min="0" max="0.5" step="0.05"/><div class="adv-rec-hint" id="recValHint"></div></div>
-            <div class="train-adv-row"><span>Learning Rate</span><input id="advLrInline" type="number" min="0" step="0.0001"/><div class="adv-rec-hint" id="recLrHint"></div></div>
-            <div id="advArchRows" style="display:contents">
-              <div class="train-adv-row"><span>Conv1 Filters</span><input id="advConv1Inline" type="number" min="1" step="1"/></div>
-              <div class="train-adv-row"><span>Conv2 Filters</span><input id="advConv2Inline" type="number" min="1" step="1"/></div>
-              <div class="train-adv-row"><span>Dense Units</span><input id="advDenseInline" type="number" min="1" step="1"/></div>
-            </div>
-          </div>
-          <div class="train-adv-grid" id="advOcrPanel" style="display:none">
-            <div class="train-adv-sub">Dataset mixing</div>
-            <div class="train-adv-row"><span>Mix EMNIST into every class</span><input id="advOcrEmnist" type="checkbox"/></div>
-            <div class="adv-help" id="advOcrMixHelp">EMNIST glyphs are already isolated and centred, so they bypass segmentation and are polarity-aligned to the capture convention before scaling.</div>
-            <div class="train-adv-row" id="advOcrSplitRow"><span>EMNIST split</span><select id="advOcrSplit">{emnist_split_options}</select></div>
-            <div class="train-adv-row" id="advOcrPerClassRow"><span>Synthetic per class</span><input id="advOcrPerClass" type="number" min="0" max="5000" step="10"/></div>
-            <div class="train-adv-row"><span>Background / noise class</span><input id="advOcrBackground" type="checkbox"/></div>
-            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops</span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
-            <div class="adv-help">0 mirrors the per-class count. The extra N+1 class is named <b>{BACKGROUND_CLASS_NAME}</b> and teaches the model to reject OOD crops.</div>
-            <div class="train-adv-sub">Transfer learning</div>
-            <div class="train-adv-row"><span>Fine-tune pre-trained backbone</span><input id="advOcrTransfer" type="checkbox"/></div>
-            <div class="train-adv-row"><span>Pre-train samples / class</span><input id="advOcrPretrainN" type="number" min="100" max="6000" step="100"/></div>
-            <div class="train-adv-row"><span>Pre-train epochs</span><input id="advOcrPretrainEpochs" type="number" min="1" max="100" step="1"/></div>
-            <div class="train-adv-row"><span>Head epochs</span><input id="advOcrHeadEpochs" type="number" min="1" max="200" step="1"/></div>
-            <div class="train-adv-row"><span>Head learning rate</span><input id="advOcrHeadLr" type="number" min="0" step="0.0001"/></div>
-            <div class="train-adv-row"><span>Fine-tune epochs</span><input id="advOcrFinetuneEpochs" type="number" min="0" max="200" step="1"/></div>
-            <div class="train-adv-row"><span>Fine-tune learning rate</span><input id="advOcrFinetuneLr" type="number" min="0" step="0.0001"/></div>
-            <div class="train-adv-row"><span>Conv blocks to unfreeze</span><input id="advOcrUnfreeze" type="number" min="0" max="16" step="1"/></div>
-            <div class="adv-help">Phase 1 trains only the new N+1 head with the backbone frozen; phase 2 unfreezes the last conv block(s) at the lower fine-tune rate.</div>
-          </div>
         </div>
       </div>
     </div>
@@ -4630,6 +5021,20 @@ function persistTrainCfgStorage() {{
     window.localStorage.setItem(trainCfgStorageKey, JSON.stringify(STATE.train_cfg || {{}}));
   }} catch (e) {{}}
 }}
+// Mirrors ocr_preprocess.normalize_ink_polarity: only the bright-on-dark
+// spellings reach BRIGHT (1); everything else — including absent — is the
+// camera default, dark ink on a bright page (0).
+function normalizeInkPolarity(value) {{
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (typeof value === 'number') return isFinite(value) && Math.trunc(value) === 1 ? 1 : 0;
+  const key = String(value == null ? '' : value).trim().toLowerCase();
+  return ['bright', 'bright_on_dark', '1', 'light', 'inverted', 'emnist'].indexOf(key) >= 0 ? 1 : 0;
+}}
+// Mirrors ocr_preprocess.normalize_norm_convention.
+function normalizeNormConvention(value) {{
+  const key = String(value == null ? '' : value).trim().toLowerCase();
+  return ['canon', 'canonical', 'mnist', 'emnist', 'centre', 'center'].indexOf(key) >= 0 ? 'canon' : 'stretch';
+}}
 function normalizeClassPreprocessConfig(raw) {{
   const src = raw && typeof raw === 'object' ? raw : {{}};
   const mode = ['auto_by_label', 'manual_roi'].includes(String(src.mode || ''))
@@ -4651,7 +5056,24 @@ function normalizeClassPreprocessConfig(raw) {{
   if (!isFinite(bg_lum) || bg_lum < 50) bg_lum = 100; else if (bg_lum > 255) bg_lum = 255;
   let bg_dark = Number(src.bg_dark_thresh);
   if (!isFinite(bg_dark) || bg_dark < 0) bg_dark = 0; else if (bg_dark > 100) bg_dark = 100;
-  return {{ mode, manual_roi: manual, bg_dark_thresh: bg_dark, bg_lum_thresh: bg_lum }};
+  const out = {{ mode, manual_roi: manual, bg_dark_thresh: bg_dark, bg_lum_thresh: bg_lum }};
+  // Glyph (OCR) knobs, carried in this same per-class record rather than a
+  // parallel OCR schema — see normalize_class_preprocess, which is the Python
+  // half of this function.
+  //
+  // Guarded on presence, matching that half exactly: it re-emits a glyph key
+  // only when it saw one, so an image project's record keeps its precise
+  // shape.  This is not cosmetic.  /classes/save_config REPLACES the whole
+  // class_preprocess map, so a save that dropped these keys would not "leave
+  // the defaults alone" — it would silently reset every class's polarity,
+  // segmentation and normalisation the first time anything else on the page
+  // saved a class config.
+  if ('ink_polarity' in src || 'glyph_segment' in src || 'glyph_convention' in src) {{
+    out.ink_polarity = normalizeInkPolarity(src.ink_polarity);
+    out.glyph_segment = src.glyph_segment == null ? true : !!src.glyph_segment;
+    out.glyph_convention = normalizeNormConvention(src.glyph_convention);
+  }}
+  return out;
 }}
 function getClassPreprocessConfig(className) {{
   const all = STATE.class_preprocess && typeof STATE.class_preprocess === 'object' ? STATE.class_preprocess : {{}};
@@ -4659,7 +5081,13 @@ function getClassPreprocessConfig(className) {{
 }}
 function setClassPreprocessConfig(className, cfg) {{
   const next = Object.assign({{}}, STATE.class_preprocess || {{}});
-  next[className] = normalizeClassPreprocessConfig(cfg);
+  // Merged over what is already stored, not written straight in.  Callers
+  // edit one slice of the record (mode / ROI / thresholds) and have no
+  // opinion about the glyph keys, so normalising their cfg on its own would
+  // drop ink_polarity / glyph_segment / glyph_convention for this class —
+  // and because save_config replaces the whole map, that loss would be
+  // persisted, not just local.
+  next[className] = normalizeClassPreprocessConfig(Object.assign({{}}, next[className] || {{}}, cfg));
   STATE.class_preprocess = next;
   // Persist to backend so per-class thresholds survive page reload
   fetch(`${{baseUrl}}/classes/save_config`, {{
@@ -5494,6 +5922,38 @@ function persistPreviewState() {{
       threshModified: !!previewThreshUserModified
     }}));
   }} catch (e) {{}}
+}}
+function previewStateForProject() {{
+  // The block of Preview-pane state that travels WITH the project.  These are
+  // not training hyperparameters, but they are not cosmetic either:
+  // buildExportRuntimeConfig() stamps every one of them into model_settings.h
+  // as the device's OOD gates, so a project that reopened them at the
+  // fallbacks would re-export a device whose thresholds differ from the one
+  // already flashed.  Saved and restored as a unit, under one key, so the
+  // save path and the load path cannot disagree about which keys exist.
+  return {{
+    bg_dark_thresh: Number((previewDarkThresh ?? 0)),
+    bg_lum_thresh: Number((previewLumThresh ?? 100)),
+    thresh_modified: !!previewThreshUserModified,
+    ood_sign_pct_min: Number((previewOodSignPctMin ?? 0.3)),
+    ood_sign_pct_max: Number((previewOodSignPctMax ?? 70.0)),
+    ood_max_prob_min: Number((previewOodMaxProbMin ?? 0.60)),
+    ood_entropy_ratio_max: Number((previewOodEntropyRatioMax ?? 0.70)),
+  }};
+}}
+function applyPreviewState(raw) {{
+  // Absent (a v1 project, or /project/reset) -> keep the caller's fallbacks
+  // rather than writing undefined over them.  Per key, so a project saved by
+  // a build that knew about fewer gates still restores the ones it has.
+  const p = raw && typeof raw === 'object' ? raw : null;
+  if (!p) return;
+  if (isFinite(Number(p.bg_dark_thresh))) previewDarkThresh = Number(p.bg_dark_thresh);
+  if (isFinite(Number(p.bg_lum_thresh))) previewLumThresh = Number(p.bg_lum_thresh);
+  if (typeof p.thresh_modified === 'boolean') previewThreshUserModified = p.thresh_modified;
+  if (isFinite(Number(p.ood_sign_pct_min))) previewOodSignPctMin = Number(p.ood_sign_pct_min);
+  if (isFinite(Number(p.ood_sign_pct_max))) previewOodSignPctMax = Number(p.ood_sign_pct_max);
+  if (isFinite(Number(p.ood_max_prob_min))) previewOodMaxProbMin = Number(p.ood_max_prob_min);
+  if (isFinite(Number(p.ood_entropy_ratio_max))) previewOodEntropyRatioMax = Number(p.ood_entropy_ratio_max);
 }}
 function clearPreviewUploadState() {{
   previewUploadImageSrc = '';
@@ -6390,7 +6850,20 @@ function openGlobalSettings() {{
     const pSel = document.getElementById('settingsSerialPort');
     if (pSel && Array.isArray(STATE.serial_ports)) {{
       const cur = String(STATE.current_serial_port || '');
-      STATE.serial_ports.forEach((opt) => {{
+      // Always start from a clean slate — appending without clearing causes
+      // duplicate port entries every time the modal is reopened.
+      pSel.innerHTML = '';
+      // Deduplicate by device path. Some serial adapters enumerate the same
+      // port under multiple interface names; the first occurrence wins.
+      const seen = new Set();
+      const uniquePorts = [];
+      for (const opt of STATE.serial_ports) {{
+        const key = String(opt.path || opt.device || '').trim();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        uniquePorts.push(opt);
+      }}
+      for (const opt of uniquePorts) {{
         const o = document.createElement('option');
         o.value = String(opt.path || opt.device || '');
         const lbl = String(opt.path || opt.device || opt.label || '');
@@ -6398,13 +6871,18 @@ function openGlobalSettings() {{
         o.textContent = desc ? `${{lbl}} (${{desc}})` : lbl || '(unknown)';
         if (o.value === cur) o.selected = true;
         pSel.appendChild(o);
-      }});
-      if (!Array.from(pSel.options).some((x) => x.value === '')) {{
-        const o = document.createElement('option');
-        o.value = ''; o.textContent = '— Not connected —';
-        pSel.insertBefore(o, pSel.firstChild);
-        if (!cur) o.selected = true;
       }}
+      // Always offer a "not connected" sentinel. Insert it at the top so it
+      // is the default when nothing is selected.
+      const notConnected = document.createElement('option');
+      notConnected.value = '';
+      notConnected.textContent = '— Not connected —';
+      pSel.insertBefore(notConnected, pSel.firstChild);
+      if (!cur) notConnected.selected = true;
+      // Restore the user's previous selection in case it was lost during the
+      // clear + rebuild above (e.g. if the selected port had been appended
+      // before the sentinel was inserted).
+      if (cur) pSel.value = cur;
     }}
     const fps = document.getElementById('settingsFps');
     if (fps) fps.value = Number(STATE.fps ?? 8.0);
@@ -6422,6 +6900,25 @@ function openGlobalSettings() {{
     }}
     const sw = document.getElementById('settingsSerialSync');
     if (sw) sw.value = String(STATE.current_serial_sync ?? 'AA 55 AA');
+    // ── Preview group: input source + OOD thresholds (reuse existing state vars) ──
+    const srcSel = document.getElementById('settingsPreviewSource');
+    if (srcSel) {{
+      const v = String(previewSource || 'webcam');
+      for (const o of Array.from(srcSel.options)) {{ if (o.value === v) o.selected = true; }}
+    }}
+    const oodMin = document.getElementById('settingsOodSignPctMin');
+    if (oodMin) oodMin.value = Number(previewOodSignPctMin ?? 0.3);
+    const oodMax = document.getElementById('settingsOodSignPctMax');
+    if (oodMax) oodMax.value = Number(previewOodSignPctMax ?? 70.0);
+    const oodProb = document.getElementById('settingsOodMaxProbMin');
+    if (oodProb) oodProb.value = Number(previewOodMaxProbMin ?? 0.60);
+    const oodEnt = document.getElementById('settingsOodEntropyRatioMax');
+    if (oodEnt) oodEnt.value = Number(previewOodEntropyRatioMax ?? 0.70);
+    // ── Training Hyperparameters group (live TrainConfig state) ──
+    try {{
+      if (typeof syncAdvancedInlineInputs === 'function') syncAdvancedInlineInputs();
+      if (typeof refreshRecHints === 'function') refreshRecHints();
+    }} catch (e) {{ console.error('[settings] train cfg sync failed', e); }}
   }} catch (err) {{ console.error('[settings] populate failed', err); }}
   modal.classList.add('open');
 }}
@@ -6492,6 +6989,22 @@ async function saveGlobalSettings() {{
     if (ch) payload.serial_channels = Number(ch.value);
     const sw = document.getElementById('settingsSerialSync');
     if (sw) payload.serial_sync = String(sw.value || 'AA 55 AA').trim().toUpperCase() || 'AA 55 AA';
+
+    // ── Preview group: input source + OOD thresholds (reuse existing state vars + persistPreviewState) ──
+    const srcSel = document.getElementById('settingsPreviewSource');
+    if (srcSel) {{
+      const next = String(srcSel.value || 'webcam');
+      previewSource = (next === 'device' || next === 'upload') ? next : 'webcam';
+    }}
+    const oodMinEl = document.getElementById('settingsOodSignPctMin');
+    if (oodMinEl) previewOodSignPctMin = Math.max(0, Math.min(100, Number(oodMinEl.value) || 0.3));
+    const oodMaxEl = document.getElementById('settingsOodSignPctMax');
+    if (oodMaxEl) previewOodSignPctMax = Math.max(0, Math.min(100, Number(oodMaxEl.value) || 70.0));
+    const oodProbEl = document.getElementById('settingsOodMaxProbMin');
+    if (oodProbEl) previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodProbEl.value) || 0.60));
+    const oodEntEl = document.getElementById('settingsOodEntropyRatioMax');
+    if (oodEntEl) previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntEl.value) || 0.70));
+    persistPreviewState();
 
     // Resolve webcam uid from the selected option
     let webcamUid = '';
@@ -6618,8 +7131,24 @@ function applyProjectState(state) {{
     STATE.train_cfg = Object.assign({{}}, STATE.train_cfg || {{}}, s.train_cfg);
     persistTrainCfgStorage();
   }}
+  // Which workspace this is.  Every OCR-only affordance (the Edit menu's
+  // character entry, the glyph settings item, the OCR blocks in the Advanced
+  // panel) is gated on STATE.project_type, and the project being opened is
+  // the authority on it — the SPA is mounted once and does NOT re-run the
+  // server page on an in-workspace open, so without this an OCR project
+  // opened from an image session would keep the image session's menu.
+  // Absent (a legacy file with no recorded type, /project/reset) -> keep the
+  // current one.
+  if (typeof s.project_type === 'string' && s.project_type) {{
+    STATE.project_type = s.project_type;
+    syncOcrPanelVisibility();
+  }}
+  // The payload's own flat keys first (the v1 contract), then the grouped
+  // block that supersedes them — it carries the four OOD gates the flat keys
+  // never did.
   if (typeof s.bg_dark_thresh === 'number') previewDarkThresh = s.bg_dark_thresh;
   if (typeof s.bg_lum_thresh === 'number') previewLumThresh = s.bg_lum_thresh;
+  applyPreviewState(s.preview);
   persistPreviewState();
   recomputeTrainEnabled();
   refreshTrainRec();
@@ -6663,6 +7192,32 @@ async function exportDataset() {{
     toast(String(e && e.message ? e.message : e));
   }}
 }}
+function collectProjectState() {{
+  // Everything a save sends, in one place.  saveProjectAs and saveProjectQuick
+  // previously built this object twice, character for character; a field the
+  // project format gained (the Preview gates, the workspace type) could only
+  // ever be added to one of them.
+  return {{
+    // STATE.train_cfg IS the training configuration — every TrainConfig field
+    // the SPA knows about, because the server seeded it from the dataclass.
+    // class_preprocess rides along inside it for the run's own record, and
+    // again at the root where the backend reads it as authority.
+    train_cfg: Object.assign({{}}, STATE.train_cfg || {{}}, {{
+      class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}})
+    }}),
+    class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}}),
+    sample_preprocess: normalizeSamplePreprocessMap(STATE.sample_preprocess || {{}}),
+    // Which workspace saved this, so the file routes back to the same one even
+    // if its manifest is ever lost.  The backend reconciles it against the
+    // session config and the manifest before writing.
+    project_type: String(STATE.project_type || ''),
+    preview: previewStateForProject(),
+    // Kept at the root as well: they were the v1 contract, and a project saved
+    // by this build should still be readable by one that only knows them.
+    bg_dark_thresh: Number((previewDarkThresh ?? 0)),
+    bg_lum_thresh: Number((previewLumThresh ?? 100))
+  }};
+}}
 async function saveProjectAs() {{
   try {{
     const pickRes = await fetch(`${{baseUrl}}/project/pick_save?session=${{encodeURIComponent(STATE.session)}}`);
@@ -6679,15 +7234,7 @@ async function saveProjectAs() {{
       body: JSON.stringify({{
         session: STATE.session,
         save_path: savePath,
-        project_state: {{
-          train_cfg: Object.assign({{}}, STATE.train_cfg || {{}}, {{
-            class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}})
-          }}),
-          class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}}),
-          sample_preprocess: normalizeSamplePreprocessMap(STATE.sample_preprocess || {{}}),
-          bg_dark_thresh: Number((previewDarkThresh ?? 0)),
-          bg_lum_thresh: Number((previewLumThresh ?? 100))
-        }}
+        project_state: collectProjectState()
       }})
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
@@ -6709,15 +7256,7 @@ async function saveProjectQuick() {{
         body: JSON.stringify({{
           session: STATE.session,
           save_path: existing,
-          project_state: {{
-            train_cfg: Object.assign({{}}, STATE.train_cfg || {{}}, {{
-              class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}})
-            }}),
-            class_preprocess: Object.assign({{}}, STATE.class_preprocess || {{}}),
-            sample_preprocess: normalizeSamplePreprocessMap(STATE.sample_preprocess || {{}}),
-            bg_dark_thresh: Number((previewDarkThresh ?? 0)),
-            bg_lum_thresh: Number((previewLumThresh ?? 100))
-          }}
+          project_state: collectProjectState()
         }})
       }});
       const data = await res.json().catch(() => ({{ok:'0'}}));
@@ -6753,6 +7292,22 @@ async function newProject() {{
   }} catch (e) {{
     toast(String(e && e.message ? e.message : e));
   }}
+}}
+function toastProjectFormat(state) {{
+  // What the archive said about itself on open.  An in-workspace open does
+  // not re-run the server page, so the Start Page's notice never reaches
+  // here — this is the same message raised from the payload instead.  The
+  // point is not ceremony: a v1 file cannot state how it mixed EMNIST, so a
+  // retrain would silently use this build's defaults, and the user should
+  // hear that from the app rather than from a model that behaves differently.
+  const fmt = state && state.project_format;
+  if (!fmt || typeof fmt !== 'object') return;
+  const missing = Array.isArray(fmt.missing_train_cfg_fields) ? fmt.missing_train_cfg_fields : [];
+  if (!missing.length) {{
+    if (fmt.legacy) toast('Opened a project saved before this version.');
+    return;
+  }}
+  toast(`Opened a v${{String(fmt.version || '1.0')}} project: ${{missing.length}} training settings it predates came back at their defaults. Check Advanced settings before retraining.`);
 }}
 async function openProject() {{
   try {{
@@ -6791,6 +7346,7 @@ async function openProject() {{
     // #endregion
     const mergedState = Object.assign({{}}, statePayload, {{current_project_path: openPath}});
     applyProjectState(mergedState);
+    toastProjectFormat(statePayload);
     render();
     scheduleLayoutResync();
     requestShellLayoutRefresh('open-project');
@@ -6844,12 +7400,28 @@ function defaultExportDir() {{
   if (exportDir) return exportDir;
   return `~/Documents/TFLiteTraining/exports`;
 }}
+function buildExportRuntimeConfig() {{
+  // Collects the Preview-time OOD + preprocessing thresholds so the device
+  // export can stamp them into model_settings.h and eliminate hardcoded
+  // magic numbers on the ESP32.  Reuses the exact same JS state the predict
+  // loop sends to /preview/predict.
+  return {{
+    ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
+    ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
+    ood_max_prob: Number(previewOodMaxProbMin ?? 0.60),
+    ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.70),
+    bg_dark_thresh: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : 0,
+    bg_lum_thresh: previewThreshUserModified ? Number(previewLumThresh ?? 100) : 100,
+  }};
+}}
 async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arrayNameValue) {{
+  const runtimeConfig = buildExportRuntimeConfig();
   const payload = {{
     session: STATE.session,
     export_dir: String(exportDirValue || '').trim(),
     model_name: String(modelNameValue || 'tm'),
-    array_name: String(arrayNameValue || '')
+    array_name: String(arrayNameValue || ''),
+    ...runtimeConfig
   }};
   let res = await fetch(`${{baseUrl}}/export/run`, {{
     method: 'POST',
@@ -6875,7 +7447,8 @@ async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arr
       export_dir: payload.export_dir,
       model_name: payload.model_name,
       array_name: payload.array_name,
-      overwrite: true
+      overwrite: true,
+      ...runtimeConfig
     }};
     res = await fetch(`${{baseUrl}}/export/run`, {{
       method: 'POST',
@@ -9030,27 +9603,38 @@ async function addOcrCharacters(chars, fromDraft) {{
   }}
 }}
 
+// The classes still wearing an auto-generated name and holding nothing.  Two
+// callers need this exact question answered — the selector below (which
+// promises to clear them out) and the empty-state gate in render() (which
+// treats "nothing but these" as a project nobody has set up yet) — so the
+// definition lives in one place and the two can never drift apart.
+function ocrPlaceholderClasses() {{
+  return (Array.isArray(STATE.classes) ? STATE.classes : []).filter((c) => {{
+    const name = String(c == null ? '' : c);
+    const count = Number(STATE.counts ? STATE.counts[name] : 0) || 0;
+    return count === 0 && /^Class [0-9]+$/.test(name.trim());
+  }});
+}}
+
+// True while every class in the project is still a placeholder — i.e. the user
+// has not picked a character yet.  Also true for an empty list, which is the
+// same situation one step further along.  One real class (a character, or a
+// label typed by hand) makes this false and the ordinary card column renders.
+function ocrIsFreshProject() {{
+  const all = Array.isArray(STATE.classes) ? STATE.classes : [];
+  return ocrPlaceholderClasses().length === all.length;
+}}
+
+// Mounted in the Edit menu's modal, so it renders no heading of its own: the
+// modal head carries the title and the class count.
 function renderOcrCharacterSelector(root) {{
   const have = ocrTrainedChars();
   const panel = document.createElement('div');
   panel.className = 'charsel';
 
-  const head = document.createElement('div');
-  head.className = 'charsel-head';
-  const title = document.createElement('div');
-  title.className = 'charsel-title';
-  title.textContent = 'Characters to train';
-  const count = document.createElement('div');
-  count.className = 'charsel-count';
-  const n = Array.isArray(STATE.classes) ? STATE.classes.length : 0;
-  count.textContent = n === 1 ? '1 class' : `${{n}} classes`;
-  head.appendChild(title);
-  head.appendChild(count);
-  panel.appendChild(head);
-
   const help = document.createElement('div');
   help.className = 'charsel-help';
-  help.textContent = 'Pick the characters this model should recognise. Each one becomes a normal class card below — capture samples for it the way you would in any project.';
+  help.textContent = 'Pick the characters this model should recognise. Each one becomes a normal class card in the workspace — capture samples for it the way you would in any project.';
   // A fresh project seeds two "Class N" placeholders so the image flow always
   // has something to train.  They are dead weight in an OCR project, so the
   // add call asks the server to clear them out (see addOcrCharacters) — but
@@ -9058,11 +9642,7 @@ function renderOcrCharacterSelector(root) {{
   // so a placeholder someone has captured into is never touched.  Naming them
   // here sets that expectation before the first click, rather than letting two
   // cards vanish unexplained.
-  const placeholders = (Array.isArray(STATE.classes) ? STATE.classes : []).filter((c) => {{
-    const name = String(c == null ? '' : c);
-    const count = Number(STATE.counts ? STATE.counts[name] : 0) || 0;
-    return count === 0 && /^Class [0-9]+$/.test(name.trim());
-  }});
+  const placeholders = ocrPlaceholderClasses();
   if (placeholders.length) {{
     const one = placeholders.length === 1;
     help.textContent += ` The empty placeholder${{one ? '' : 's'}} ${{placeholders.join(', ')}} ${{one ? 'is' : 'are'}} still in the list, and will be removed automatically as soon as you pick a character.`;
@@ -9135,6 +9715,366 @@ function renderOcrCharacterSelector(root) {{
   panel.appendChild(row);
   root.appendChild(panel);
 }}
+
+// The onboarding hero, shown in place of the card column while an OCR project
+// holds nothing but placeholders.  It suppresses those cards rather than
+// sitting above them: two empty "Class N" cards are precisely the confusion it
+// exists to remove, and rendering them behind the message would leave the
+// workspace looking like an Image project with a note taped to it.
+function renderOcrEmptyState(root) {{
+  const box = document.createElement('div');
+  box.className = 'ocr-empty';
+
+  const icon = document.createElement('div');
+  icon.className = 'ocr-empty-icon';
+  // The same glyph as the Edit menu item, so the button and the menu entry it
+  // is a shortcut to read as one action.
+  icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg>`;
+  box.appendChild(icon);
+
+  const title = document.createElement('div');
+  title.className = 'ocr-empty-title';
+  title.textContent = 'No characters selected';
+  box.appendChild(title);
+
+  const sub = document.createElement('div');
+  sub.className = 'ocr-empty-sub';
+  sub.textContent = 'Start by choosing what this model should recognise. Every character you pick becomes a normal class card you can capture samples for.';
+  box.appendChild(sub);
+
+  const cta = document.createElement('button');
+  cta.type = 'button';
+  cta.className = 'ocr-empty-cta';
+  cta.id = 'ocrEmptyCta';
+  cta.textContent = 'Select Characters to Train';
+  cta.onclick = () => openOcrCharModal();
+  box.appendChild(cta);
+
+  root.appendChild(box);
+}}
+
+// The character grid is a project-level decision rather than a per-card action,
+// so it lives in the toolbar's Edit menu.  Inline at the foot of the card
+// column it was the far end of a long scroll on any project with more than a
+// few characters.
+//
+// The flag outlives render() for the same reason classPreprocessOpen does: the
+// column is rebuilt on every class edit, and the modal has to still be open —
+// showing the freshly up-to-date chips — when that rebuild finishes.
+let ocrCharModalOpen = false;
+
+function openOcrCharModal() {{
+  ocrCharModalOpen = true;
+  renderOcrCharModal();
+}}
+function closeOcrCharModal() {{
+  ocrCharModalOpen = false;
+  renderOcrCharModal();
+}}
+
+function renderOcrCharModal() {{
+  const host = document.getElementById('ocrCharModal');
+  if (!host) return;
+  if (!ocrCharModalOpen) {{
+    host.style.display = 'none';
+    host.innerHTML = '';
+    return;
+  }}
+  host.style.display = 'flex';
+  host.innerHTML = '';
+  const card = document.createElement('div');
+  card.className = 'modal ocr-char-modal';
+
+  const head = document.createElement('div');
+  head.className = 'modal-head';
+  const title = document.createElement('strong');
+  title.textContent = 'Characters to train';
+  head.appendChild(title);
+  // The selector panel no longer carries its own heading, so the count that
+  // used to sit in it moves here.  It still updates on every pick, because
+  // adding a character re-runs render() and render() re-runs this.
+  const count = document.createElement('span');
+  count.className = 'charsel-count';
+  const n = Array.isArray(STATE.classes) ? STATE.classes.length : 0;
+  count.textContent = n === 1 ? '1 class' : `${{n}} classes`;
+  head.appendChild(count);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'iconbtn';
+  close.id = 'ocrCharModalClose';
+  close.title = 'Close';
+  close.textContent = '✕';
+  close.onclick = (e) => {{ if (e) e.stopPropagation(); closeOcrCharModal(); }};
+  head.appendChild(close);
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'modal-body';
+  // The selector itself, unchanged: it still writes STATE.classes through
+  // applyClassesState() exactly as before.  Only its parent moved.
+  renderOcrCharacterSelector(body);
+  card.appendChild(body);
+
+  host.appendChild(card);
+  // Backdrop closes; the card swallows its own clicks so one that lands on the
+  // grid is never read as a click outside the modal.
+  host.onclick = (e) => {{ if (e.target === host) closeOcrCharModal(); }};
+  card.onclick = (e) => e.stopPropagation();
+}}
+
+// ── Glyph settings (OCR only) ──────────────────────────────────────────────
+//
+// Convention over configuration.  A live camera capture is dark ink on a
+// bright page, the glyph sits somewhere inside a larger frame, and the bbox
+// stretches to the grid — so that is what every class gets until someone says
+// otherwise.  These are the values the Python normalisers already resolve a
+// MISSING key to, so a class with no stored record and a class whose record
+// this form wrote train identically; the form only makes the assumption
+// visible and overridable rather than changing it.
+// Must match what the BACKEND does with a class that carries no glyph keys,
+// or this form displays a value the system does not use.  The backend's
+// fallbacks are: record_controller's live/preview transform (INK_DARK,
+// NORM_CANON, segmentation on) and ocr_trainer._project_convention
+// (NORM_CANON when no class states one).  CANON, not STRETCH, because the OCR
+// project mixes EMNIST into every training set and CANON is the
+// aspect-preserving convention that keeps a camera capture comparable to it —
+// STRETCH squashes a tall thin glyph ('1', 'I') into an unreadable blob.
+const OCR_GLYPH_DEFAULTS = {{ ink_polarity: 0, glyph_segment: true, glyph_convention: 'canon' }};
+
+const OCR_POLARITY_OPTIONS = [
+  [0, 'Dark ink on light (camera captures)'],
+  [1, 'Bright ink on dark (EMNIST/MNIST)'],
+];
+const OCR_CONVENTION_OPTIONS = [
+  ['canon', 'MNIST/EMNIST canonical (fit 20 px, centre of mass)'],
+  ['stretch', 'Stretch bbox to the full grid'],
+];
+
+// The effective settings for one class: what is stored, or the default for
+// any key the record does not carry.  Read through the same normalisers the
+// save path uses, so the value shown in the control is the value that would
+// be stored.
+function glyphConfigFor(className) {{
+  const stored = (STATE.class_preprocess && STATE.class_preprocess[className]) || {{}};
+  return {{
+    ink_polarity: 'ink_polarity' in stored
+      ? normalizeInkPolarity(stored.ink_polarity) : OCR_GLYPH_DEFAULTS.ink_polarity,
+    glyph_segment: 'glyph_segment' in stored
+      ? !!stored.glyph_segment : OCR_GLYPH_DEFAULTS.glyph_segment,
+    glyph_convention: 'glyph_convention' in stored
+      ? normalizeNormConvention(stored.glyph_convention) : OCR_GLYPH_DEFAULTS.glyph_convention,
+  }};
+}}
+
+// Edits land here, not in STATE, so that closing without applying discards
+// them — Apply is the commit.  Kept outside render() for the same reason
+// ocrCharDraft is: the column rebuilds on any class edit, and a half-made
+// selection should not be thrown away by a rebuild the user did not ask for.
+let glyphDraft = null;
+let ocrGlyphModalOpen = false;
+
+function openOcrGlyphModal() {{
+  const classes = Array.isArray(STATE.classes) ? STATE.classes : [];
+  glyphDraft = {{}};
+  classes.forEach((name) => {{ glyphDraft[name] = glyphConfigFor(name); }});
+  ocrGlyphModalOpen = true;
+  renderOcrGlyphModal();
+}}
+function closeOcrGlyphModal() {{
+  ocrGlyphModalOpen = false;
+  glyphDraft = null;
+  renderOcrGlyphModal();
+}}
+
+function renderOcrGlyphModal() {{
+  const host = document.getElementById('ocrGlyphModal');
+  if (!host) return;
+  // The project guard matters here in a way it does not for the character
+  // modal: these settings only mean anything to the glyph pipeline, so a
+  // lingering open modal after a switch to an image project would be showing
+  // controls that no longer apply to anything on screen.
+  if (!ocrGlyphModalOpen || !isOcrProject()) {{
+    host.style.display = 'none';
+    host.innerHTML = '';
+    return;
+  }}
+  const classes = Array.isArray(STATE.classes) ? STATE.classes : [];
+  if (!glyphDraft) glyphDraft = {{}};
+  classes.forEach((name) => {{ if (!glyphDraft[name]) glyphDraft[name] = glyphConfigFor(name); }});
+
+  host.style.display = 'flex';
+  host.innerHTML = '';
+  const card = document.createElement('div');
+  card.className = 'modal ocr-glyph-modal';
+
+  const head = document.createElement('div');
+  head.className = 'modal-head';
+  const title = document.createElement('strong');
+  title.textContent = 'Glyph preprocessing';
+  head.appendChild(title);
+  const count = document.createElement('span');
+  count.className = 'charsel-count';
+  count.textContent = classes.length === 1 ? '1 class' : `${{classes.length}} classes`;
+  const side = Number((STATE.train_cfg || {{}}).img_size);
+  if (isFinite(side) && side > 0) count.textContent += ` · ${{side}}×${{side}} input`;
+  head.appendChild(count);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'iconbtn';
+  close.id = 'ocrGlyphModalClose';
+  close.title = 'Close';
+  close.textContent = '✕';
+  close.onclick = (e) => {{ if (e) e.stopPropagation(); closeOcrGlyphModal(); }};
+  head.appendChild(close);
+  card.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'modal-body';
+  const note = document.createElement('p');
+  note.className = 'glyph-note';
+  note.textContent = 'Camera captures and uploads are assumed to be dark ink on a bright background, segmented '
+    + 'from the frame, and stretched to the grid — so there is nothing to set here unless a class is an edge '
+    + 'case (an imported EMNIST/MNIST set, or a sign lit the other way round). Every step is integer-exact and '
+    + 'mirrored on the device.';
+  body.appendChild(note);
+
+  if (!classes.length) {{
+    const empty = document.createElement('div');
+    empty.className = 'glyph-empty';
+    empty.textContent = 'This project has no classes yet. Pick characters first.';
+    body.appendChild(empty);
+  }} else {{
+    const scroll = document.createElement('div');
+    scroll.className = 'glyph-scroll';
+
+    const headRow = document.createElement('div');
+    headRow.className = 'glyph-row is-head';
+    ['Class', 'Ink', 'Segment', 'Normalisation'].forEach((label) => {{
+      const cell = document.createElement('span');
+      cell.textContent = label;
+      headRow.appendChild(cell);
+    }});
+    scroll.appendChild(headRow);
+
+    const makeSelect = (options, value, onPick) => {{
+      const sel = document.createElement('select');
+      sel.className = 'glyph-select';
+      options.forEach((pair) => {{
+        const opt = document.createElement('option');
+        opt.value = String(pair[0]);
+        opt.textContent = pair[1];
+        sel.appendChild(opt);
+      }});
+      sel.value = String(value);
+      sel.onchange = () => onPick(sel.value);
+      return sel;
+    }};
+
+    classes.forEach((name) => {{
+      const row = document.createElement('div');
+      row.className = 'glyph-row';
+
+      const nameCell = document.createElement('span');
+      nameCell.className = 'glyph-name';
+      nameCell.textContent = String(name);
+      nameCell.title = String(name);
+      row.appendChild(nameCell);
+
+      // Each control writes into the draft only.  Nothing here re-renders the
+      // modal — a rebuild mid-edit would take the select out from under the
+      // pointer that is using it.
+      row.appendChild(makeSelect(
+        OCR_POLARITY_OPTIONS,
+        glyphDraft[name].ink_polarity,
+        (v) => {{ glyphDraft[name].ink_polarity = normalizeInkPolarity(v); }}
+      ));
+
+      const segWrap = document.createElement('label');
+      segWrap.className = 'glyph-check';
+      const seg = document.createElement('input');
+      seg.type = 'checkbox';
+      seg.checked = !!glyphDraft[name].glyph_segment;
+      seg.title = 'On for camera captures (the glyph sits somewhere in a larger frame). '
+        + 'Off for an already-isolated imported dataset.';
+      seg.onchange = () => {{ glyphDraft[name].glyph_segment = !!seg.checked; }};
+      const segLabel = document.createElement('span');
+      segLabel.textContent = 'By projection';
+      segWrap.appendChild(seg);
+      segWrap.appendChild(segLabel);
+      row.appendChild(segWrap);
+
+      row.appendChild(makeSelect(
+        OCR_CONVENTION_OPTIONS,
+        glyphDraft[name].glyph_convention,
+        (v) => {{ glyphDraft[name].glyph_convention = normalizeNormConvention(v); }}
+      ));
+
+      scroll.appendChild(row);
+    }});
+    body.appendChild(scroll);
+  }}
+  card.appendChild(body);
+
+  const actions = document.createElement('div');
+  actions.className = 'modal-actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'btn btn-secondary';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = (e) => {{ if (e) e.stopPropagation(); closeOcrGlyphModal(); }};
+  actions.appendChild(cancel);
+  const apply = document.createElement('button');
+  apply.type = 'button';
+  apply.className = 'btn btn-primary';
+  apply.id = 'ocrGlyphApply';
+  apply.textContent = 'Apply glyph settings';
+  apply.disabled = !classes.length;
+  apply.onclick = (e) => {{ if (e) e.stopPropagation(); applyGlyphSettings(); }};
+  actions.appendChild(apply);
+  card.appendChild(actions);
+
+  host.appendChild(card);
+  host.onclick = (e) => {{ if (e.target === host) closeOcrGlyphModal(); }};
+  card.onclick = (e) => e.stopPropagation();
+}}
+
+// Writes every class, not just the ones that were touched: applying the form
+// is the user saying "this is how my project is configured", and the defaults
+// are worth committing explicitly for exactly that reason.  It is also what
+// the Streamlit form this replaces did, so a project configured before and
+// after this change ends up with the same records.
+async function applyGlyphSettings() {{
+  if (!isOcrProject()) return;
+  const classes = Array.isArray(STATE.classes) ? STATE.classes : [];
+  if (!classes.length) return;
+  const next = Object.assign({{}}, STATE.class_preprocess || {{}});
+  classes.forEach((name) => {{
+    const draft = (glyphDraft && glyphDraft[name]) || glyphConfigFor(name);
+    // Through normalizeClassPreprocessConfig so the record written here has
+    // the same shape as one written by the per-class preprocess editor —
+    // including the mode/threshold defaults this form has no opinion about.
+    next[name] = normalizeClassPreprocessConfig(Object.assign({{}}, next[name] || {{}}, {{
+      ink_polarity: normalizeInkPolarity(draft.ink_polarity),
+      glyph_segment: !!draft.glyph_segment,
+      glyph_convention: normalizeNormConvention(draft.glyph_convention),
+    }}));
+  }});
+  try {{
+    const res = await fetch(`${{baseUrl}}/classes/save_config`, {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{session: STATE.session, class_preprocess: next}})
+    }});
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to save glyph settings.');
+    STATE.class_preprocess = next;
+    toast('Glyph settings applied — the processed cache was rebuilt.');
+    closeOcrGlyphModal();
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+  }}
+}}
+
 async function deleteClass(name) {{
   if (STATE.classes.length <= 2) {{
     showTrainWarningModal('Cannot delete class.|At least two classes are required — a project cannot have fewer than 2 classes.');
@@ -9420,6 +10360,20 @@ function syncOcrPanelVisibility() {{
     const el = document.getElementById(id);
     if (el) el.style.display = on ? '' : 'none';
   }};
+  // Edit ▸ Edit characters.  Same idiom as the advanced rows below: the button
+  // ships in the markup and is revealed here, so there is one place that
+  // decides what an OCR project shows.  The separator is toggled alongside it
+  // rather than wrapping the pair in a container, because the dropdown's
+  // children are laid out by flex-direction: column and an extra div would
+  // need its own display rule to stay in the flow.
+  show('navEditCharacters', ocr);
+  // Glyph settings are PER CLASS, so the item only makes sense once there is a
+  // class to configure.  In a fresh OCR project the only classes are the ones
+  // the empty state has already promised to delete on the first pick — opening
+  // a configuration form for them would invite the user to tune settings that
+  // are about to stop existing.
+  show('navGlyphSettings', ocr && !ocrIsFreshProject());
+  show('navEditCharactersSep', ocr);
   const mix = !!nullish(cfg.ocr_emnist_enabled, true);
   show('advOcrSplitRow', ocr && mix);
   show('advOcrPerClassRow', ocr && mix);
@@ -9428,12 +10382,12 @@ function syncOcrPanelVisibility() {{
 }}
 function renderAdvancedPanel() {{
   const panel = document.getElementById('trainAdvPanel');
-  const chev = document.getElementById('advChevron');
   if (!panel) return;
-  panel.style.display = trainAdvancedOpen ? 'block' : 'none';
-  if (chev) chev.textContent = trainAdvancedOpen ? '▴' : '▾';
+  // The advanced panel now lives inside the global Settings modal, so it is
+  // always visible there — no expand/collapse toggle on the training card.
+  panel.style.display = 'block';
   syncOcrPanelVisibility();
-  if (trainAdvancedOpen) syncAdvancedInlineInputs();
+  syncAdvancedInlineInputs();
   updateFlow();
   setTimeout(() => {{ if (typeof syncFrameHeight === 'function') syncFrameHeight(); }}, 50);
 }}
@@ -9525,33 +10479,23 @@ function bindAdvancedInlineHandlers() {{
   bindNum('advOcrUnfreeze', 'ocr_unfreeze_blocks');
 }}
 function resetTrainCfg() {{
-  STATE.train_cfg = {{
-    img_size: 96,
-    batch_size: 32,
-    epochs: 20,
-    validation_split: 0.25,
-    learning_rate: 0.0016,
-    conv1_filters: 8,
-    conv2_filters: 16,
-    dense_units: 32,
-    // OCR defaults, kept in step with trainer.TrainConfig.
-    ocr_emnist_enabled: true,
-    ocr_emnist_split: 'balanced',
-    ocr_emnist_per_class: 200,
-    ocr_background_enabled: true,
-    ocr_background_samples: 0,
-    ocr_transfer_learning: true,
-    ocr_pretrain_per_class: 1200,
-    ocr_pretrain_epochs: 4,
-    ocr_head_epochs: 12,
-    ocr_head_lr: 0.0015,
-    ocr_finetune_epochs: 25,
-    ocr_finetune_lr: 0.0002,
-    ocr_unfreeze_blocks: 1
-  }};
+  // The baseline is the server's TrainConfig dataclass, sent in the boot
+  // payload — NOT a list here.  The literal that used to live here had
+  // drifted to the old 8/16/32 architecture (the comment in trainer.py
+  // records that stack collapsing to one class), so "Reset to defaults"
+  // reset the model to something smaller than either the current default or
+  // anything the user had chosen.  Anything the server adds to TrainConfig
+  // from now on arrives here without this function changing.
+  const defaults = STATE.train_cfg_defaults;
+  if (!defaults || typeof defaults !== 'object') {{
+    toast('Defaults unavailable — reload the page.');
+    return;
+  }}
+  STATE.train_cfg = Object.assign({{}}, defaults);
   persistTrainCfgStorage();
   syncAdvancedInlineInputs();
   renderTrainStatus();
+  refreshRecHints();
   toast('Advanced settings reset.');
 }}
 let classDragState = null;
@@ -9694,8 +10638,15 @@ function render() {{
   // #endregion
   const root = document.getElementById('classes');
   root.innerHTML = '';
-  for (let i=0; i<STATE.classes.length; i++) {{
-    const name = STATE.classes[i];
+  // A fresh OCR project presents onboarding instead of two untouched
+  // placeholders.  Decided once, before the loop, because the loop's input is
+  // what changes: with nothing picked there are no cards at all and the hero
+  // takes the whole column.  renderList is STATE.classes verbatim in every
+  // other case, so the card indices below still line up with it.
+  const ocrEmptyState = isOcrProject() && ocrIsFreshProject();
+  const renderList = ocrEmptyState ? [] : STATE.classes;
+  for (let i=0; i<renderList.length; i++) {{
+    const name = renderList[i];
     try {{
       const card = document.createElement('div');
       card.className = 'card class-card';
@@ -9710,23 +10661,11 @@ function render() {{
       const title = document.createElement('div');
       title.className = 'class-title';
       title.textContent = name;
-      const preprocessBtn = document.createElement('button');
-      preprocessBtn.className = 'preprocess-chip';
-      preprocessBtn.type = 'button';
-      preprocessBtn.textContent = 'Edit';
-      preprocessBtn.onclick = (e) => {{
-        if (e) {{
-          e.preventDefault();
-          e.stopPropagation();
-        }}
-        openClassPreprocessEditor(name);
-      }};
       const edit = document.createElement('button');
       edit.className = 'iconbtn tm-rename-btn';
       edit.title = 'Rename this class';
       edit.innerHTML = createIcon('rename');
       edit.onclick = () => renameClass(name);
-      title.appendChild(preprocessBtn);
       title.appendChild(edit);
       head.appendChild(title);
       const more = document.createElement('button');
@@ -9740,6 +10679,20 @@ function render() {{
         }}
         await deleteClass(name);
       }};
+      // Edit (preprocess) sits immediately left of Clear Samples, separated
+      // from the Rename icon by the title's flex spacer so the two edits
+      // can't be misclicked into each other.
+      const preprocessBtn = document.createElement('button');
+      preprocessBtn.className = 'preprocess-chip class-preprocess-chip';
+      preprocessBtn.type = 'button';
+      preprocessBtn.textContent = 'Edit';
+      preprocessBtn.onclick = (e) => {{
+        if (e) {{
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        openClassPreprocessEditor(name);
+      }};
       const clearBtn = document.createElement('button');
       clearBtn.className = 'iconbtn clear-samples';
       clearBtn.title = 'Clear all samples';
@@ -9751,6 +10704,7 @@ function render() {{
         }}
         await clearSamples(name);
       }};
+      head.appendChild(preprocessBtn);
       head.appendChild(clearBtn);
       head.appendChild(more);  // delete ⋮ sits at the head's right end
       card.appendChild(head);
@@ -9914,19 +10868,21 @@ function render() {{
     }}
   }}
   try {{
-    if (isOcrProject()) {{
-      // OCR: characters first, cards follow.  This writes the same
-      // STATE.classes the card loop above just read, so what it produces are
-      // the ordinary cards — the selector is the only thing in this column
-      // that differs between an OCR project and an image project.
-      renderOcrCharacterSelector(root);
-    }} else {{
+    if (ocrEmptyState) {{
+      // Nothing picked yet: the hero replaces the column rather than sitting
+      // above it (the loop above rendered no cards to sit above).  Its button
+      // opens the same modal the Edit menu does.
+      renderOcrEmptyState(root);
+    }} else if (!isOcrProject()) {{
       const add = document.createElement('div');
       add.className = 'addclass';
       add.innerHTML = `<span class="addclass-icon">${{createIcon('plus')}}</span><span>Add a class</span>`;
       add.onclick = () => addClass();
       root.appendChild(add);
     }}
+    // An OCR project past the empty state renders its cards and nothing else:
+    // the selector now lives in the Edit menu's modal, which is rendered in
+    // the tail below so it survives this rebuild.
 
     const trainBtn = document.getElementById('trainBtn');
     recomputeTrainEnabled();
@@ -9971,6 +10927,10 @@ function render() {{
       renderTrainStatus();
       bindPreviewControls();
       renderClassPreprocessModal();
+      // Rebuilt on every render so the chips stay in step with the cards: the
+      // modal stays open across a pick, and addOcrCharacters() re-renders.
+      renderOcrCharModal();
+      renderOcrGlyphModal();
     }} catch (previewErr) {{
       console.error('[render] preview/train binding failed', previewErr);
       toast(`Preview init failed: ${{String(previewErr && previewErr.message || previewErr)}}`, 8000);
@@ -10010,6 +10970,20 @@ function render() {{
       closeToolbarDropdowns();
       if (!isOpen && d) d.classList.add('open');
     }};
+    // OCR only, like the item itself — syncOcrPanelVisibility() hides it
+    // everywhere else, so this binding is dormant in an image project.
+    const navEditCharacters = document.getElementById('navEditCharacters');
+    if (navEditCharacters) navEditCharacters.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      closeToolbarDropdowns();
+      openOcrCharModal();
+    }};
+    const navGlyphSettings = document.getElementById('navGlyphSettings');
+    if (navGlyphSettings) navGlyphSettings.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      closeToolbarDropdowns();
+      openOcrGlyphModal();
+    }};
     // Settings button (Problem 3.2 SSOT modal) + settings close/save bindings
     const navSettings = document.getElementById('navSettings');
     if (navSettings) navSettings.onclick = (e) => {{
@@ -10025,6 +10999,18 @@ function render() {{
     if (setModal) setModal.onclick = (e) => {{
       if (e && e.target === setModal) closeGlobalSettings();
     }};
+    // Advanced Settings expand/collapse toggle
+    const advToggle = document.getElementById('settingsAdvancedToggle');
+    const advBody = document.getElementById('settingsAdvancedBody');
+    const advChevron = document.getElementById('settingsAdvancedChevron');
+    if (advToggle && advBody) {{
+      advToggle.onclick = (e) => {{
+        if (e) e.stopPropagation();
+        const expanded = advToggle.getAttribute('aria-expanded') === 'true';
+        advToggle.setAttribute('aria-expanded', String(!expanded));
+        advBody.style.display = expanded ? 'none' : 'flex';
+      }};
+    }}
     // Preferences button + modal bindings
     const navPrefs = document.getElementById('navPreferences');
     if (navPrefs) navPrefs.onclick = (e) => {{
@@ -10672,96 +11658,6 @@ def _tm_classes_meta_path() -> Path:
     return _session_workspace() / "tm_dataset" / "tm_classes.json"
 
 
-def _tm_write_class_preprocess(class_preprocess: Dict[str, Dict[str, Any]]) -> None:
-    """Persist per-class preprocess through the SAME store the SPA uses.
-
-    The SPA writes this by AJAX to /classes/save_config; Streamlit-side
-    controls must land in the identical place (tm_classes.json, merged) or
-    the two writers would fight over the class config.
-    """
-    p = _tm_classes_meta_path()
-    raw: Dict[str, Any] = {}
-    if p.exists():
-        try:
-            loaded = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                raw = loaded
-        except Exception:
-            raw = {}
-    merged = dict(raw.get("class_preprocess") or {})
-    for name, cfg in class_preprocess.items():
-        merged[name] = {**dict(merged.get(name) or {}), **cfg}
-    raw["class_preprocess"] = merged
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    controller = _ensure_fresh_record_controller()
-    try:
-        controller._rebuild_processed_cache(
-            _tm_dataset_dir(),
-            class_preprocess=normalize_class_preprocess_map(merged),
-            out_size=int(getattr(st.session_state.get("train_cfg"), "img_size", GLYPH_SIZE) or GLYPH_SIZE),
-            fast_mode=False,
-            project_type=PROJECT_TYPE_OCR,
-        )
-    except Exception:
-        pass
-
-
-def _render_ocr_glyph_settings() -> None:
-    """Per-class ink polarity / segmentation / normalisation.
-
-    These are the only OCR-specific knobs, and they live in the existing
-    per-class preprocess record (see normalize_class_preprocess) rather than
-    a parallel OCR config — so .tmproj saving, sample overrides and the
-    preview calls all carry them for free.
-    """
-    from ocr_preprocess import normalize_ink_polarity, normalize_norm_convention
-
-    classes = list(st.session_state.tm_classes or ["Class 1", "Class 2"])
-    meta = _tm_load_classes_meta_full() or {}
-    stored = normalize_class_preprocess_map(meta.get("class_preprocess"))
-    side = int(getattr(st.session_state.get("train_cfg"), "img_size", GLYPH_SIZE) or GLYPH_SIZE)
-
-    with st.expander(f"🔠 Glyph preprocessing — {side}×{side} model input", expanded=False):
-        st.caption(
-            "Every step is integer-exact and mirrorable on the device: BT.601 luminance → exact "
-            "integer Otsu (cross-multiplied, no floats) → vertical-projection segmentation → "
-            "nearest-neighbour resize by the exact rational map floor((2o+1)·in/(2·out)) → "
-            "gray − 128.  Verified byte-identical to the C reference on 386/386 corpus frames."
-        )
-        updated: Dict[str, Dict[str, Any]] = {}
-        for idx, name in enumerate(classes):
-            cfg = stored.get(name) or {}
-            polarity_label = st.selectbox(
-                f"{name} — ink",
-                options=["Dark ink on light (camera captures)", "Bright ink on dark (EMNIST/MNIST)"],
-                index=1 if int(normalize_ink_polarity(cfg.get("ink_polarity"))) else 0,
-                key=f"tm_ocr_polarity_{idx}",
-            )
-            segment = st.checkbox(
-                f"{name} — segment glyph by vertical projection",
-                value=bool(cfg.get("glyph_segment", True)),
-                key=f"tm_ocr_segment_{idx}",
-                help="On for camera captures (the glyph sits somewhere in a larger frame). "
-                     "Off for already-isolated imported datasets (EMNIST).",
-            )
-            convention_label = st.selectbox(
-                f"{name} — normalisation",
-                options=["Stretch bbox to the full grid", "MNIST/EMNIST canonical (fit 20 px, centre of mass)"],
-                index=1 if str(normalize_norm_convention(cfg.get("glyph_convention"))) == "canon" else 0,
-                key=f"tm_ocr_convention_{idx}",
-            )
-            updated[name] = {
-                "ink_polarity": 1 if polarity_label.startswith("Bright") else 0,
-                "glyph_segment": bool(segment),
-                "glyph_convention": "canon" if convention_label.startswith("MNIST") else "stretch",
-            }
-        if st.button("Apply glyph settings", key="tm_ocr_apply", type="primary"):
-            _tm_write_class_preprocess(updated)
-            st.success("Glyph settings applied — the processed cache was rebuilt.")
-            st.rerun()
-
-
 def _render_ocr_project_page() -> None:
     """OCR / Character workspace.
 
@@ -10769,8 +11665,9 @@ def _render_ocr_project_page() -> None:
     strip, training, quantisation, export and the OOD preview are all
     project-agnostic: what differs is the sample transform (dispatched
     server-side on `project_type`) and the model-input size (28).  So this
-    page renders the shared workspace and only adds the glyph-specific
-    explanation + per-class polarity/segmentation controls.
+    page renders the shared workspace and adds nothing but the glyph-specific
+    explanation — the per-class glyph controls live in the workspace itself
+    (Edit ▸ Glyph settings), so nothing here grows with the class count.
     """
     inject_teachable_style()
     st.markdown(
@@ -10787,7 +11684,11 @@ def _render_ocr_project_page() -> None:
         ''',
         unsafe_allow_html=True,
     )
-    _render_ocr_glyph_settings()
+    # No glyph controls here: they are per-class and would be 3 Streamlit
+    # widgets each, rendered into the main document flow (108 of them at 36
+    # characters).  They now live in the workspace SPA's OCR-only "Glyph
+    # settings" modal — Edit ▸ Glyph settings — which is also the single
+    # writer for them (/classes/save_config).
     _render_image_project()
 
 

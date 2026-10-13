@@ -68,9 +68,12 @@ from dataset_io import (
     DEFAULT_IMG_SIZE_BY_PROJECT,
     IMAGE_EXTS,
     KNOWN_PROJECT_TYPES,
+    PROJECT_FORMAT_LEGACY,
     PROJECT_TYPE_IMAGE,
     PROJECT_TYPE_OCR,
     default_img_size,
+    project_header,
+    read_project_header,
     sanitize_class_name,
 )
 from image_preprocess import (
@@ -78,6 +81,7 @@ from image_preprocess import (
     CROP_MODE_CENTER,
     PREPROCESS_MODE_AUTO_BY_LABEL,
     PREPROCESS_MODE_MANUAL_ROI,
+    PREPROCESS_MODE_NONE,
     _BG_LUM_THRESH,
     _BG_DIFF_MIN,
     normalize_class_preprocess,
@@ -178,6 +182,162 @@ def _is_truthy(value: Any) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
+# ── TrainConfig (de)serialisation ───────────────────────────────────────
+# The .tmproj train_cfg is a TrainConfig snapshot, and the set of fields it
+# carries is DERIVED from the dataclass rather than listed by hand here.
+# v1 hand-listed 12 of the 35 fields in `_project_train_cfg._pick_cfg` and
+# silently dropped the rest on every save — all 13 ocr_* mixing / two-phase
+# knobs, plus crop_mode (the model-input geometry!), img_size, seed,
+# optimizer, and the batch/epoch auto-adjust flags.  A hand-written list
+# drifts the moment anyone adds a field; deriving it means a new TrainConfig
+# field is serialised by default and the only way to leave one out is to add
+# it to `_TRAIN_CFG_UNSERIALISED` and say why.
+_TRAIN_CFG_SCHEMA: Optional[Dict[str, Any]] = None
+
+# Fields that are part of the project but deliberately NOT part of the
+# train_cfg snapshot, because the archive already carries them somewhere
+# better: sample_preprocess lives in tm_classes.json next to the samples it
+# overrides, and class_names_order is the class LIST, which is labels.txt and
+# the directory order (writing it twice is how the two copies drift apart).
+# Excluded here so `missing_train_cfg_fields()` reports a field the file
+# SHOULD have carried — never one this format never writes — otherwise every
+# freshly saved project would look incomplete on open.  A future field that
+# describes the MACHINE rather than the project also belongs in this set.
+_TRAIN_CFG_UNSERIALISED: frozenset = frozenset({"sample_preprocess", "class_names_order"})
+
+# Fields whose value is not a scalar and needs the project's own normaliser
+# instead of a cast — a tuple, or a nested map the rest of the app already
+# knows how to sanitise.
+_TRAIN_CFG_COMPLEX_FIELDS = ("manual_roi", "class_preprocess", "sample_preprocess", "class_names_order")
+
+# Enumerated string fields: a value outside the set is forwarded to code that
+# switches on it and silently takes a default branch, so it is rejected here
+# rather than persisted as if the project were configured that way.
+_TRAIN_CFG_ENUMS = {
+    "project_type": KNOWN_PROJECT_TYPES,
+    # PREPROCESS_MODE_NONE is a v0 constant the settings modal still accepts;
+    # it dispatches to the same branch as auto_by_label, so it stays valid
+    # rather than being rewritten on save.
+    "preprocess_mode": (PREPROCESS_MODE_AUTO_BY_LABEL, PREPROCESS_MODE_MANUAL_ROI, PREPROCESS_MODE_NONE),
+    "crop_mode": (CROP_MODE_AUTO_SEARCH, CROP_MODE_CENTER),
+    "color_mode": ("grayscale", "rgb"),
+    "optimizer": ("adam", "sgd", "rmsprop"),
+}
+
+
+def _train_cfg_schema() -> Dict[str, Any]:
+    """name -> dataclass default for TrainConfig, imported lazily and cached.
+
+    Function-local import for the same reason every other `trainer` import in
+    this module is: it pulls in TensorFlow, and this module is imported by the
+    record controller long before any training happens.  Cached because the
+    save and open paths each call through here several times.
+    """
+    global _TRAIN_CFG_SCHEMA
+    if _TRAIN_CFG_SCHEMA is None:
+        from dataclasses import fields as _dc_fields
+
+        from trainer import TrainConfig
+
+        _TRAIN_CFG_SCHEMA = {f.name: f.default for f in _dc_fields(TrainConfig) if f.name not in _TRAIN_CFG_UNSERIALISED}
+    return _TRAIN_CFG_SCHEMA
+
+
+def train_cfg_field_names() -> Tuple[str, ...]:
+    """Every field name a saved project is expected to carry."""
+    return tuple(_train_cfg_schema().keys())
+
+
+def _coerce_train_cfg_value(name: str, value: Any) -> Tuple[bool, Any]:
+    """Coerce one persisted value to the type its dataclass field declares.
+
+    Returns (keep, coerced).  `keep` is False when the value cannot be
+    represented as the field's type — a hand-edited JSON file, or a field
+    whose meaning changed between versions.  A rejected value falls back to
+    the dataclass default rather than being stored as something the trainer
+    would then misuse: a string "false" is truthy, and "0.2" is not a number
+    of epochs.
+    """
+    if value is None:
+        return False, None
+    if name in _TRAIN_CFG_COMPLEX_FIELDS:
+        if name == "manual_roi":
+            roi = normalize_manual_roi(value)
+            return (True, list(roi)) if roi is not None else (False, None)
+        if name == "class_names_order":
+            if not isinstance(value, (list, tuple)):
+                return False, None
+            names = [str(v) for v in value if isinstance(v, (str, int, float))]
+            return (True, names) if names else (False, None)
+        if name == "class_preprocess":
+            cfg = normalize_class_preprocess_map(value)
+            return (True, cfg) if cfg else (False, None)
+        if name == "sample_preprocess":
+            cfg = normalize_sample_preprocess_map(value)
+            return (True, cfg) if cfg else (False, None)
+        return False, None
+    if name in _TRAIN_CFG_ENUMS:
+        text = str(value).strip().lower()
+        return (True, text) if text in _TRAIN_CFG_ENUMS[name] else (False, None)
+
+    # The declared type is the dataclass default's type, so a field added
+    # later is coerced correctly without touching this function.
+    default = _train_cfg_schema().get(name)
+    if isinstance(default, bool):
+        # Before the int branch: bool subclasses int, and these fields are
+        # strictly boolean on the trainer side.
+        return True, _is_truthy(value)
+    if isinstance(default, int):
+        try:
+            return True, int(value)
+        except Exception:
+            return False, None
+    if isinstance(default, float):
+        try:
+            return True, float(value)
+        except Exception:
+            return False, None
+    if isinstance(default, str):
+        text = str(value)
+        return (True, text) if text else (False, None)
+    # No usable default and not one of the complex fields: hand the JSON back
+    # unchanged so a future nested config survives instead of being dropped
+    # for lack of a coercion rule.
+    return True, value
+
+
+def pick_train_cfg(raw: Any) -> Dict[str, Any]:
+    """Project a JSON blob onto the TrainConfig schema.
+
+    Only keys the blob actually carries come back, so an empty result still
+    means "this source had nothing to say" and the callers' fallback chain
+    (project state -> runs/latest/train_config.json -> train meta) keeps
+    working.  Values are coerced to their declared types and validated
+    against the enumerated sets; every field the schema knows about survives.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    out: Dict[str, Any] = {}
+    for name in train_cfg_field_names():
+        if name not in src:
+            continue
+        keep, value = _coerce_train_cfg_value(name, src.get(name))
+        if keep:
+            out[name] = value
+    return out
+
+
+def missing_train_cfg_fields(saved: Any) -> List[str]:
+    """Schema fields a saved config does not carry — the legacy marker.
+
+    A v1 archive carries a 12-key train_cfg; a v2 one carries the lot.  The
+    load path reports the difference so a user opening an old project is told
+    which settings came back at their defaults, instead of discovering it
+    from a model trained with a different mix than the file implies.
+    """
+    src = saved if isinstance(saved, dict) else {}
+    return [n for n in train_cfg_field_names() if n not in src]
+
+
 _TFLITE_OP_RESOLVER_MAP = {
     "ADD": "Add",
     "AVERAGE_POOL_2D": "AveragePool2D",
@@ -190,7 +350,9 @@ _TFLITE_OP_RESOLVER_MAP = {
     "PAD": "Pad",
     "QUANTIZE": "Quantize",
     "DEQUANTIZE": "Dequantize",
+    "REDUCE_MAX": "ReduceMax",
     "RESHAPE": "Reshape",
+    "RSQRT": "Rsqrt",
     "SHAPE": "Shape",
     "SOFTMAX": "Softmax",
     "STRIDED_SLICE": "StridedSlice",
@@ -202,16 +364,51 @@ def _generate_model_resolver_h(tflite_bytes: bytes) -> str:
     ops = []
     try:
         import tensorflow as tf
-        interp = tf.lite.Interpreter(model_content=tflite_bytes)
+        # A default-constructed Interpreter applies the XNNPACK delegate at
+        # allocate_tensors().  That does two things to the graph we are about
+        # to read: it appends a node literally named `DELEGATE`, and it may
+        # FUSE real ops away.  Neither is what the device's TFLM interpreter
+        # runs, so the list read from it is the wrong list.  DELEGATE has no
+        # Add*() mapping, so every export would print a bogus "will OMIT
+        # DELEGATE" warning; worse, a fused-away op would be missing from the
+        # resolver entirely and the device would fail AllocateTensors() with
+        # only "AllocateTensors() failed" on the serial console.  Ask for the
+        # builtin kernels only.
+        try:
+            interp = tf.lite.Interpreter(
+                model_content=tflite_bytes,
+                experimental_op_resolver_type=(
+                    tf.lite.experimental.OpResolverType
+                    .BUILTIN_WITHOUT_DEFAULT_DELEGATES),
+            )
+        except Exception:
+            # Older (or future) TF without that enum: keep the plain
+            # constructor, but still drop DELEGATE by name so the fallback
+            # degrades to the pre-fix behaviour instead of warning forever.
+            interp = tf.lite.Interpreter(model_content=tflite_bytes)
         interp.allocate_tensors()
         for detail in interp._get_ops_details():
             op = str(detail.get("op_name") or "")
-            if op and op not in ops:
+            if op and op != "DELEGATE" and op not in ops:
                 ops.append(op)
     except Exception:
         pass
     if not ops:
         ops = ["CONV_2D", "MAX_POOL_2D", "SHAPE", "STRIDED_SLICE", "PACK", "RESHAPE", "FULLY_CONNECTED", "SOFTMAX"]
+    # An op with no Add*() mapping is NOT a cosmetic loss: the generated
+    # resolver would be missing that kernel, MicroInterpreter::AllocateTensors()
+    # would fail on the device, and the only symptom is a sketch that flashes
+    # and then prints "AllocateTensors() failed".  Say it here instead.
+    dropped = [op for op in ops if op not in _TFLITE_OP_RESOLVER_MAP]
+    if dropped:
+        print(
+            "[export] WARNING: model_resolver.h will OMIT "
+            + ", ".join(dropped)
+            + " — no mapping in _TFLITE_OP_RESOLVER_MAP. The device will fail "
+            "AllocateTensors(). Add the mapping (and make sure the TFLM build "
+            "ships that kernel) before flashing.",
+            file=sys.stderr,
+        )
     resolved = [op for op in ops if op in _TFLITE_OP_RESOLVER_MAP]
     if not resolved:
         resolved = ["CONV_2D", "FULLY_CONNECTED", "SOFTMAX"]
@@ -589,8 +786,16 @@ class RecordController:
                     "/dev/tty.bluetooth-incoming-port",
                     "/dev/tty.debug-console",
                 }
+                seen = set()
                 for p in list_serial_ports():
                     dev = str(p.device or "")
+                    # Skip entries we have already emitted — some adapters
+                    # enumerate the same COM port under multiple interface
+                    # descriptions, which would otherwise produce duplicate
+                    # dropdown entries.
+                    if dev in seen:
+                        continue
+                    seen.add(dev)
                     desc = str(getattr(p, "description", "") or "")
                     d_low = dev.strip().lower()
                     if d_low in blocked:
@@ -1282,6 +1487,26 @@ class RecordController:
             model_name = str(payload.get("model_name") or "model").strip() or "model"
             array_name = str(payload.get("array_name") or "g_model").strip() or "g_model"
             overwrite = _is_truthy(payload.get("overwrite"))
+            # Preview-time OOD + preprocessing thresholds, forwarded from the
+            # SPA so the device export stamps them into model_settings.h.
+            # Defaults mirror the predict endpoint so an export never ships a
+            # None / unset value.
+            def _num(key, default, cast=float):
+                raw = payload.get(key)
+                if raw is None or str(raw).strip() == "":
+                    return default
+                try:
+                    return cast(raw)
+                except (TypeError, ValueError):
+                    return default
+            runtime_config = {
+                "ood_sign_min": _num("ood_sign_min", 0.3),
+                "ood_sign_max": _num("ood_sign_max", 70.0),
+                "ood_max_prob": _num("ood_max_prob", 0.60),
+                "ood_entropy_max": _num("ood_entropy_max", 0.70),
+                "bg_dark_thresh": _num("bg_dark_thresh", 0, cast=int),
+                "bg_lum_thresh": _num("bg_lum_thresh", 100, cast=int),
+            }
             if not session_id or not export_dir:
                 _send_json(req, {"ok": "0", "error": "missing fields"}, status=400, cors=True)
                 return
@@ -1292,6 +1517,7 @@ class RecordController:
                     model_name=model_name,
                     array_name=array_name,
                     overwrite=overwrite,
+                    runtime_config=runtime_config,
                 )
             except ExportConflictError as e:
                 _send_json(
@@ -1951,11 +2177,21 @@ class RecordController:
     def _train_result_path(self, dataset_root: Path) -> Path:
         return dataset_root.parent / "tm_train_latest.json"
 
-    def _export_run(self, session_id: str, export_dir: Path, model_name: str, array_name: str, overwrite: bool = False) -> Path:
+    def _export_run(self, session_id: str, export_dir: Path, model_name: str, array_name: str, overwrite: bool = False, runtime_config: Optional[Dict[str, Any]] = None) -> Path:
         with self._lock:
             cfg = self._configs.get(session_id)
         if cfg is None:
             raise RuntimeError("missing config")
+        # Preview-time OOD + preprocessing thresholds. Fall back to the same
+        # defaults the /preview/predict endpoint uses so the device header is
+        # always self-contained even if the SPA didn't send a value.
+        rc = runtime_config if isinstance(runtime_config, dict) else {}
+        ood_sign_min = float(rc.get("ood_sign_min", 0.3))
+        ood_sign_max = float(rc.get("ood_sign_max", 70.0))
+        ood_max_prob = float(rc.get("ood_max_prob", 0.60))
+        ood_entropy_max = float(rc.get("ood_entropy_max", 0.70))
+        bg_dark_thresh = int(rc.get("bg_dark_thresh", 0))
+        bg_lum_thresh = int(rc.get("bg_lum_thresh", 100))
         latest = self._train_result_path(cfg.dataset_root)
         if not latest.exists():
             raise RuntimeError("missing trained model")
@@ -2019,6 +2255,20 @@ class RecordController:
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
         h_guard = "TFLITE_MODEL_SETTINGS_H_"
+        # OCR projects feed the device a 28x28 glyph canvas built by the
+        # integer-exact front-end (ocr_glyph.c), not the 96x96 sign pipeline.
+        # The two device sketches are separate folders now, and each one
+        # #errors if handed the other's export — so this macro travels with the
+        # model and IS the routing decision.  A project type is a property of
+        # the export, not of the sketch that happens to compile it.
+        # Detected two ways on purpose: the project type is authoritative, and
+        # the "_background" class is the contract the device itself keys on
+        # (background_class_id()), so an export carrying one needs the flag
+        # even if its project_type metadata says otherwise.
+        ocr_export = (
+            str(getattr(cfg, "project_type", "") or "").strip().lower() == PROJECT_TYPE_OCR
+            or any(str(x).strip().lower() == "_background" for x in labels)
+        )
         model_settings_h = "\n".join(
             [
                 "/*",
@@ -2034,8 +2284,33 @@ class RecordController:
                 "",
                 "constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;",
                 "",
+                # 1 = OCR glyph model (28x28 canvas, "_background" rejector,
+                # ocr_glyph.c front-end) / 0 = legacy 96x96 sign model.
+                "// TM_OCR_GLYPH_MODEL says which device sketch this model belongs to:",
+                "//   1 = TFLite_OCR/ (28x28 glyph canvas, \"_background\" rejector)",
+                "//   0 = TFLite/ (legacy 96x96 crop/resize/contrast-stretch)",
+                "// Each sketch #errors if it is handed the other one's export.",
+                "#define TM_OCR_GLYPH_MODEL " + ("1" if ocr_export else "0"),
+                "",
                 "constexpr int kCategoryCount = " + str(int(len(labels))) + ";",
                 "extern const char* kCategoryLabels[kCategoryCount];",
+                "",
+                "// ── Runtime tuning exported from the Preview panel ───────────────",
+                "// OOD (out-of-distribution) rejection thresholds.  The device loop",
+                "// uses these the same way the Python preview does so a sign is only",
+                "// accepted when sign_pct is in range, max softmax prob is high",
+                "// enough, and entropy is low enough.",
+                "constexpr float kOodSignMinPct = " + f"{ood_sign_min:.6f}f;",
+                "constexpr float kOodSignMaxPct = " + f"{ood_sign_max:.6f}f;",
+                "constexpr float kOodMaxProbMin = " + f"{ood_max_prob:.6f}f;",
+                "constexpr float kOodEntropyRatioMax = " + f"{ood_entropy_max:.6f}f;",
+                "",
+                "// Preprocessing brightness/darkness thresholds used by the device",
+                "// sign-search front-end.  Pixels darker than kBgDarkThresh become",
+                "// white (shadow/background); pixels above kBgLumThresh are treated",
+                "// as background.  Values are 0-255 (luma).",
+                "constexpr int kBgDarkThresh = " + str(int(bg_dark_thresh)) + ";",
+                "constexpr int kBgLumThresh = " + str(int(bg_lum_thresh)) + ";",
                 "",
                 f"#endif  // {h_guard}",
                 "",
@@ -2153,11 +2428,26 @@ class RecordController:
         # back to the right workspace — so it is written here, in the one
         # manifest writer, rather than inferred from the payload later.
         project_type = str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE)
-        merged_project_state["project_type"] = project_type
-        manifest = {
+        # Header first, and in BOTH halves of the archive: the manifest is the
+        # door (a reader classifies the file without parsing anything else),
+        # and the state file repeats it so the half carrying the settings is
+        # self-describing too — a bug report pasted from disk, or a future
+        # import tool handed only tm_project_state.json, can still tell what
+        # it is holding and whether it predates the complete train_cfg.
+        merged_project_state.update(project_header(project_type))
+        # The snapshot inside train_cfg is reconciled the same way, so the
+        # archive cannot disagree with itself: whatever the session was when
+        # it saved is what a later open must report, regardless of what the
+        # client put in the payload.
+        _saved_train_cfg = merged_project_state.get("train_cfg")
+        if isinstance(_saved_train_cfg, dict):
+            _saved_train_cfg["project_type"] = project_type
+            _saved_train_cfg["img_size"] = int(cfg.img_size)
+        manifest: Dict[str, Any] = {
+            **project_header(project_type),
+            # The v1 spelling of the same thing the magic says.  Kept so a
+            # reader written against the old format still recognises the file.
             "format": "tmproj",
-            "version": 1,
-            "project_type": project_type,
             # Persisted alongside the type so reopening restores the model
             # input size too (the processed cache in the archive is already
             # at this size — a reopen that guessed 96 would silently let a
@@ -2182,11 +2472,22 @@ class RecordController:
         sample_preprocess = normalize_sample_preprocess_map(merged_project_state.get("sample_preprocess"))
         if processed_cache_dir.exists():
             shutil.rmtree(processed_cache_dir)
+        # The global mode is the FALLBACK for a class with no entry of its own,
+        # so it has to come from the same place the session reads it — the
+        # train_cfg the SPA actually edits.  (It used to be read from a root
+        # key no writer ever set, which meant a save always rebuilt the cache
+        # with the default mode.)
+        _state_train_cfg = merged_project_state.get("train_cfg")
+        _state_mode = ""
+        if isinstance(_state_train_cfg, dict):
+            _state_mode = str(_state_train_cfg.get("preprocess_mode") or "")
         self._rebuild_processed_cache(
             dataset_root,
             class_preprocess=class_preprocess,
             sample_preprocess=sample_preprocess,
-            global_preprocess_mode=str(merged_project_state.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL),
+            global_preprocess_mode=str(
+                _state_mode or merged_project_state.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL
+            ),
             out_size=int(cfg.img_size),
             project_type=project_type,
         )
@@ -2201,6 +2502,26 @@ class RecordController:
             for class_dir in sorted([d for d in dataset_root.iterdir() if d.is_dir()]):
                 sample_order[str(class_dir.name)] = [p.name for p in _list_class_image_files(class_dir)]
         manifest["sample_order"] = sample_order
+
+        # ── Flush the client's preprocessing settings into tm_classes.json ──
+        # The archive carries tm_classes.json verbatim, so a setting the
+        # payload reports but the file was never told would be SAVED AS
+        # SOMETHING ELSE — the reader would show a value the writer never
+        # agreed to.  class_preprocess has its own endpoint (/classes/
+        # save_config) that persists on every edit; sample_preprocess has no
+        # such writer and lives in the SPA until something flushes it.  This
+        # is that flush, and it happens before the zip is opened so both
+        # halves of the archive carry the same settings.
+        if isinstance(project_state, dict) and (
+            project_state.get("class_preprocess") is not None
+            or project_state.get("sample_preprocess") is not None
+        ):
+            self._classes_save(
+                dataset_root,
+                self._classes_load(dataset_root),
+                class_preprocess=merged_project_state.get("class_preprocess"),
+                sample_preprocess=merged_project_state.get("sample_preprocess"),
+            )
 
         tmp_path = save_path.with_suffix(".tmproj.tmp")
         if tmp_path.exists():
@@ -2290,19 +2611,32 @@ class RecordController:
             if not in_dataset.exists():
                 raise ValueError("missing dataset")
 
+            # What kind of file is this?  Not a gate — every v1 archive on a
+            # user's disk still opens — but the answer decides how much of the
+            # rest of the payload to trust, and gets reported back so the UI
+            # can tell the user which settings came back at their defaults.
+            header = read_project_header(manifest)
+
             # Adopt the archived project type BEFORE anything re-preprocesses
             # a sample, so every later capture / preview / training of this
             # session uses the transform the file was built with.  Old
             # archives have no such key and stay image projects.
             archived_type = str(manifest.get("project_type") or "").strip().lower()
-            if archived_type in KNOWN_PROJECT_TYPES:
-                self.update_config(session_id, project_type=archived_type)
+            resolved_type = archived_type if archived_type in KNOWN_PROJECT_TYPES else ""
+            if resolved_type:
+                self.update_config(session_id, project_type=resolved_type)
+            # Resolved here, not just applied: the state payload below has to
+            # report the size and type the session is ACTUALLY running with,
+            # or the SPA keeps displaying the previous project's 96 while the
+            # backend has already switched to 28.
+            resolved_size = 0
             archived_size = manifest.get("img_size")
             if archived_size not in (None, ""):
                 try:
                     size = int(archived_size)
                     if 8 <= size <= 512:
                         self.update_config(session_id, img_size=size)
+                        resolved_size = size
                 except Exception:
                     pass
 
@@ -2386,6 +2720,32 @@ class RecordController:
                         project_state = loaded
                 except Exception:
                     project_state = None
+            if project_state is None:
+                project_state = {}
+            # Reconcile the two halves of the archive.  The manifest is the
+            # header (written by the one save path from the session's own
+            # config); the state file is whatever the saver happened to
+            # snapshot, and a v1 one carries no project_type at all.  So the
+            # manifest wins where the two disagree, and the state is filled in
+            # where it is silent — otherwise a legacy project reopens with the
+            # SPA still gating the PREVIOUS project's workspace.
+            state_cfg = project_state.get("train_cfg")
+            # Measured from the FILE's own contents, before anything below is
+            # added to it: a setting the manifest supplied is a value the user
+            # chose when they saved, not a default filled in on load.
+            missing = missing_train_cfg_fields(state_cfg)
+            if not isinstance(state_cfg, dict):
+                state_cfg = {}
+                project_state["train_cfg"] = state_cfg
+            if resolved_type:
+                project_state["project_type"] = resolved_type
+                state_cfg["project_type"] = resolved_type
+            if resolved_size:
+                state_cfg["img_size"] = resolved_size
+            project_state["project_format"] = {
+                **header,
+                "missing_train_cfg_fields": missing,
+            }
             return self._project_state_payload(dataset_root, project_state=project_state)
         finally:
             if tmp_dir.exists():
@@ -2445,59 +2805,18 @@ class RecordController:
     def _project_train_cfg(
         self, dataset_root: Path, project_state: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        def _pick_cfg(raw: Any) -> Dict[str, Any]:
-            src = raw if isinstance(raw, dict) else {}
-            out: Dict[str, Any] = {}
-            int_fields = {
-                "batch_size": 16,
-                "epochs": 10,
-                "conv1_filters": 8,
-                "conv2_filters": 16,
-                "dense_units": 32,
-            }
-            float_fields = {
-                "validation_split": 0.2,
-                "learning_rate": 0.001,
-            }
-            for key, fallback in int_fields.items():
-                if key not in src:
-                    continue
-                try:
-                    out[key] = int(src.get(key))
-                except Exception:
-                    out[key] = int(fallback)
-            for key, fallback in float_fields.items():
-                if key not in src:
-                    continue
-                try:
-                    out[key] = float(src.get(key))
-                except Exception:
-                    out[key] = float(fallback)
-            preprocess_mode = str(src.get("preprocess_mode") or "").strip().lower()
-            if preprocess_mode in {"auto_by_label", "manual_roi"}:
-                out["preprocess_mode"] = preprocess_mode
-            manual_roi = normalize_manual_roi(src.get("manual_roi"))
-            if manual_roi is not None:
-                out["manual_roi"] = list(manual_roi)
-            class_preprocess = normalize_class_preprocess_map(src.get("class_preprocess"))
-            if class_preprocess:
-                out["class_preprocess"] = class_preprocess
-            sample_preprocess = normalize_sample_preprocess_map(src.get("sample_preprocess"))
-            if sample_preprocess:
-                out["sample_preprocess"] = sample_preprocess
-            project_type = str(src.get("project_type") or "").strip().lower()
-            if project_type in KNOWN_PROJECT_TYPES:
-                out["project_type"] = project_type
-            return out
-
+        # Three sources, most authoritative first: the state being saved (or
+        # the one that was just loaded), the run's own train_config.json, and
+        # the train meta.  Each is projected through the SAME schema, so a
+        # field cannot survive from one source and vanish from another.
         if isinstance(project_state, dict):
-            cfg = _pick_cfg(project_state.get("train_cfg"))
+            cfg = pick_train_cfg(project_state.get("train_cfg"))
             if cfg:
                 return cfg
         run_cfg = dataset_root.parent / "runs" / "latest" / "train_config.json"
         if run_cfg.exists():
             try:
-                cfg = _pick_cfg(json.loads(run_cfg.read_text(encoding="utf-8")))
+                cfg = pick_train_cfg(json.loads(run_cfg.read_text(encoding="utf-8")))
                 if cfg:
                     return cfg
             except Exception:
@@ -2507,7 +2826,7 @@ class RecordController:
             try:
                 meta = json.loads(latest.read_text(encoding="utf-8"))
                 if isinstance(meta, dict):
-                    return _pick_cfg(meta)
+                    return pick_train_cfg(meta)
             except Exception:
                 pass
         return {}
@@ -2884,6 +3203,22 @@ class RecordController:
             project_type = str(project_state.get("project_type") or "").strip().lower()
             if project_type in KNOWN_PROJECT_TYPES:
                 payload["project_type"] = project_type
+            # The Preview pane's gates.  They are not training parameters, but
+            # they ARE deployment parameters: buildExportRuntimeConfig() stamps
+            # them into model_settings.h as the device's OOD thresholds.  A
+            # project that reopened them at 0.3/70/0.60/0.70 after the user
+            # tuned them would re-export a device with different gates than
+            # the one that is running.  Echoed verbatim — it is a flat block of
+            # UI state that no normaliser owns.
+            preview = project_state.get("preview")
+            if isinstance(preview, dict):
+                payload["preview"] = dict(preview)
+        # What the archive said about itself, when the caller resolved one
+        # (the open path).  Absent on a fresh payload, which is how the SPA
+        # tells "just started" from "opened an old file".
+        project_format = project_state.get("project_format") if isinstance(project_state, dict) else None
+        if isinstance(project_format, dict):
+            payload["project_format"] = dict(project_format)
         return payload
 
     def _preview_model_lock(self, session_id: str) -> threading.Lock:

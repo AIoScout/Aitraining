@@ -47,6 +47,62 @@ DEFAULT_IMG_SIZE_BY_PROJECT = {
     PROJECT_TYPE_OCR: 28,
 }
 
+# ── .tmproj format header ───────────────────────────────────────────────
+# Also the ONE place these are named: the writer (record_controller
+# ._project_save) and every reader (the open path, the Start Page's file
+# picker) import them from here, so "which version is this file?" can never
+# be answered differently in two places.
+#
+# The magic string exists because a .tmproj is a ZIP: without it, a reader
+# handed the wrong kind of archive (a bare dataset zip, a renamed directory)
+# would fail somewhere deep in the extraction instead of at the door.  It is
+# stored under "_magic" — leading underscore, like every other metadata key
+# the format reserves — so it cannot collide with a project folder name.
+PROJECT_MAGIC = "TFLITE_TRAINER_PROJ"
+# Bumped when the archive's LAYOUT or the set of required state changes.
+# 1.0 -> 2.0: the manifest gained the magic + header, and train_cfg became a
+# complete TrainConfig snapshot rather than the 12-field subset v1 wrote.
+PROJECT_FORMAT_VERSION = "2.0"
+# What a file with no header at all is assumed to be.  Every archive written
+# before this header existed is readable — but only because the load path
+# treats a missing key as "keep the smart default", never as an error.
+PROJECT_FORMAT_LEGACY = "1.0"
+
+
+def project_header(project_type: object) -> Dict[str, object]:
+    """The metadata header stamped at the root of a saved project.
+
+    Written to BOTH the manifest and the project-state JSON, so each half of
+    the archive identifies itself: a reader that only has the state file
+    (a future import tool, a bug report pasted from disk) can still tell what
+    it is holding and whether it predates the complete-train_cfg snapshot.
+    """
+    return {
+        "_magic": PROJECT_MAGIC,
+        "version": PROJECT_FORMAT_VERSION,
+        "project_type": str(project_type or PROJECT_TYPE_IMAGE).strip().lower(),
+    }
+
+
+def read_project_header(manifest: object) -> Dict[str, object]:
+    """Classify a manifest/state dict by its header.
+
+    Returns the magic, the version, and `legacy` — True when the file carries
+    no magic, i.e. it was written before this header existed or by something
+    that is not this app.  Callers use `legacy` to decide how much to trust
+    the rest of the payload, not to reject it: an unreadable-by-default
+    format would strand every project a user already saved.
+    """
+    src = manifest if isinstance(manifest, dict) else {}
+    magic = str(src.get("_magic") or "").strip()
+    version = str(src.get("version") or "").strip() or PROJECT_FORMAT_LEGACY
+    return {
+        "magic": magic,
+        "version": version,
+        "known": magic == PROJECT_MAGIC,
+        "legacy": magic != PROJECT_MAGIC,
+    }
+
 
 def default_img_size(project_type: object) -> int:
     """Model input side for a project type (falls back to the image project)."""
