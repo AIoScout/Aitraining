@@ -2577,6 +2577,80 @@ def _render_tm_old_frontend_html(
     }}
     .addclass .addclass-icon {{ display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; }}
     .addclass .addclass-icon svg {{ width: 18px; height: 18px; display: block; }}
+    /* ── OCR character selector ──────────────────────────────────────────
+       Occupies the same slot as .addclass, and only in OCR projects.  Its job
+       is to be the *entry point* to the class list, not a second class list:
+       every chip writes through the normal class state and the normal card
+       renderer, so this file owns no capture, preview or card styling. */
+    .charsel {{
+      border: 1px solid #CBD5E1;
+      background: #F8FAFC;
+      border-radius: 12px;
+      padding: 14px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .charsel-head {{ display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }}
+    .charsel-title {{ font-family: inherit; font-size: 14px; font-weight: 700; color: #0F172A; }}
+    .charsel-count {{ font-family: inherit; font-size: 12px; font-weight: 600; color: #475569; }}
+    .charsel-help {{ font-family: inherit; font-size: 12px; line-height: 1.45; color: #475569; }}
+    /* 9 columns fits A-Z then 0-9 as four tidy rows of a 500px column. */
+    .charsel-grid {{ display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 6px; }}
+    .charchip {{
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid #CBD5E1;
+      background: #fff;
+      color: #0F172A;
+      border-radius: 8px;
+      height: 34px;
+      padding: 0;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    }}
+    .charchip:hover:not(:disabled) {{ border-color: #3169FF; color: #3169FF; background: #F0F4FF; }}
+    /* A chip that is already a class renders as the selected state — :disabled
+       rather than a JS flag, so the "cannot add twice" rule and the visual are
+       the same fact. */
+    .charchip:disabled {{ background: #E8F0FE; border-color: #3169FF; color: #1a73e8; cursor: default; }}
+    .charchip:disabled::after {{ content: '✓'; margin-left: 3px; font-size: 11px; }}
+    .charsel-row {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .charsel-btn {{
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid #CBD5E1;
+      background: #fff;
+      color: #475569;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    }}
+    .charsel-btn:hover:not(:disabled) {{ border-color: #3169FF; color: #3169FF; background: #F0F4FF; }}
+    .charsel-btn:disabled {{ opacity: 0.45; cursor: default; }}
+    .charsel-input {{
+      flex: 1 1 120px;
+      min-width: 110px;
+      border: 1px solid #CBD5E1;
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-family: inherit;
+      font-size: 13px;
+      color: #0F172A;
+      background: #fff;
+    }}
+    .charsel-input:focus {{ outline: none; border-color: #3169FF; }}
+    .charsel-input::placeholder {{ color: #94A3B8; }}
     .train-card, .preview-card {{ padding: 16px 18px 18px 18px; position: relative; }}
     .card-head {{
       display: flex;
@@ -3565,6 +3639,16 @@ def _render_tm_old_frontend_html(
       .divider {{ background: rgba(255,255,255,0.1); }}
       .addclass {{ border-color: #CBD5E1; color: #475569; }}
       .addclass:hover {{ border-color: #3169FF; color: #3169FF; background: #F0F4FF; }}
+      .charsel {{ border-color: rgba(255,255,255,0.14); background: rgba(255,255,255,0.04); }}
+      .charsel-title {{ color: #e8eaed; }}
+      .charsel-count, .charsel-help {{ color: #9aa0a6; }}
+      .charchip {{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #e8eaed; }}
+      .charchip:hover:not(:disabled) {{ border-color: #8ab4f8; color: #8ab4f8; background: rgba(138,180,248,0.12); }}
+      .charchip:disabled {{ border-color: #8ab4f8; color: #8ab4f8; background: rgba(138,180,248,0.18); }}
+      .charsel-btn {{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #9aa0a6; }}
+      .charsel-btn:hover:not(:disabled) {{ border-color: #8ab4f8; color: #8ab4f8; background: rgba(138,180,248,0.12); }}
+      .charsel-input {{ border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); color: #e8eaed; }}
+      .charsel-input::placeholder {{ color: #80868b; }}
       /* Toolbar + settings modal dark overrides (Problem 2+3.2) */
       .topnav {{ border-color: rgba(255,255,255,0.08); }}
       .tm-toolbar-brand {{ border-color: rgba(255,255,255,0.1); }}
@@ -8874,6 +8958,183 @@ async function addClass() {{
     toast(String(err && err.message ? err.message : err));
   }}
 }}
+// ── OCR character selector ──────────────────────────────────────────────
+// In an OCR project the user already knows the target is one of A-Z/0-9, so
+// the image-project order of operations — invent a class, then rename it to
+// what you actually meant — asks the question backwards.  This panel replaces
+// the "Add a class" node for OCR projects only.
+//
+// It renders no cards and owns no capture state.  Choosing characters writes
+// STATE.classes through the same applyClassesState() + render() pair that
+// addClass() uses, so the cards, sample strips, webcam panels, drag-reorder
+// and per-class editors below are the untouched image-project code with a
+// different name in them.  Nothing here knows what a sample is.
+const OCR_CHAR_GRID = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('');
+
+// Outside the panel because the panel does not control its own lifetime: any
+// class edit rebuilds this whole column, and a half-typed entry should not go
+// with it.
+let ocrCharDraft = '';
+
+// The characters that already have a class, and the class name holding each.
+// Derived from STATE.classes rather than tracked alongside it, so there is one
+// source of truth: rename a card to "Q" and the Q chip lights up, delete it and
+// the chip clears, and a class named "sign" (typed here, or imported) simply
+// has no chip while still rendering as an ordinary card.
+function ocrTrainedChars() {{
+  const out = {{}};
+  (Array.isArray(STATE.classes) ? STATE.classes : []).forEach((raw) => {{
+    const ch = String(raw == null ? '' : raw).trim().toUpperCase();
+    if (ch.length === 1) out[ch] = String(raw);
+  }});
+  return out;
+}}
+
+// One round-trip for the whole selection.  Chaining addClass() instead would
+// allocate "Class N" names — not the characters the user picked — and redraw
+// the column once per character.
+//
+// fromDraft: the free-text box sent this.  The draft is cleared *before*
+// render(), because render() rebuilds the box from it and would otherwise
+// repaint the text the user just submitted.
+async function addOcrCharacters(chars, fromDraft) {{
+  const want = (Array.isArray(chars) ? chars : [])
+    .map((c) => String(c == null ? '' : c).trim())
+    .filter((c, i, all) => c && all.indexOf(c) === i);
+  if (!want.length) return true;
+  try {{
+    const prev = STATE.classes.slice();
+    const res = await fetch(`${{baseUrl}}/classes/add_named`, {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      // prune_placeholders: a fresh project seeds "Class 1"/"Class 2" so the
+      // image flow always has something to train.  In OCR they are dead
+      // weight, so the first character picked clears them out in the same
+      // write.  The server only removes ones that are still empty and still
+      // auto-named — a placeholder someone has captured into is left alone.
+      body: JSON.stringify({{session: STATE.session, names: want, prune_placeholders: true}})
+    }});
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to add characters.');
+    if (fromDraft) ocrCharDraft = '';
+    // The server is authoritative and returns the whole ordered list; the
+    // fallback keeps the column honest if it ever answers without one.
+    applyClassesState(Array.isArray(data.classes) ? data.classes : prev, prev);
+    recomputeTrainEnabled();
+    refreshTrainRec();
+    render();
+    return true;
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+    return false;
+  }}
+}}
+
+function renderOcrCharacterSelector(root) {{
+  const have = ocrTrainedChars();
+  const panel = document.createElement('div');
+  panel.className = 'charsel';
+
+  const head = document.createElement('div');
+  head.className = 'charsel-head';
+  const title = document.createElement('div');
+  title.className = 'charsel-title';
+  title.textContent = 'Characters to train';
+  const count = document.createElement('div');
+  count.className = 'charsel-count';
+  const n = Array.isArray(STATE.classes) ? STATE.classes.length : 0;
+  count.textContent = n === 1 ? '1 class' : `${{n}} classes`;
+  head.appendChild(title);
+  head.appendChild(count);
+  panel.appendChild(head);
+
+  const help = document.createElement('div');
+  help.className = 'charsel-help';
+  help.textContent = 'Pick the characters this model should recognise. Each one becomes a normal class card below — capture samples for it the way you would in any project.';
+  // A fresh project seeds two "Class N" placeholders so the image flow always
+  // has something to train.  They are dead weight in an OCR project, so the
+  // add call asks the server to clear them out (see addOcrCharacters) — but
+  // only ones that are still empty AND still wearing an auto-generated name,
+  // so a placeholder someone has captured into is never touched.  Naming them
+  // here sets that expectation before the first click, rather than letting two
+  // cards vanish unexplained.
+  const placeholders = (Array.isArray(STATE.classes) ? STATE.classes : []).filter((c) => {{
+    const name = String(c == null ? '' : c);
+    const count = Number(STATE.counts ? STATE.counts[name] : 0) || 0;
+    return count === 0 && /^Class [0-9]+$/.test(name.trim());
+  }});
+  if (placeholders.length) {{
+    const one = placeholders.length === 1;
+    help.textContent += ` The empty placeholder${{one ? '' : 's'}} ${{placeholders.join(', ')}} ${{one ? 'is' : 'are'}} still in the list, and will be removed automatically as soon as you pick a character.`;
+  }}
+  panel.appendChild(help);
+
+  const grid = document.createElement('div');
+  grid.className = 'charsel-grid';
+  OCR_CHAR_GRID.forEach((ch) => {{
+    const on = !!have[ch];
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'charchip';
+    chip.textContent = ch;
+    // A disabled button cannot fire the click that would add it twice, so the
+    // "already selected" rule and its appearance are the same fact.
+    chip.disabled = on;
+    chip.title = on
+      ? `Already training as "${{have[ch]}}" — delete that card to remove it.`
+      : `Add ${{ch}} as a class`;
+    if (!on) chip.onclick = () => addOcrCharacters([ch]);
+    grid.appendChild(chip);
+  }});
+  panel.appendChild(grid);
+
+  const row = document.createElement('div');
+  row.className = 'charsel-row';
+
+  const bulk = (label, chars) => {{
+    const todo = chars.filter((c) => !have[c]);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'charsel-btn';
+    btn.textContent = label;
+    btn.disabled = !todo.length;
+    btn.onclick = () => addOcrCharacters(todo);
+    return btn;
+  }};
+  row.appendChild(bulk('+ A–Z', OCR_CHAR_GRID.slice(0, 26)));
+  row.appendChild(bulk('+ 0–9', OCR_CHAR_GRID.slice(26)));
+
+  const input = document.createElement('input');
+  input.className = 'charsel-input';
+  input.type = 'text';
+  input.placeholder = 'Others, e.g. A B C 1,2';
+  input.value = ocrCharDraft;
+  input.oninput = () => {{ ocrCharDraft = input.value; }};
+  const commit = () => {{
+    // Accepts "ABC", "A B C" and "A,B,C" alike.  Splitting on runs of
+    // non-alphanumerics also lets a multi-character label like "STOP" through
+    // intact, for OCR work that is not single-glyph.
+    const parts = ocrCharDraft.split(/[^0-9A-Za-z]+/).filter(Boolean);
+    if (!parts.length) return Promise.resolve(false);
+    // Returned, not dropped: the caller can then wait for the class list to
+    // actually land before touching the DOM again.
+    return addOcrCharacters(parts, true);
+  }};
+  input.onkeydown = (e) => {{
+    if (e.key === 'Enter') {{ e.preventDefault(); commit(); }}
+  }};
+  row.appendChild(input);
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'charsel-btn';
+  addBtn.textContent = 'Add';
+  addBtn.onclick = commit;
+  row.appendChild(addBtn);
+
+  panel.appendChild(row);
+  root.appendChild(panel);
+}}
 async function deleteClass(name) {{
   if (STATE.classes.length <= 2) {{
     showTrainWarningModal('Cannot delete class.|At least two classes are required — a project cannot have fewer than 2 classes.');
@@ -9653,11 +9914,19 @@ function render() {{
     }}
   }}
   try {{
-    const add = document.createElement('div');
-    add.className = 'addclass';
-    add.innerHTML = `<span class="addclass-icon">${{createIcon('plus')}}</span><span>Add a class</span>`;
-    add.onclick = () => addClass();
-    root.appendChild(add);
+    if (isOcrProject()) {{
+      // OCR: characters first, cards follow.  This writes the same
+      // STATE.classes the card loop above just read, so what it produces are
+      // the ordinary cards — the selector is the only thing in this column
+      // that differs between an OCR project and an image project.
+      renderOcrCharacterSelector(root);
+    }} else {{
+      const add = document.createElement('div');
+      add.className = 'addclass';
+      add.innerHTML = `<span class="addclass-icon">${{createIcon('plus')}}</span><span>Add a class</span>`;
+      add.onclick = () => addClass();
+      root.appendChild(add);
+    }}
 
     const trainBtn = document.getElementById('trainBtn');
     recomputeTrainEnabled();

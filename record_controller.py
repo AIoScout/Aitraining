@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import shutil
 import socket
 import subprocess
@@ -1033,6 +1034,7 @@ class RecordController:
             "/project/reset",
             "/classes/rename",
             "/classes/add",
+            "/classes/add_named",
             "/classes/delete",
             "/samples/delete",
             "/samples/clear",
@@ -1382,6 +1384,29 @@ class RecordController:
                 return
             _send_json(req, {"ok": "1", "classes": classes}, cors=True)
             return
+        if path == "/classes/add_named":
+            # Same response shape as /classes/add so the two are interchangeable
+            # on the client: both hand back the whole ordered class list, which
+            # is what applyClassesState() wants.
+            session_id = str(payload.get("session") or "").strip()
+            names = payload.get("names")
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            if not isinstance(names, list) or not names:
+                _send_json(req, {"ok": "0", "error": "missing names"}, status=400, cors=True)
+                return
+            try:
+                classes = self._classes_add_named(
+                    session_id=session_id,
+                    names=names,
+                    prune_empty_placeholders=bool(payload.get("prune_placeholders")),
+                )
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {"ok": "1", "classes": classes}, cors=True)
+            return
         if path == "/samples/delete":
             session_id = str(payload.get("session") or "").strip()
             class_name = str(payload.get("class") or "").strip()
@@ -1564,6 +1589,134 @@ class RecordController:
         class_preprocess = self._class_preprocess_load(cfg.dataset_root)
         sample_preprocess = self._sample_preprocess_load(cfg.dataset_root)
         classes = list(classes) + [self._next_class_name(classes)]
+        self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
+        return classes
+
+    # The names _next_class_name / _tm_apply_project_defaults hand out.  A
+    # class still wearing one has never been named by anyone, which is what
+    # makes it safe to clean up without asking.
+    _PLACEHOLDER_CLASS_RE = re.compile(r"^Class [0-9]+$")
+
+    def _is_empty_placeholder(self, dataset_root: Path, name: str) -> bool:
+        """True for an untouched auto-named class: "Class N" with zero samples.
+
+        The sample test uses _list_class_image_files — the same helper the
+        workspace payload counts with — so the rule matches the number the user
+        sees on the card.  Anything unreadable is KEPT: this decides whether to
+        delete someone's class, so it fails closed.
+        """
+        if not self._PLACEHOLDER_CLASS_RE.match(str(name).strip()):
+            return False
+        class_dir = dataset_root / sanitize_class_name(name)
+        if not class_dir.exists():
+            return True  # never captured into — the directory is created lazily
+        try:
+            return len(_list_class_image_files(class_dir)) == 0
+        except Exception:
+            return False
+
+    def _classes_add_named(
+        self,
+        session_id: str,
+        names: List[Any],
+        prune_empty_placeholders: bool = False,
+    ) -> List[str]:
+        """Add classes under caller-chosen names — the OCR character selector.
+
+        _classes_add invents "Class N"; this one takes the names the user
+        picked.  Nothing else differs, and deliberately so: a class in this
+        app is a string in an ordered list plus whatever class_preprocess /
+        sample_preprocess entries hang off it, and all of that materialises on
+        demand (directories on first capture, preprocess defaults out of
+        normalize_class_preprocess).  So appending the name IS creating the
+        class, and capture, preview, training and export already treat it as
+        first-class without being told it came from a selector.
+
+        Names that are already classes are skipped rather than rejected, so
+        the selector can resend its whole selection on every click and stay
+        idempotent.  Names that cannot be classes raise — those are bad input,
+        not races, and failing loudly beats writing a half-built list.
+
+        prune_empty_placeholders drops untouched "Class N" placeholders in the
+        SAME write, so the selector's first click leaves the user with the
+        characters they asked for and nothing else.  Only classes with zero
+        samples go, so a placeholder someone has captured into is never touched,
+        and nothing being added in this request can be a candidate — `added` is
+        disjoint from `classes` by the dedupe above.
+
+        Only the app's own naming convention is subject to this.  A user who
+        deliberately types "Class 1" as a character in an OCR project is
+        wearing the app's namespace, and an empty class by that name will be
+        cleaned up on the next pick — which is the intended trade.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        classes = self._classes_load(cfg.dataset_root)
+        class_preprocess = self._class_preprocess_load(cfg.dataset_root)
+        sample_preprocess = self._sample_preprocess_load(cfg.dataset_root)
+
+        # Reserved: the OCR trainer appends this one itself as the reject
+        # class (ocr_dataset.BACKGROUND_CLASS_NAME).  A user class by that
+        # name would give the model two heads wearing one label.  Imported
+        # here rather than at module scope to keep this module independent of
+        # the OCR stack.
+        from ocr_dataset import BACKGROUND_CLASS_NAME
+
+        # Collisions are judged on the sanitised, lowercased name, because
+        # that is what actually collides: sanitize_class_name is what turns a
+        # class into a directory, so two classes that sanitise alike share
+        # their samples.  Case-insensitivity also stops "a" and "A" becoming
+        # two model outputs nobody can tell apart on the device.
+        taken = {sanitize_class_name(str(c)).lower() for c in classes}
+        reserved = {
+            BACKGROUND_CLASS_NAME.lower(),
+            sanitize_class_name(BACKGROUND_CLASS_NAME).lower(),
+        }
+
+        added: List[str] = []
+        for raw in names:
+            name = str(raw).strip()
+            if not name:
+                continue
+            if len(name) > 64:
+                raise ValueError(
+                    f"Class name is too long (max 64 characters): {name[:32]}..."
+                )
+            safe = sanitize_class_name(name)
+            if safe.lower() in reserved:
+                raise ValueError(f'"{name}" is reserved for the reject class.')
+            if safe.lower() in taken:
+                continue
+            taken.add(safe.lower())
+            added.append(name)
+
+        if not added:
+            return list(classes)  # nothing to do; not an error
+
+        if prune_empty_placeholders:
+            survivors = [c for c in classes if not self._is_empty_placeholder(cfg.dataset_root, c)]
+            dropped = [c for c in classes if c not in survivors]
+            if dropped:
+                # Mirror _classes_delete: a placeholder that is leaving takes
+                # its directory, its processed-cache directory and both of its
+                # preprocess entries with it.  Leaving any of them behind
+                # leaves a class that reappears on the next directory scan.
+                for name in dropped:
+                    class_preprocess.pop(name, None)
+                    sample_preprocess.pop(name, None)
+                    class_dir = cfg.dataset_root / sanitize_class_name(name)
+                    processed_dir = self._processed_cache_dir(cfg.dataset_root) / sanitize_class_name(name)
+                    for d in (class_dir, processed_dir):
+                        if d.exists():
+                            try:
+                                shutil.rmtree(d)
+                            except Exception:
+                                pass
+                classes = survivors
+
+        classes = list(classes) + added
         self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
         return classes
 
