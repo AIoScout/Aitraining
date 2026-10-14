@@ -553,6 +553,7 @@ class RecordController:
         serial_channels: Optional[int] = None,
         direct_tensor_stream: Optional[bool] = None,
         project_type: Optional[str] = None,
+        fps: Optional[float] = None,
     ) -> SessionConfig:
         with self._lock:
             cfg = self._configs.get(session_id)
@@ -561,6 +562,7 @@ class RecordController:
             updated = replace(
                 cfg,
                 project_type=str(cfg.project_type if project_type is None else project_type),
+                fps=float(cfg.fps if fps is None else fps),
                 webcam_index=int(cfg.webcam_index if webcam_index is None else webcam_index),
                 webcam_id=(str(cfg.webcam_id) if cfg.webcam_id else "") if webcam_id is None else str(webcam_id),
                 img_size=int(cfg.img_size if img_size is None else img_size),
@@ -862,9 +864,14 @@ class RecordController:
             serial_channels_raw = (qs.get("serial_channels") or [None])[0]
             direct_tensor_raw = (qs.get("direct_tensor_stream") or [None])[0]
             project_type_raw = (qs.get("project_type") or [None])[0]
+            fps_raw = (qs.get("fps") or [None])[0]
             try:
                 if serial_sync_raw not in (None, ""):
                     parse_sync_header(serial_sync_raw)
+                if fps_raw not in (None, ""):
+                    fps_val = float(fps_raw)
+                    if fps_val < 1.0 or fps_val > 60.0:
+                        raise ValueError("fps must be between 1 and 60")
                 if serial_frame_side_raw not in (None, ""):
                     side = int(float(serial_frame_side_raw))
                     if side < 8 or side > 512:
@@ -885,6 +892,7 @@ class RecordController:
                     serial_channels=None if serial_channels_raw in (None, "") else int(float(serial_channels_raw)),
                     direct_tensor_stream=None if direct_tensor_raw in (None, "") else direct_tensor_raw in ("1", "true", "True"),
                     project_type=None if project_type_raw in (None, "") else str(project_type_raw).strip().lower(),
+                    fps=None if fps_raw in (None, "") else float(fps_raw),
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -908,6 +916,11 @@ class RecordController:
                     "serial_sync": str(cfg.serial_sync),
                     "serial_frame_side": str(int(cfg.serial_frame_side)),
                     "serial_channels": str(int(cfg.serial_channels)),
+                    # Read-back for the Settings FPS field.  fps PACES the
+                    # record thread, so a page that showed its local default
+                    # (8.0) while the session actually ran at another rate was
+                    # reporting a number the capture did not obey.
+                    "fps": str(float(cfg.fps)),
                 },
                 cors=True,
             )
@@ -1403,6 +1416,7 @@ class RecordController:
         if path == "/classes/save_config":
             session_id = str(payload.get("session") or "").strip()
             class_preprocess = payload.get("class_preprocess")
+            sample_preprocess = payload.get("sample_preprocess")
             if not session_id:
                 _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
                 return
@@ -1413,10 +1427,22 @@ class RecordController:
                     _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
                     return
                 classes = self._classes_load(sess_cfg.dataset_root)
+                # BOTH maps, and each one only when the caller actually sent
+                # it: _classes_save treats None as "keep what is on disk", so a
+                # save that carries only one of them cannot blank the other.
+                # sample_preprocess had no writer at all before this — the Edit
+                # modal's per-sample ROI reached the disk only if the user
+                # happened to save the whole .tmproj, so a drag + "Save Sample"
+                # silently died on reload.
                 self._classes_save(
                     sess_cfg.dataset_root,
                     classes,
                     class_preprocess=normalize_class_preprocess_map(class_preprocess) if class_preprocess else None,
+                    # `is not None`, not truthiness: an EMPTY map is what the
+                    # client sends after removing the last sample override, and
+                    # that has to clear the stored map rather than be read as
+                    # "no opinion, keep what is on disk".
+                    sample_preprocess=normalize_sample_preprocess_map(sample_preprocess) if sample_preprocess is not None else None,
                 )
                 # Thresholds / ROI config changed — the processed cache must
                 # follow so previews and the next training use the new
@@ -1425,6 +1451,7 @@ class RecordController:
                     self._rebuild_processed_cache(
                         sess_cfg.dataset_root,
                         class_preprocess=normalize_class_preprocess_map(class_preprocess) if class_preprocess else None,
+                        sample_preprocess=normalize_sample_preprocess_map(sample_preprocess) if sample_preprocess is not None else None,
                         fast_mode=False,
                         out_size=int(sess_cfg.img_size),
                         project_type=str(sess_cfg.project_type),
@@ -4615,7 +4642,8 @@ class RecordController:
         last_saved_seen_ts: float = 0.0
         last_frame_at = time.time()
         while self._is_recording(session_id):
-            now = time.time()
+            iter_started = time.time()
+            now = iter_started
             capture_png: Optional[bytes] = None
             with self._lock:
                 state = self._live.get(key)
@@ -4653,8 +4681,12 @@ class RecordController:
             if cond is not None:
                 with cond:
                     cond.notify_all()
-            next_deadline = time.time() + float(interval)
-            sleep_s = next_deadline - time.time()
+            # Pace to a fixed PERIOD measured from the start of this iteration,
+            # so the sleep absorbs the save+preprocess time instead of being
+            # added to it.  Anchoring the deadline at "now" (after the work)
+            # made the real period work+interval -- a requested 8 fps delivered
+            # ~7.1, and the gap grew with the sample cost.
+            sleep_s = (iter_started + float(interval)) - time.time()
             if sleep_s > 0:
                 time.sleep(sleep_s)
 

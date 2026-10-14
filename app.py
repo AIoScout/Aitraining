@@ -5143,6 +5143,20 @@ function samePreprocessConfig(a, b) {{
   }}
   return true;
 }}
+// Written straight through, exactly like setClassPreprocessConfig does for the
+// class map.  Before this the per-sample ROI existed only in this tab: the Edit
+// modal's "Save Sample" flipped its chip to Saved, so the UI reported a write
+// that had never happened, and the next reload — or anything that reads
+// tm_classes.json instead of the page — was back to the old crop.  The whole
+// map is sent, not the one entry, because the endpoint REPLACES it: a sample
+// returning to its class default is a DELETE, which travels as a missing key.
+function persistSamplePreprocess(next) {{
+  fetch(`${{baseUrl}}/classes/save_config`, {{
+    method: 'POST',
+    headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{session: STATE.session, sample_preprocess: next}})
+  }}).catch(() => {{}});
+}}
 function setSamplePreprocessConfig(className, filename, cfg) {{
   const name = String(className || '').trim();
   const file = String(filename || '').trim();
@@ -5160,6 +5174,7 @@ function setSamplePreprocessConfig(className, filename, cfg) {{
     next[name][file] = normalized;
   }}
   STATE.sample_preprocess = next;
+  persistSamplePreprocess(next);
 }}
 function deleteSamplePreprocessConfig(className, filename) {{
   const next = normalizeSamplePreprocessMap(STATE.sample_preprocess || {{}});
@@ -5170,6 +5185,7 @@ function deleteSamplePreprocessConfig(className, filename) {{
     if (!Object.keys(next[name]).length) delete next[name];
   }}
   STATE.sample_preprocess = next;
+  persistSamplePreprocess(next);
 }}
 function selectedClassSample(className) {{
   const items = getClassPreprocessSamples(className);
@@ -6387,6 +6403,19 @@ async function closeSourcePanel(shouldRender = true) {{
   }}
   if (shouldRender && prevClass) render();
 }}
+// The class-panel source note is SHARED: hold capture writes "Captured: N" to
+// it once per saved sample, and this loop writes to it every tick.  At the
+// default rate the preview tick (80 ms) lands ~1.6 times per captured sample
+// (125 ms), so every blank here erases the counter inside the gap before the
+// next one is written — the only progress feedback a hold has flickers and
+// mostly reads as blank, and capture looks stalled while samples are in fact
+// being saved at the full rate.  While a hold is running on this class the
+// note belongs to the hold: this loop keeps replacing the IMAGE and leaves the
+// text alone.  A genuine preview failure is still reported — the record thread
+// has its own stall detector and surfaces it as a toast, so nothing is hidden.
+function noteHeldByCapture(className) {{
+  return !!(holdRecording && holdRecordClass && holdRecordClass === className);
+}}
 function refreshPreviewImage() {{
   if (!openSourceKind || !openSourceClass || openSourceKind === 'upload') return;
   if (classSourceRequestInFlight) {{
@@ -6436,10 +6465,10 @@ function refreshPreviewImage() {{
         // self-recovery path: a transient stall reads as a still image for
         // ≤1 tick, never as a permanent freeze.
         if (img.getAttribute('src')) {{
-          note.textContent = '';
+          if (!noteHeldByCapture(openSourceClass)) note.textContent = '';
           return;
         }}
-        note.textContent = msg || 'Preview starting...';
+        if (!noteHeldByCapture(openSourceClass)) note.textContent = msg || 'Preview starting...';
         return;
       }}
       throw new Error(msg);
@@ -6466,7 +6495,7 @@ function refreshPreviewImage() {{
     }}
     classSourceBlobUrl = URL.createObjectURL(blob);
     img.src = classSourceBlobUrl;
-    note.textContent = '';
+    if (!noteHeldByCapture(openSourceClass)) note.textContent = '';
   }}).catch((err) => {{
     if (ourController !== classSourceAbortController) return;
     if (err && (err.name === 'AbortError' || String(err).includes('aborted'))) return;
@@ -6475,7 +6504,7 @@ function refreshPreviewImage() {{
       classSourceBlobUrl = '';
     }}
     img.removeAttribute('src');
-    note.textContent = String(err && err.message ? err.message : err);
+    if (!noteHeldByCapture(openSourceClass)) note.textContent = String(err && err.message ? err.message : err);
   }}).finally(() => {{
     try {{ clearTimeout(abortTimer); }} catch (e) {{}}
     if (ourController === classSourceAbortController) {{
@@ -6886,6 +6915,12 @@ function openGlobalSettings() {{
     }}
     const fps = document.getElementById('settingsFps');
     if (fps) fps.value = Number(STATE.fps ?? 8.0);
+    // ...then ask the SERVER what it is actually pacing at.  fps is per
+    // session and outlives the page: set it to 20, reload, and the seeded
+    // value above would claim 8.0 while the record thread kept running at 20.
+    // The field is the only readout of the capture rate, so it reads it back
+    // from the authority rather than from a client constant.
+    syncFpsFromServer();
     const bSel = document.getElementById('settingsSerialBaud');
     if (bSel) {{
       const v = String(STATE.current_serial_baud ?? 115200);
@@ -6955,6 +6990,21 @@ function closePreferences() {{
   const modal = document.getElementById('preferencesModal');
   if (modal) modal.classList.remove('open');
 }}
+// The capture rate lives in SessionConfig, not in the page, so a reload has to
+// read it back before it can show it.  Fire-and-forget: the seeded value stays
+// on screen if the controller cannot be reached, and a failed read must never
+// throw into the load handler that calls this.
+async function syncFpsFromServer() {{
+  try {{
+    const res = await fetch(`${{baseUrl}}/live/config?session=${{encodeURIComponent(STATE.session)}}`);
+    const data = await res.json().catch(() => ({{}}));
+    const v = Number(data && data.fps);
+    if (!Number.isFinite(v) || v <= 0) return;
+    STATE.fps = v;
+    const el = document.getElementById('settingsFps');
+    if (el) el.value = v;
+  }} catch (e) {{}}
+}}
 function savePreferences() {{
   try {{
     const input = document.getElementById('prefMaxSamples');
@@ -6980,7 +7030,17 @@ async function saveGlobalSettings() {{
     const pSel = document.getElementById('settingsSerialPort');
     if (pSel) payload.serial_port = String(pSel.value || '');
     const fps = document.getElementById('settingsFps');
-    if (fps) payload.fps = Math.max(1, Math.min(60, Number(fps.value || 0)));
+    // Only carry a fps we can actually read.  `Number('' || 0)` is 0, and the
+    // clamp below turns that into 1 — harmless while this only fed client
+    // state, but fps now paces the record thread, so an emptied field would
+    // silently pin capture to one sample per second.  Absent means "leave the
+    // session's rate alone".
+    if (fps) {{
+      const fpsValue = Number(fps.value);
+      if (isFinite(fpsValue) && fpsValue > 0) {{
+        payload.fps = Math.max(1, Math.min(60, fpsValue));
+      }}
+    }}
     const bSel = document.getElementById('settingsSerialBaud');
     if (bSel) payload.serial_baud = Number(bSel.value);
     const fs = document.getElementById('settingsFrameSide');
@@ -7041,6 +7101,11 @@ async function saveGlobalSettings() {{
     params.set('serial_frame_side', String(currentSerialFrameSide));
     params.set('serial_channels', String(currentSerialChannels));
     params.set('serial_sync', currentSerialSync);
+    // FPS is the hold-capture PACING — the record thread sleeps 1/fps between
+    // samples — so it only means anything once it reaches the controller's
+    // SessionConfig.  Updating STATE.fps alone left this control inert: the
+    // session kept the default and capture could never be made faster than it.
+    if (payload.fps != null) params.set('fps', String(payload.fps));
     const res = await fetch(`${{baseUrl}}/live/config?${{params.toString()}}`);
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to save settings.');
