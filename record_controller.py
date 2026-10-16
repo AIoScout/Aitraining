@@ -3081,12 +3081,45 @@ class RecordController:
                 gray = np.ascontiguousarray(sub)
                 roi_origin = (rx1, ry1)
 
+        # The editor's Dark Thr / Lum Thr sliders.  Until now the OCR branch
+        # read neither, so moving them changed nothing on screen: the preview
+        # re-binarised with exact Otsu every time.  They form the sign's
+        # luminance window — ink is what falls inside it.
+        #
+        # The window is the one the image branch already defines
+        # (image_preprocess.preprocess_blue_diff_array), and these two lines
+        # reproduce it exactly:
+        #
+        #     is_sign = (gray > bg_dark_thresh) & (gray < bg_lum_thresh)
+        #
+        # so BOTH bounds are strict.  binarize_ink's own comparison is
+        # inclusive (ink = gray <= t), so the slider values are nudged one
+        # LSB inward: ink = (gray <= lum-1) & (gray >= dark+1) is bit-for-bit
+        # the same set as the mask the sign previews have always drawn.  The
+        # same sliders therefore mean the same thing in both project types,
+        # and normalize_class_preprocess has already clamped lum to 50..255
+        # and dark to 0..100, so neither nudge leaves binarize_ink's range.
+        #
+        # Gated on "adjusted away from the defaults", because 0/100 is what
+        # the UI ships and what every existing OCR model was trained through:
+        # pinning the threshold at an untouched 100 would silently re-cut the
+        # training cache of every project in the field.  Defaults therefore
+        # still mean exact Otsu.  This is the same test the image branch uses
+        # to decide the sliders have been tuned (see the crop branches there).
+        bg_dark = int(config.get("bg_dark_thresh", 0) or 0)
+        bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
+        thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
+        pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
+        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+
         result = preprocess_glyph(
             gray,
             out_size=int(out_size),
             polarity=polarity,
             apply_segmentation=apply_segmentation,
             convention=convention,
+            thresh=pinned,
+            dark_thr=floor,
         )
         glyph = np.asarray(result["glyph"], dtype=np.uint8)
         png_bytes = _to_png_bytes(Image.fromarray(glyph, mode="L"))

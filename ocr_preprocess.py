@@ -541,6 +541,7 @@ def preprocess_glyph(
     min_run: int = MIN_GLYPH_RUN,
     thresh: Optional[int] = None,
     convention: str = NORM_STRETCH,
+    dark_thr: int = 0,
 ) -> Dict[str, Any]:
     """Full glyph transform.  Returns a dict (never raises on bad input).
 
@@ -562,6 +563,18 @@ def preprocess_glyph(
                          stays a real-valued mask driven by `polarity`),
                          which is how an anti-aliased grayscale glyph is
                          fed to NORM_CANON without a hard edge.
+    dark_thr           : 0 -> no floor (bit-identical to the pre-existing
+                         transform, and what the device's C port always
+                         uses).  A positive value drops every pixel darker
+                         than it from the ink mask, i.e. the sign's lower
+                         luminance bound.  Applied on TOP of the polarity
+                         split rather than instead of it, so it only ever
+                         tightens the mask and is monotone for both
+                         polarities.  The editor's "Dark Thr" slider is
+                         this number; the paired "Lum Thr" slider is
+                         `thresh`.  See RecordController._preprocess_
+                         image_png_ocr for the gate that decides when the
+                         two sliders override Otsu at all.
 
     Returns {"ink", "glyph", "thresh", "box", "boxes", "ok", "empty"}
     where `glyph` is a uint8 (out_size, out_size) GRAYSCALE array ready for
@@ -588,6 +601,13 @@ def preprocess_glyph(
             return out
 
         ink = binarize_ink(gray, t, polarity=polarity)
+        # The editor's "Dark Thr" floor.  Applied here, after the polarity
+        # split, rather than inside binarize_ink: that function is the single
+        # comparison the C port mirrors, and dark_thr is a host-side editor
+        # knob the device never sets.  Guarded on > 0 so the default path
+        # stays bit-identical to that port.
+        if dark_thr > 0:
+            ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
         out["ink"] = ink
 
         if not bool(ink.any()):

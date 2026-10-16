@@ -5298,7 +5298,12 @@ function moveClassPreprocessSample(delta) {{
   renderClassPreprocessModal();
   refreshClassProcessedPreview();
 }}
-async function refreshClassProcessedPreview() {{
+async function refreshClassProcessedPreview(opts) {{
+  // keepPrevious: for a live control (the Dark/Lum Thr sliders), where
+  // dropping the pane to "Rendering..." twenty-five times a second reads as a
+  // broken preview.  The last frame stays up until its replacement arrives;
+  // the token guard below still means only the newest one can win.
+  const keepPrevious = !!(opts && opts.keepPrevious);
   classPreprocessPreviewToken += 1;
   const token = classPreprocessPreviewToken;
   if (classPreprocessPreviewController) {{
@@ -5319,9 +5324,11 @@ async function refreshClassProcessedPreview() {{
   const targetClassConfig = getClassPreprocessConfig(targetClass);
   const targetSampleConfig = normalizeClassPreprocessConfig(classPreprocessDraft);
   classPreprocessBusy = true;
-  classPreprocessProcessedSrc = '';
-  classPreprocessAutoCrop = null;
-  refreshClassPreprocessResultPane();
+  if (!keepPrevious) {{
+    classPreprocessProcessedSrc = '';
+    classPreprocessAutoCrop = null;
+    refreshClassPreprocessResultPane();
+  }}
   classPreprocessPreviewController = new AbortController();
   try {{
     const res = await fetch(`${{baseUrl}}/preprocess/preview`, {{
@@ -5347,7 +5354,14 @@ async function refreshClassProcessedPreview() {{
       return;
     }}
     const procB64 = data.processed_image_b64 || data.image_b64;
-    classPreprocessProcessedSrc = procB64 ? `data:image/png;base64,${{procB64}}` : '';
+    // `#t=<token>` is the cache-buster for the LIVE case, and it is not
+    // decoration: the pane is an <img> whose src IS the payload, so two
+    // responses with equal bytes (a drag inside one Otsu step, say) would
+    // otherwise assign an identical string — a no-op the browser is free to
+    // skip — and an aborted race could leave the older frame on screen.
+    // The fragment is ignored when the image is decoded, so the pixels are
+    // exactly the payload's.
+    classPreprocessProcessedSrc = procB64 ? `data:image/png;base64,${{procB64}}#t=${{token}}` : '';
     // Save auto-crop ROI (normalized 0-1) for overlay display
     classPreprocessAutoCrop = Array.isArray(data.crop) && data.crop.length === 4 ? data.crop : null;
   }} catch (err) {{
@@ -5643,15 +5657,20 @@ function renderClassPreprocessModal() {{
   }}
   const sample = selectedClassSample(classPreprocessClass);
   const sampleFilename = sample ? String(previewFilename(sample) || '') : '';
-  const classThresh = getClassPreprocessConfig(classPreprocessClass);
-  const classPreprocessThresholds = {{
-    bg_lum_thresh: classThresh.bg_lum_thresh != null ? classThresh.bg_lum_thresh : 150,
-    bg_dark_thresh: classThresh.bg_dark_thresh != null ? classThresh.bg_dark_thresh : 20,
-}};
   const cfg = normalizeClassPreprocessConfig(
     classPreprocessDraft || getSampleEffectivePreprocessConfig(classPreprocessClass, sampleFilename)
   );
   classPreprocessDraft = cfg;
+  // Seeded from the DRAFT — the same record the preview renders from — not
+  // from the saved class row.  Reading the class left the two out of step the
+  // moment a sample carried its own override: the boxes showed the class's
+  // thresholds while the preview binarised at the sample's.  (The 150/20
+  // fallbacks that used to live here disagreed with normalizeClassPreprocess
+  // Config's own 100/0, so an unset class rendered a third, phantom value.)
+  const classPreprocessThresholds = {{
+    bg_lum_thresh: cfg.bg_lum_thresh != null ? cfg.bg_lum_thresh : 100,
+    bg_dark_thresh: cfg.bg_dark_thresh != null ? cfg.bg_dark_thresh : 0,
+}};
   const roi = Array.isArray(cfg.manual_roi) && cfg.manual_roi.length === 4 ? cfg.manual_roi : null;
   const left = roi ? roi[0] * 100 : 0;
   const top = roi ? roi[1] * 100 : 0;
@@ -5787,39 +5806,94 @@ function renderClassPreprocessModal() {{
   if (modeSel) modeSel.onchange = () => {{
       applyClassPreprocessMode(modeSel.value);
   }};
-  const lumSlider   = document.getElementById('classPreprocessLum');
-  const lumNum       = document.getElementById('classPreprocessLumNum');
-  const darkNum      = document.getElementById('classPreprocessDarkNum');
-  const darkSlider   = document.getElementById('classPreprocessDark');
-  const applyThresholds = () => {{
+  // Dark Thr / Lum Thr.
+  //
+  // Two defects lived in this block.  It wrote the moved values into
+  // STATE.class_preprocess and nothing else — but /preprocess/preview renders
+  // from `sample_config`, which refreshClassProcessedPreview builds out of
+  // classPreprocessDraft, so the backend never saw a move and re-binarised
+  // with exact Otsu wherever the sliders sat.  And it re-armed at 250ms while
+  // blanking the result pane on every tick, so even a correct preview would
+  // flicker through "Rendering..." under the user's hand.
+  //
+  // Now: `input` (every drag frame, and every keystroke in the number boxes)
+  // writes the DRAFT and re-renders the preview in place, debounced 40ms;
+  // `change` (slider released, number committed) additionally persists the
+  // class record — which is where the image branch has always kept these two
+  // (image_preprocess.preprocess_for_label reads them off the class config).
+  const lumSlider  = document.getElementById('classPreprocessLum');
+  const lumNum     = document.getElementById('classPreprocessLumNum');
+  const darkSlider = document.getElementById('classPreprocessDark');
+  const darkNum    = document.getElementById('classPreprocessDarkNum');
+  const clampThreshold = (value, lo, hi, fallback) => {{
+    const n = Number(value);
+    if (!isFinite(n)) return fallback;
+    return Math.max(lo, Math.min(hi, Math.round(n)));
+  }};
+  const pushThresholds = () => {{
+    const draft = normalizeClassPreprocessConfig(
+      classPreprocessDraft || getClassPreprocessConfig(classPreprocessClass)
+    );
+    draft.bg_dark_thresh = clampThreshold(darkSlider ? darkSlider.value : 0, 0, 100, 0);
+    draft.bg_lum_thresh = clampThreshold(lumSlider ? lumSlider.value : 100, 50, 255, 100);
+    classPreprocessDraft = draft;
+    // keepPrevious: the pane holds the last frame while this one renders, so
+    // a drag reads as a filter being applied, not as a reload.
+    refreshClassProcessedPreview({{ keepPrevious: true }});
+  }};
+  const persistThresholds = () => {{
+    const existing = getClassPreprocessConfig(classPreprocessClass);
+    existing.bg_lum_thresh = clampThreshold(lumSlider ? lumSlider.value : 100, 50, 255, 100);
+    existing.bg_dark_thresh = clampThreshold(darkSlider ? darkSlider.value : 0, 0, 100, 0);
+    setClassPreprocessConfig(classPreprocessClass, existing);
+  }};
+  const debouncedThresholds = () => {{
+    if (classPreprocessThresholdTimer) clearTimeout(classPreprocessThresholdTimer);
+    classPreprocessThresholdTimer = setTimeout(() => {{
+      classPreprocessThresholdTimer = null;
+      pushThresholds();
+    }}, 40);
+  }};
+  const commitThresholds = () => {{
     if (classPreprocessThresholdTimer) {{
       clearTimeout(classPreprocessThresholdTimer);
       classPreprocessThresholdTimer = null;
     }}
-    const existing = getClassPreprocessConfig(classPreprocessClass);
-    existing.bg_lum_thresh = Number(lumSlider ? lumSlider.value : 100);
-    existing.bg_dark_thresh = Number(darkSlider ? darkSlider.value : 0);
-    setClassPreprocessConfig(classPreprocessClass, existing);
-    refreshClassProcessedPreview();
+    pushThresholds();
+    persistThresholds();
   }};
-  const debouncedApply = () => {{
-    if (classPreprocessThresholdTimer) clearTimeout(classPreprocessThresholdTimer);
-    classPreprocessThresholdTimer = setTimeout(() => {{
-      classPreprocessThresholdTimer = null;
-      applyThresholds();
-    }}, 250);
+  // Lum/B-G slider + number sync.  The slider is the authority for the pair:
+  // its own min/max cannot leave the valid range, so it applies on every frame.
+  if (lumSlider) lumSlider.oninput = () => {{ if (lumNum) lumNum.value = lumSlider.value; debouncedThresholds(); }};
+  if (darkSlider) darkSlider.oninput = () => {{ if (darkNum) darkNum.value = darkSlider.value; debouncedThresholds(); }};
+  if (lumSlider) lumSlider.onchange = commitThresholds;
+  if (darkSlider) darkSlider.onchange = commitThresholds;
+  // A number box mid-edit can hold anything ("", "-", "1" on the way to "150"),
+  // so `input` only applies a value that already parsed inside the range —
+  // otherwise the box would fight the user's typing.  `change` clamps for real.
+  if (darkNum) darkNum.oninput = () => {{
+    const v = Number(darkNum.value);
+    if (!isFinite(v) || v < 0 || v > 100 || !darkSlider) return;
+    darkSlider.value = v;
+    debouncedThresholds();
   }};
-
-  // Lum/B-G slider + number sync
-  if (lumSlider) lumSlider.oninput = () => {{ if (lumNum) lumNum.value = lumSlider.value; debouncedApply(); }};
-  if (darkSlider) darkSlider.oninput = () => {{ if (darkNum) darkNum.value = darkSlider.value; debouncedApply(); }};
+  if (lumNum) lumNum.oninput = () => {{
+    const v = Number(lumNum.value);
+    if (!isFinite(v) || v < 50 || v > 255 || !lumSlider) return;
+    lumSlider.value = v;
+    debouncedThresholds();
+  }};
   if (darkNum) darkNum.onchange = () => {{
-    let v = Number(darkNum.value); if (!isFinite(v) || v < 0) v = 0; else if (v > 100) v = 100;
-    darkSlider.value = v; applyThresholds();
+    const v = clampThreshold(darkNum.value, 0, 100, 0);
+    darkNum.value = v;
+    if (darkSlider) darkSlider.value = v;
+    commitThresholds();
   }};
   if (lumNum) lumNum.onchange = () => {{
-    let v = Number(lumNum.value); if (!isFinite(v) || v < 50) v = 100; else if (v > 255) v = 255;
-    lumSlider.value = v; applyThresholds();
+    const v = clampThreshold(lumNum.value, 50, 255, 100);
+    lumNum.value = v;
+    if (lumSlider) lumSlider.value = v;
+    commitThresholds();
   }};
 
 
