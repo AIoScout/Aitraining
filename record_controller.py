@@ -130,9 +130,14 @@ class SessionConfig:
     # silently select the wrong device whenever virtual cameras (Iriun etc.)
     # are installed.  webcam_index is only a UI hint / non-macOS fallback.
     webcam_id: Optional[str] = None
-    # Training image size (the "Image Size" hyperparameter).  Captured /
-    # uploaded samples and their processed-cache previews are stored at this
-    # size so 160×160 (or 48/128/192) projects are never downsampled to 96.
+    # Training image size (the "Image Size" hyperparameter).  The
+    # PROCESSED-CACHE previews and the training tensors are stored at this
+    # size, so 160×160 (or 48/128/192) projects are never downsampled to 96.
+    #
+    # NOT the size of the saved sample: webcam captures are written at camera
+    # resolution (bounded by CAPTURE_MAX_SIDE) because the saved PNG is the
+    # "Original Sample" the user draws a Manual ROI on.  Storing a 28×28 OCR
+    # capture destroyed the scene before the ROI could select anything.
     img_size: int = 96
     # Which project owns this session.  Selects the sample transform used by
     # _preprocess_image_png (and therefore by the processed cache, the class
@@ -447,6 +452,15 @@ def _generate_model_resolver_h(tflite_bytes: bytes) -> str:
 #   then revives a DEAD producer instead of serving the last frame forever.
 LIVE_IDLE_S = 15.0
 LIVE_STALE_S = 1.5
+
+# Longest side a saved webcam sample keeps.  The saved PNG is the "Original
+# Sample" the user draws a Manual ROI on, so downsampling it to the model
+# input size (28x28 for OCR) at capture time destroyed the very detail the
+# editor exists to select.  Downsampling belongs in the preprocessing
+# pipeline, AFTER the crop — _cache_one_sample / _preprocess_image_png
+# already do exactly that.  Serial captures are unaffected: the device only
+# ever sends 96x96, so there is nothing to preserve.
+CAPTURE_MAX_SIDE = 1024
 
 
 class RecordController:
@@ -3043,6 +3057,30 @@ class RecordController:
 
         src_img = Image.open(_bytes_io(png)).convert("L")
         gray = np.asarray(src_img, dtype=np.uint8)
+        full_h, full_w = gray.shape[:2]
+
+        # Manual ROI: crop BEFORE Otsu picks a threshold and BEFORE the
+        # vertical projection looks for runs — the same contract the image
+        # branch below implements via preprocess_blue_diff_array(roi=...).
+        # In manual_roi mode the user's box IS the model input, so pixels
+        # outside it must not influence anything that measures ink.  Omitting
+        # this made Manual ROI a no-op end to end: the rectangle moved in the
+        # UI while the model, the processed cache and training all still saw
+        # every pixel of the original frame.
+        mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
+        roi_px = (
+            manual_roi_to_pixels(full_h, full_w, config.get("manual_roi"))
+            if mode == PREPROCESS_MODE_MANUAL_ROI
+            else None
+        )
+        roi_origin = (0, 0)
+        if roi_px is not None:
+            rx1, ry1, rx2, ry2 = roi_px
+            sub = gray[ry1:ry2, rx1:rx2]
+            if sub.size:
+                gray = np.ascontiguousarray(sub)
+                roi_origin = (rx1, ry1)
+
         result = preprocess_glyph(
             gray,
             out_size=int(out_size),
@@ -3065,7 +3103,11 @@ class RecordController:
             mp_png = _to_png_bytes(Image.fromarray((np.asarray(ink).astype(np.uint8) * 255), mode="L"))
         else:
             mp_png = png_bytes
-        h, w = gray.shape[:2]
+        # result["box"] is in the coordinates of the frame preprocess_glyph
+        # was given, which is the ROI crop in manual mode.  Report it in
+        # FULL-frame coordinates so the UI's rectangle lands on the pixels it
+        # actually describes.
+        ox, oy = roi_origin
         box = result.get("box")
         crop_norm = [0.0, 0.0, 1.0, 1.0]
         cp_png = png_bytes
@@ -3074,8 +3116,13 @@ class RecordController:
             crop = np.ascontiguousarray(gray[y1:y2, x1:x2])
             if crop.size:
                 cp_png = _to_png_bytes(Image.fromarray(crop, mode="L"))
-            if w and h:
-                crop_norm = [x1 / w, y1 / h, x2 / w, y2 / h]
+            if full_w and full_h:
+                crop_norm = [
+                    (x1 + ox) / full_w,
+                    (y1 + oy) / full_h,
+                    (x2 + ox) / full_w,
+                    (y2 + oy) / full_h,
+                ]
         return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png}
 
     def _rebuild_processed_cache(
@@ -4436,7 +4483,15 @@ class RecordController:
                     if cfg.crop_box is not None:
                         x1, y1, x2, y2 = cfg.crop_box
                         img = img.crop((x1, y1, x2, y2))
-                    img = img.resize((int(cfg.img_size), int(cfg.img_size)))
+                    # capture_png is what /live/capture and _record_from_live
+                    # write to disk, and what the Manual ROI editor shows as
+                    # "Original Sample".  Keep it at camera resolution — the
+                    # old `resize((img_size, img_size))` here saved 28x28
+                    # thumbnails for an OCR project, so the user was dragging
+                    # a ROI on a blown-up thumbnail and the crop had nothing
+                    # left to select.  _cache_one_sample still stores the
+                    # training tensor at img_size, after the crop.
+                    img = _cap_capture_resolution(img)
                     self._live_set(key, preview_png=preview_png, capture_png=_to_png_bytes(img), error="")
                     time.sleep(0.06)
                 except Exception as e:
@@ -4582,7 +4637,9 @@ class RecordController:
                 if cfg.crop_box is not None:
                     x1, y1, x2, y2 = cfg.crop_box
                     img = img.crop((x1, y1, x2, y2))
-                img = img.resize((int(cfg.img_size), int(cfg.img_size)))
+                # Same rule as the live worker above: save at camera
+                # resolution, let the pipeline downsample after the crop.
+                img = _cap_capture_resolution(img)
                 png = _to_png_bytes(img)
                 p = _save_png(cfg.dataset_root, class_name, png)
                 self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
@@ -5094,6 +5151,32 @@ def _raw96_preview_png(raw: bytes, frame_side: int = 96) -> bytes:
         arr = np.frombuffer(raw, dtype=np.uint8).reshape((side, side))
         img = Image.fromarray(arr, mode="L").resize((side * 3, side * 3), Image.NEAREST)
     return _to_png_bytes(img)
+
+
+def _cap_capture_resolution(img: Image.Image, max_side: int = CAPTURE_MAX_SIDE) -> Image.Image:
+    """Bound a captured sample's long side, preserving its aspect ratio.
+
+    The webcam is the only source that can hand us more than the model input
+    size, so it is the only one that needs a ceiling: a 4K frame written at
+    capture rate is a lot of disk and PNG-encode time for no extra detail.
+    1024 keeps a single character comfortably draggable in the Manual ROI
+    editor while staying cheap enough for hold capture.
+
+    Aspect is PRESERVED on purpose — the sample is the user's view of the
+    scene, and squashing it square is what made the ROI unusable.
+    """
+    try:
+        w, h = (int(v) for v in img.size)
+        long_side = max(w, h)
+        if long_side <= 0 or long_side <= int(max_side):
+            return img
+        scale = float(max_side) / float(long_side)
+        return img.resize(
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            Image.LANCZOS,
+        )
+    except Exception:
+        return img
 
 
 def _to_png_bytes(img: Image.Image) -> bytes:

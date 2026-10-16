@@ -5368,8 +5368,13 @@ async function refreshClassProcessedPreview() {{
     classPreprocessBusy = false;
     if (!classPreprocessOpen || String(classPreprocessClass || '') !== targetClass) return;
     refreshClassPreprocessResultPane();
-    // Update ROI overlay with auto-detected crop box
-    updateClassPreprocessOverlay(null);
+    // Re-assert the overlay from the DRAFT, not from the auto crop.  This
+    // runs on every refresh — including the one pointerup triggers — so
+    // passing null here replaced the box the user had just dragged with the
+    // green auto-detected one.  That was the "the ROI immediately snaps back
+    // to the whole frame" half of the bug: null fails the isManual test, so
+    // the box fell through to classPreprocessAutoCrop.
+    updateClassPreprocessOverlay(classPreprocessDraft && classPreprocessDraft.manual_roi);
   }}
 }}
 async function loadClassPreprocessSamples(className) {{
@@ -5500,7 +5505,14 @@ function closeClassPreprocessEditor(force = false) {{
       : 'auto_by_label';
     rememberClassPreprocessScroll();
     const next = normalizeClassPreprocessConfig(Object.assign({{}}, classPreprocessDraft || {{}}, {{mode: nextMode}}));
-    if (!next.manual_roi) next.manual_roi = [0, 0, 1, 1];
+    // Seed a first-time Manual ROI from the auto-detected box instead of the
+    // whole frame: switching the mode used to hand the user a full-image
+    // selection they then had to shrink by hand before it meant anything.
+    if (!next.manual_roi) {{
+      next.manual_roi = (Array.isArray(classPreprocessAutoCrop) && classPreprocessAutoCrop.length === 4)
+        ? classPreprocessAutoCrop.slice()
+        : [0, 0, 1, 1];
+    }}
     classPreprocessDraft = next;
     if (nextMode === 'auto_by_label') {{
       const filename = selectedClassSampleFilename(classPreprocessClass);
@@ -5550,8 +5562,12 @@ function updateClassPreprocessOverlay(roi) {{
     overlay.style.top = `${{rect.offsetY + y1 * rect.height}}px`;
     overlay.style.width = `${{Math.max(0, (x2 - x1) * rect.width)}}px`;
     overlay.style.height = `${{Math.max(0, (y2 - y1) * rect.height)}}px`;
-    // Green border = auto-detected, blue border = manual ROI
-    overlay.style.borderColor = isManual ? 'var(--accent)' : '#4caf50';
+    // Green border = auto-detected, blue border = manual ROI.  --accent is
+    // not defined anywhere in this sheet, and without a fallback the manual
+    // branch resolved to currentColor — so a manual box and an auto box were
+    // drawn the same colour and the user could not tell which one they were
+    // looking at.  #1a73e8 is .roi-overlay's own blue.
+    overlay.style.borderColor = isManual ? 'var(--accent, #1a73e8)' : '#4caf50';
 }}
 function syncClassPreprocessRoiInputs(roi) {{
   if (!Array.isArray(roi) || roi.length !== 4) return;
@@ -8584,8 +8600,9 @@ function updatePreviewRoiOverlay(crop, isManual) {{
   overlay.style.top = `${{rect.offsetY + y1 * rect.height}}px`;
   overlay.style.width = `${{Math.max(0, (x2 - x1) * rect.width)}}px`;
   overlay.style.height = `${{Math.max(0, (y2 - y1) * rect.height)}}px`;
-  // Green border = auto-detected, blue border = manual ROI
-  overlay.style.borderColor = isManual ? 'var(--accent)' : '#4caf50';
+  // Green border = auto-detected, blue border = manual ROI.  Same missing
+  // --accent as the class-preprocess overlay; see the note there.
+  overlay.style.borderColor = isManual ? 'var(--accent, #1a73e8)' : '#4caf50';
 }}
 async function runPreviewUploadPrediction() {{
   if (!previewInputOn || !STATE.export_enabled) return;
