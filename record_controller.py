@@ -977,6 +977,11 @@ class RecordController:
             fps_raw = (qs.get("fps") or [None])[0]
             auto_seed_raw = (qs.get("auto_seed_emnist") or [None])[0]
             include_state_raw = (qs.get("include_state") or [None])[0]
+            # The SPA's target sign travels with the auto-fill request so
+            # this endpoint can both persist it and hand it to the seeder,
+            # which uses it to prepare a synthetic Preview image.
+            sign_seq_raw = (qs.get("sign_sequence") or qs.get("sign_seq") or [None])[0]
+            reading_order_raw = (qs.get("reading_order") or qs.get("reading") or [None])[0]
             try:
                 if serial_sync_raw not in (None, ""):
                     parse_sync_header(serial_sync_raw)
@@ -1037,6 +1042,19 @@ class RecordController:
                 # reporting a number the capture did not obey.
                 "fps": str(float(cfg.fps)),
             }
+            if sign_seq_raw not in (None, "") or reading_order_raw not in (None, ""):
+                try:
+                    patch: Dict[str, Any] = {}
+                    if sign_seq_raw not in (None, ""):
+                        patch["sign_sequence"] = normalize_sign_sequence(sign_seq_raw)
+                    if reading_order_raw not in (None, ""):
+                        order = str(reading_order_raw).strip().lower()
+                        if order in ("ltr", "rtl"):
+                            patch["reading_order"] = order
+                    if patch:
+                        self._save_train_cfg(session_id, patch)
+                except Exception:
+                    pass
             if auto_seed_raw is not None:
                 try:
                     enabled = _is_truthy(auto_seed_raw)
@@ -1045,7 +1063,11 @@ class RecordController:
                         {"auto_seed_emnist_samples": enabled},
                     )
                     if enabled:
-                        self._seed_empty_char_classes(session_id)
+                        self._seed_empty_char_classes(
+                            session_id,
+                            sign_sequence=sign_seq_raw,
+                            reading_order=reading_order_raw,
+                        )
                 except Exception:
                     pass
             if auto_seed_raw is not None or _is_truthy(include_state_raw):
@@ -1407,6 +1429,7 @@ class RecordController:
             "/preprocess/preview",
             "/preview/predict_upload",
             "/preview/upload",
+            "/preview/synthesize_sign",
             "/classes/save_config",
             "/classes/reorder",
         }:
@@ -1545,7 +1568,11 @@ class RecordController:
                 # reload, no waiting for the next class edit.
                 try:
                     if isinstance(cfg, dict) and _is_truthy(cfg.get("auto_seed_emnist_samples")):
-                        self._seed_empty_char_classes(session_id)
+                        self._seed_empty_char_classes(
+                            session_id,
+                            sign_sequence=cfg.get("sign_sequence"),
+                            reading_order=cfg.get("reading_order"),
+                        )
                 except Exception:
                     pass
             except Exception as e:
@@ -1772,6 +1799,9 @@ class RecordController:
                 self._preview_uploads[session_id] = {
                     "bytes": orig_png,
                     "filename": filename,
+                    # A real file the user chose; the sign auto-preview must
+                    # never replace it on the next auto-fill / training run.
+                    "synthetic": False,
                 }
 
             def _opt_int(*keys: str) -> Optional[int]:
@@ -1836,6 +1866,130 @@ class RecordController:
                     "orig_b64": orig_b64,
                     "roi_b64": str(pred.get("processed_image_b64") or ""),
                     "filename": filename or "upload",
+                },
+                cors=True,
+            )
+            return
+        if path == "/preview/synthesize_sign":
+            # The zero-files version of /preview/upload: draw a whole 3-char
+            # sign from the project's own samples (EMNIST fallback), store
+            # it as the active Preview frame, and immediately run the same
+            # sign split + three invokes the upload path runs.  One response
+            # shape, so the SPA card does not care which one produced it.
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            if not self._is_sign_ocr_session(session_id):
+                _send_json(
+                    req,
+                    {"ok": "0", "error": "sign synthesis is only available in a sign_ocr project"},
+                    status=400,
+                    cors=True,
+                )
+                return
+
+            def _synth_int(*keys: str) -> Optional[int]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return int(float(raw))
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            def _synth_float(*keys: str) -> Optional[float]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return float(raw)
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            try:
+                variant = str(payload.get("variant") or "match").strip().lower()
+                candidates: List[Any] = [None]
+                if variant == "mismatch":
+                    # The model only has the project's own classes to answer
+                    # with, so an unseen replacement glyph can be MISREAD as
+                    # the target character — which would paint a false green
+                    # YES on a plate that is genuinely a different sign.
+                    # Retry replacement characters until the reading is
+                    # actually wrong.
+                    seq_for_alt, _order = self._sign_preview_sequence(
+                        session_id,
+                        chars=payload.get("chars"),
+                        sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
+                        reading_order=payload.get("reading_order") or payload.get("reading"),
+                    )
+                    candidates = [
+                        c for c in "56789ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in seq_for_alt
+                    ][:10] or [None]
+                else:
+                    # Even a MATCH plate can draw an unlucky glyph variant
+                    # (a thin EMNIST '1', a slanted 'A') that the current
+                    # model reads just under the confidence floor, and a
+                    # REVERSED plate can be read as the target by chance.
+                    # Redraw — fresh glyph pick, size and jitter — until the
+                    # plate shows the verdict the button promises.  Every
+                    # variant has an intended answer, and the whole point of
+                    # the button is to demonstrate it.
+                    candidates = [None] * 8
+                synth = None
+                pred = None
+                for alt_char in candidates:
+                    synth = self._synthesize_sign_preview_png(
+                        session_id=session_id,
+                        variant=variant,
+                        chars=payload.get("chars"),
+                        sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
+                        reading_order=payload.get("reading_order") or payload.get("reading"),
+                        alt_char=alt_char,
+                    )
+                    pred = self._preview_predict_sign_ocr(
+                        session_id=session_id,
+                        png=synth["png"],
+                        sign_sequence=synth["sign_sequence"],
+                        reading_order=synth["reading_order"],
+                        bg_dark_thresh=_synth_int("bg_dark", "dark"),
+                        bg_lum_thresh=_synth_int("bg_lum", "lum"),
+                        match_min_prob=_synth_float("match_min", "match_min_prob"),
+                    )
+                    if variant == "match":
+                        intended = True
+                    elif variant == "reversed":
+                        # Reversed pixels read right-to-left are the target.
+                        intended = synth["reading_order"] == "rtl"
+                    else:
+                        intended = False
+                    # The LAST attempted plate is the one the synthesizer
+                    # stored, so the response, the buffer and the drawn slots
+                    # always describe the same frame.
+                    if bool(pred.get("match")) == intended:
+                        break
+                if synth is None or pred is None:
+                    raise ValueError("could not draw a sign preview")
+                png = synth["png"]
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            orig_b64 = base64.b64encode(png).decode("ascii")
+            _send_json(
+                req,
+                {
+                    "ok": "1",
+                    **pred,
+                    "image_b64": orig_b64,
+                    "orig_b64": orig_b64,
+                    "roi_b64": str(pred.get("processed_image_b64") or ""),
+                    "filename": synth["filename"],
+                    # Provenance for the card's note and for a test that
+                    # wants to assert WHICH plate was drawn.
+                    "synth_variant": synth["variant"],
+                    "synth_chars": synth["chars"],
                 },
                 cors=True,
             )
@@ -2085,6 +2239,8 @@ class RecordController:
                     classes=names if isinstance(names, list) and names else None,
                     count=payload.get("count", TEMPLATE_SAMPLE_DEFAULT_COUNT),
                     only_empty=only_empty,
+                    sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
+                    reading_order=payload.get("reading_order") or payload.get("reading"),
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -3600,6 +3756,8 @@ class RecordController:
         classes: Optional[List[Any]] = None,
         count: Any = TEMPLATE_SAMPLE_DEFAULT_COUNT,
         only_empty: bool = False,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
     ) -> Dict[str, Any]:
         """Fill character classes with camera-realistic EMNIST template samples.
 
@@ -3727,6 +3885,17 @@ class RecordController:
                 sample_preprocess=sample_preprocess,
             )
 
+        # A sign project now has enough glyphs to draw a test sign without
+        # the user hunting for a road-sign photo.  Storing it here is what
+        # makes Preview -> Upload immediately show a ready-to-test frame;
+        # it never replaces a REAL upload, and a failure is ignored.
+        if str(project_type) == PROJECT_TYPE_SIGN_OCR:
+            self._maybe_autostore_synth_preview(
+                session_id,
+                sign_sequence=sign_sequence,
+                reading_order=reading_order,
+            )
+
         # Full post-seed state, not just the classes this call touched: the
         # SPA applies it verbatim (STATE.classes / counts / sample_previews /
         # train_enabled / train_rec) and re-renders the cards in place, so a
@@ -3760,7 +3929,12 @@ class RecordController:
             return False
         return bool(saved.get("auto_seed_emnist_samples"))
 
-    def _seed_empty_char_classes(self, session_id: str) -> List[str]:
+    def _seed_empty_char_classes(
+        self,
+        session_id: str,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+    ) -> List[str]:
         """Auto-fill every EMPTY character class, when the shortcut is on.
 
         Runs after every class mutation (`/classes/add_named`,
@@ -3769,6 +3943,12 @@ class RecordController:
         write instead of waiting for the next page load.  Returns the names
         actually seeded; failures are swallowed on purpose — a seeder problem
         must never turn "add a class" into an error.
+
+        `sign_sequence`/`reading_order` are the SPA's current target, when
+        the caller has it.  They are forwarded to the seeder so a sign
+        project also gets a matching synthetic preview image in the same
+        call; a background caller may omit them and the persisted train
+        config is used instead.
         """
         with self._lock:
             cfg = self._configs.get(session_id)
@@ -3795,6 +3975,8 @@ class RecordController:
                 classes=empty,
                 count=TEMPLATE_SAMPLE_DEFAULT_COUNT,
                 only_empty=True,
+                sign_sequence=sign_sequence,
+                reading_order=reading_order,
             )
             return list(result.get("seeded") or [])
         except Exception:
@@ -4752,6 +4934,181 @@ class RecordController:
                 return normalize_class_preprocess(rec)
         return normalize_class_preprocess(None)
 
+    # The three things a Preview synthesis button can draw.  "match" must
+    # produce a YES, "mismatch" must produce a NO, and "reversed" is the
+    # direction probe: the same plate read left-to-right disagrees, read
+    # right-to-left agrees.
+    SIGN_SYNTH_VARIANTS = ("match", "reversed", "mismatch")
+
+    def _sign_preview_sequence(
+        self,
+        session_id: str,
+        chars: Any = None,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+    ) -> Tuple[List[str], str]:
+        """Resolve the target sequence and direction for a synth request.
+
+        The SPA's editor state is the authority when it sends one; a
+        background caller (auto-fill, post-training) has no request payload,
+        so the project's persisted train config is the fallback.  A '?' pad
+        is rejected rather than drawn: it means the user has not set a
+        target, and a plate of placeholder glyphs would answer a different
+        question than the one the red NO implies.
+        """
+        from ocr_dataset import TEMPLATE_SIGN_CHARS
+
+        def _has_target(value: Any) -> bool:
+            return any(c != SIGN_SEQUENCE_PAD for c in normalize_sign_sequence(value))
+
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        saved = self._project_train_cfg(Path(cfg.dataset_root))
+        if chars is not None and _has_target(chars):
+            seq = normalize_sign_sequence(chars)
+        elif sign_sequence is not None and _has_target(sign_sequence):
+            seq = normalize_sign_sequence(sign_sequence)
+        else:
+            seq = normalize_sign_sequence(saved.get("sign_sequence"))
+        bad = [c for c in seq if len(str(c)) != 1 or str(c).upper() not in TEMPLATE_SIGN_CHARS]
+        if bad:
+            raise ValueError(
+                "set the project's 3-character target sign before synthesizing a preview"
+            )
+        seq = [str(c).upper() for c in seq]
+        order = str(reading_order or saved.get("reading_order") or "ltr").strip().lower()
+        if order not in ("ltr", "rtl"):
+            order = "ltr"
+        return seq, order
+
+    def _synthesize_sign_preview_png(
+        self,
+        session_id: str,
+        variant: str = "match",
+        chars: Any = None,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+        seed: Optional[int] = None,
+        alt_char: Any = None,
+    ) -> Dict[str, Any]:
+        """Draw a composite 3-character sign and make it the active preview.
+
+        The ORDER is the whole test matrix:
+          match     the target, laid out the way the project reads it
+          reversed  the target, laid out the opposite way (pixels are
+                    reordered, never mirrored — the same rule the live
+                    pipeline follows)
+          mismatch  the target with its LAST character replaced by one the
+                    target does not contain
+
+        Storing the bytes in `_preview_uploads` is deliberate: the Preview
+        card's upload source, its Dark/Lum re-predict (`reuse=1`) and the
+        drawn slots all then read the same stored frame, with no second
+        "current synth image" concept to keep in step.
+        """
+        from ocr_dataset import (
+            emnist_cache_dir,
+            load_emnist_template_bank,
+            synthesize_sign_preview_png,
+        )
+
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        if not self._is_sign_ocr_session(session_id):
+            raise ValueError("sign synthesis is only available in a sign_ocr project")
+        seq, order = self._sign_preview_sequence(
+            session_id,
+            chars=chars,
+            sign_sequence=sign_sequence,
+            reading_order=reading_order,
+        )
+        kind = str(variant or "match").strip().lower()
+        if kind not in self.SIGN_SYNTH_VARIANTS:
+            raise ValueError(f"unknown synth variant '{variant}'")
+        if kind == "match":
+            physical = list(seq) if order == "ltr" else list(reversed(seq))
+        elif kind == "reversed":
+            physical = list(reversed(seq))
+        else:
+            # A character the target does not use.  The caller may force one
+            # (the endpoint retries until the model actually reads it as
+            # wrong — an unseen glyph can be misread as the target, which
+            # would make a "mismatch" plate show a false YES).  The default
+            # starts at 5, clear of the 0/O and 1/I confusions.
+            forced = str(alt_char or "").strip().upper()[:1]
+            if forced and forced in seq:
+                forced = ""
+            alt = forced or next(
+                (c for c in "56789ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in seq), None
+            )
+            if alt is None:
+                raise ValueError("no replacement character available")
+            replaced = list(seq)
+            replaced[-1] = alt
+            physical = replaced if order == "ltr" else list(reversed(replaced))
+
+        bank = load_emnist_template_bank(cache_root=emnist_cache_dir(app_data_dir()))
+        png = synthesize_sign_preview_png(
+            physical,
+            dataset_root=Path(cfg.dataset_root),
+            bank=bank,
+            seed=seed,
+        )
+        label = "".join(seq)
+        filename = f"synth_{label}_{kind}.png"
+        with self._lock:
+            self._preview_uploads[session_id] = {
+                "bytes": png,
+                "filename": filename,
+                "synthetic": True,
+            }
+        return {
+            "png": png,
+            "filename": filename,
+            "variant": kind,
+            "chars": physical,
+            "sign_sequence": list(seq),
+            "reading_order": order,
+        }
+
+    def _maybe_autostore_synth_preview(
+        self,
+        session_id: str,
+        *,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+        replace_synthetic: bool = False,
+    ) -> bool:
+        """Prepare a ready-to-preview sign image for a sign_ocr project.
+
+        Called after auto-fill seeds a sign project and after training
+        finishes.  A REAL upload is never replaced — the user put it there
+        on purpose — but a previous synthetic frame is, because the target
+        or the model may have changed since it was drawn.  Failures are
+        swallowed: this is a convenience, and a missing preview must never
+        turn seeding or training into an error.
+        """
+        try:
+            with self._lock:
+                stored = dict(self._preview_uploads.get(session_id) or {})
+            if stored.get("bytes") and not (
+                replace_synthetic and bool(stored.get("synthetic"))
+            ):
+                return False
+            self._synthesize_sign_preview_png(
+                session_id,
+                variant="match",
+                sign_sequence=sign_sequence,
+                reading_order=reading_order,
+            )
+            return True
+        except Exception:
+            return False
+
     def _preview_predict_sign_ocr(
         self,
         session_id: str,
@@ -5316,6 +5673,30 @@ class RecordController:
                 (cfg.dataset_root.parent / "deployed.json").unlink(missing_ok=True)
             except Exception:
                 pass
+            # The target the model was just trained against is project
+            # state now: persist it so a later auto-fill (which carries no
+            # request payload) can still draw a matching preview sign.
+            if str(cfg.project_type) == PROJECT_TYPE_SIGN_OCR:
+                try:
+                    self._save_train_cfg(
+                        session_id,
+                        {
+                            "sign_sequence": cfg.sign_sequence,
+                            "reading_order": cfg.reading_order,
+                        },
+                    )
+                except Exception:
+                    pass
+                # A freshly trained sign project should be testable with one
+                # click and no photo: replace any PREVIOUS synthetic frame
+                # (the model and maybe the target changed), never a real
+                # upload.
+                self._maybe_autostore_synth_preview(
+                    session_id,
+                    sign_sequence=cfg.sign_sequence,
+                    reading_order=cfg.reading_order,
+                    replace_synthetic=True,
+                )
             done_msg = "Done."
             if result.warnings:
                 done_msg = "Done — WARNINGS: " + " | ".join(result.warnings)

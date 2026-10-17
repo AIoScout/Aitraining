@@ -418,6 +418,12 @@ TEMPLATE_SAMPLE_COUNT = 24
 TEMPLATE_SAMPLE_SIDE = 96
 TEMPLATE_SAMPLE_BG = 242       # light page, like a white car-sign plate
 TEMPLATE_SAMPLE_INK = 20       # dark print
+# A whole road sign is much wider than it is tall.  The preview synthesizer
+# lays three glyphs out on one of these plates; the aspect ratio is the
+# obvious physical one, and the gaps it leaves are what let the sign split
+# find three column runs instead of one.
+TEMPLATE_SIGN_PREVIEW_WIDTH = 240
+TEMPLATE_SIGN_PREVIEW_HEIGHT = 96
 TEMPLATE_BANK_FILENAME = "emnist_byclass.npz"
 # Classes a road sign can print and this bank can serve.  Lower-case EMNIST
 # classes are deliberately NOT folded into upper case here: 'a' and 'A' are
@@ -724,6 +730,204 @@ def render_template_sign_frame(
     ink = np.float32(TEMPLATE_SAMPLE_INK) + rng.normal(0.0, 2.0, (side, side)).astype(np.float32)
     out = bg * (1.0 - alpha) + ink * alpha
     return np.clip(np.rint(out), 0.0, 255.0).astype(np.uint8)
+
+
+# ── Whole-sign previews from the project's own samples ──────────────────
+_DATASET_GLYPH_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+
+
+def _dataset_glyph_alpha(char: str, dataset_root: Path, rng: np.random.Generator) -> Optional[np.ndarray]:
+    """One class sample -> a dark-ink alpha layer, or None when unavailable.
+
+    A road sign carries three characters on ONE plate, so a preview that
+    tests the real sign pipeline has to be a composite, not three isolated
+    28x28 glyphs.  When the project already holds samples for the target
+    character, reusing one is what makes the synthesized sign look like
+    something the model was actually trained on (the EMNIST bank is only
+    the fallback).  The sample is binarised against its own Otsu split and
+    cropped to its ink box: the light page around the glyph is discarded so
+    pasting it onto the composite cannot leave a visible rectangle.
+    """
+    root = Path(dataset_root)
+    if not root.exists():
+        return None
+    candidates: List[Path] = []
+    try:
+        children = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    except Exception:
+        return None
+    for folder in children:
+        mapped = map_class_to_char(folder.name)
+        if not mapped or mapped.upper() != char:
+            continue
+        try:
+            candidates.extend(
+                p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _DATASET_GLYPH_EXTS
+            )
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    path = candidates[int(rng.integers(0, len(candidates)))]
+    try:
+        with Image.open(path) as img:
+            gray = np.asarray(img.convert("L"), dtype=np.float32)
+    except Exception:
+        return None
+    if gray.size == 0:
+        return None
+    # The class samples are dark-ink-on-light captures by construction.  The
+    # threshold is their own Otsu split, so a slightly dimmer page still
+    # separates from the glyph; a frame with no usable split falls back to
+    # plain darkness, which is the same polarity.
+    try:
+        t = int(otsu_threshold_u8(gray.astype(np.uint8)))
+    except Exception:
+        t = 0
+    if t <= 0:
+        t = 128
+    alpha = np.clip((float(t) - gray) / float(max(1, t)), 0.0, 1.0)
+    ys, xs = np.where(alpha > 0.12)
+    if not ys.size:
+        return None
+    alpha = alpha[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1]
+    return np.ascontiguousarray(alpha, dtype=np.float32)
+
+
+def _glyph_alpha_from_bank(char: str, bank: Dict[str, List[np.ndarray]], rng: np.random.Generator) -> np.ndarray:
+    """One EMNIST/synthetic glyph as a bright-ink alpha layer (cropped)."""
+    glyphs = list(bank.get(char) or [])
+    glyph = (
+        np.asarray(glyphs[int(rng.integers(0, len(glyphs)))], dtype=np.float32)
+        if glyphs
+        else np.asarray(_synthetic_glyph_28(char), dtype=np.float32)
+    )
+    if glyph.size == 0:
+        raise ValueError(f"no glyph available for '{char}'")
+    if float(glyph.max()) <= 1.0:
+        glyph = glyph * 255.0
+    alpha = np.clip(glyph / 255.0, 0.0, 1.0)
+    ys, xs = np.where(alpha > 0.08)
+    if not ys.size:
+        raise ValueError(f"empty glyph for '{char}'")
+    return np.ascontiguousarray(
+        alpha[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1],
+        dtype=np.float32,
+    )
+
+
+def _compose_sign_preview_frame(
+    alphas: Sequence[np.ndarray],
+    width: int,
+    height: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Lay glyph alpha layers out on one wide, light sign plate.
+
+    The only invariant that matters is the one `split_sign_glyph_boxes`
+    relies on: a clean empty column valley between every pair of glyphs.
+    That is why the gap is a fraction of the plate width and never shrinks
+    below 10 px, even after the whole row is scaled to fit.
+    """
+    from PIL import Image, ImageFilter
+
+    w_px = max(96, int(width))
+    h_px = max(48, int(height))
+    base_h = int(round(h_px * 0.62))
+    layers: List[Any] = []
+    for alpha in alphas:
+        a = np.asarray(alpha, dtype=np.float32)
+        if a.ndim != 2 or a.size == 0:
+            continue
+        h = max(8, base_h + int(rng.integers(-2, 4)))
+        w = max(2, int(round(a.shape[1] * (h / float(max(1, a.shape[0]))))))
+        layer = Image.fromarray(np.clip(np.rint(a * 255.0), 0, 255).astype(np.uint8), mode="L")
+        layers.append(layer.resize((w, h), Image.BICUBIC))
+    if len(layers) != len(alphas) or not layers:
+        raise ValueError("no glyph layers to compose")
+
+    gap = max(10, int(round(w_px * 0.075)))
+    margin = max(6, int(round(w_px * 0.03)))
+    total = sum(layer.width for layer in layers) + gap * (len(layers) - 1)
+    if total > w_px - 2 * margin:
+        scale = (w_px - 2 * margin) / float(total)
+        layers = [
+            layer.resize(
+                (
+                    max(2, int(round(layer.width * scale))),
+                    max(2, int(round(layer.height * scale))),
+                ),
+                Image.BICUBIC,
+            )
+            for layer in layers
+        ]
+        total = sum(layer.width for layer in layers) + gap * (len(layers) - 1)
+
+    canvas = Image.new("L", (w_px, h_px), 0)
+    x = max(margin, (w_px - total) // 2)
+    for layer in layers:
+        y = (h_px - layer.height) // 2 + int(rng.integers(-2, 3))
+        canvas.paste(layer, (x, max(0, y)))
+        x += layer.width + gap
+    angle = float(rng.uniform(-1.0, 1.0))
+    if abs(angle) > 0.25:
+        canvas = canvas.rotate(
+            angle,
+            resample=Image.BICUBIC,
+            center=(w_px / 2.0, h_px / 2.0),
+            fillcolor=0,
+        )
+    canvas = canvas.filter(ImageFilter.GaussianBlur(float(rng.uniform(0.2, 0.5))))
+    alpha = np.asarray(canvas, dtype=np.float32) / 255.0
+    bg = np.float32(TEMPLATE_SAMPLE_BG) + rng.normal(0.0, 2.0, (h_px, w_px)).astype(np.float32)
+    ink = np.float32(TEMPLATE_SAMPLE_INK) + rng.normal(0.0, 2.0, (h_px, w_px)).astype(np.float32)
+    out = bg * (1.0 - alpha) + ink * alpha
+    return np.clip(np.rint(out), 0.0, 255.0).astype(np.uint8)
+
+
+def synthesize_sign_preview_png(
+    chars: Sequence[str],
+    *,
+    dataset_root: Optional[Path] = None,
+    bank: Optional[Dict[str, List[np.ndarray]]] = None,
+    width: int = TEMPLATE_SIGN_PREVIEW_WIDTH,
+    height: int = TEMPLATE_SIGN_PREVIEW_HEIGHT,
+    seed: Optional[int] = None,
+) -> bytes:
+    """A left-to-right multi-character sign plate, as PNG bytes.
+
+    This is the Preview card's "I don't have a photo of a road sign" path:
+    it combines glyphs the project already knows — its own samples first,
+    the EMNIST bank second — into one camera-realistic frame.  The caller
+    decides the ORDER (match / reversed / one wrong character); this
+    function only draws what it is given.  Each call draws fresh jitter,
+    rotation, glyph pick and sensor noise, so clicking a synth button twice
+    tests two different handwritings of the same target.
+
+    Raises ValueError for a character outside 0-9 / A-Z: a '?' pad is not a
+    sign character, and inventing a glyph for it would produce a plate the
+    target could never match.
+    """
+    order = [str(c).strip().upper()[:1] for c in chars if str(c).strip()]
+    if not order:
+        raise ValueError("no characters")
+    for ch in order:
+        if len(ch) != 1 or ch not in TEMPLATE_SIGN_CHARS:
+            raise ValueError(f"'{ch}' is not a sign character (0-9, A-Z)")
+
+    rng = np.random.default_rng(int(seed)) if seed is not None else np.random.default_rng()
+    if bank is None:
+        bank = load_emnist_template_bank()
+    alphas: List[np.ndarray] = []
+    for ch in order:
+        alpha = _dataset_glyph_alpha(ch, Path(dataset_root), rng) if dataset_root else None
+        if alpha is None:
+            alpha = _glyph_alpha_from_bank(ch, bank, rng)
+        alphas.append(alpha)
+    frame = _compose_sign_preview_frame(alphas, width=width, height=height, rng=rng)
+    buf = io.BytesIO()
+    Image.fromarray(frame, mode="L").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 # ════════════════════════════════════════════════════════════════════════

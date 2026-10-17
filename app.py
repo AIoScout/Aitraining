@@ -2707,6 +2707,36 @@ def _render_tm_old_frontend_html(
       padding: 7px 12px;
       font-size: 12px;
     }}
+    /* Sign-only one-click plates: the project's own samples combined into
+       a 3-character sign, so the Preview card is testable with no local
+       road-sign photo.  Pills, not buttons, because they are three variants
+       of ONE action and must not read as three separate features. */
+    .preview-synth-group {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }}
+    .preview-synth-pill {{
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line, #d7dbe2);
+      background: var(--surface, #fff);
+      color: var(--text, #202124);
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    .preview-synth-pill:hover:not(:disabled) {{
+      border-color: #1a73e8;
+      color: #1a73e8;
+    }}
+    .preview-synth-pill:disabled {{
+      opacity: 0.5;
+      cursor: not-allowed;
+    }}
     #previewPane.preview-drop-target {{
       outline: 2px dashed #1a73e8;
       outline-offset: -4px;
@@ -5100,6 +5130,7 @@ let previewUploadImageSrc = '';
 let previewUploadImageB64 = '';
 let previewUploadFilename = '';
 let previewPredictInFlight = false;
+let previewSynthInFlight = false;
 let previewPredictController = null;
 let previewPredictToken = 0;
 let previewLastPredictData = null;
@@ -7981,11 +8012,25 @@ async function startTrain() {{
           STATE.export_enabled = true;
           STATE._trained_fingerprint = datasetFingerprint();
           renderTrainStatus();
+          // A sign project's synthetic test plate was drawn for the model
+          // (and possibly the target) from BEFORE this training run.  Drop
+          // it so the card asks for a fresh MATCH plate against the new
+          // model — a real upload is left exactly where the user put it.
+          if (isSignOcrProject() && previewSource === 'upload' && /^synth_/.test(String(previewUploadFilename || ''))) {{
+            previewUploadImageB64 = '';
+            previewUploadImageSrc = '';
+            previewUploadFilename = '';
+            previewLastPredictData = null;
+          }}
           // Force the preview pane to re-render (fresh static image / fresh
           // predict loop) so the NEW model is visible immediately.
           const trainedPane = document.getElementById('previewPane');
           if (trainedPane) {{ trainedPane.removeAttribute('data-ready'); }}
           renderPreviewCard();
+          // If the upload source was already on, the loop now draws the
+          // fresh plate automatically (runPreviewUploadPrediction's
+          // no-image branch).
+          maybeAutoSynthesizeSignPreview();
           showTrainProgress(true, 1.0, msg || 'Done.');
           if (msg && msg.indexOf('WARNINGS') >= 0) {{
             showTrainWarningModal(msg);
@@ -8244,7 +8289,13 @@ async function seedEmnistSamples(names, opts) {{
     const res = await fetch(`${{baseUrl}}/samples/seed_emnist`, {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{session: STATE.session, classes: target, count: 24}})
+      body: JSON.stringify(Object.assign(
+        {{session: STATE.session, classes: target, count: 24}},
+        isSignOcrProject() ? {{
+          sign_sequence: signSequence().join(''),
+          reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+        }} : {{}}
+      ))
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to load template samples.');
@@ -8280,6 +8331,7 @@ async function seedEmnistSamples(names, opts) {{
       data.sample_previews = patchedPreviews;
     }}
     applyRuntimeStateAndRender(data);
+    maybeAutoSynthesizeSignPreview();
     if (!options.quiet) {{
       const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
       toast(seeded.length
@@ -8387,10 +8439,17 @@ async function applyAutoSeedEmnistSetting(enabled) {{
     params.set('session', String(STATE.session || ''));
     params.set('auto_seed_emnist', on ? '1' : '0');
     params.set('include_state', '1');
+    if (isSignOcrProject()) {{
+      // The target travels with the toggle so the backend can persist it
+      // and draw a MATCH preview plate during the same backfill pass.
+      params.set('sign_sequence', signSequence().join(''));
+      params.set('reading_order', String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')));
+    }}
     const res = await fetch(`${{baseUrl}}/live/config?${{params.toString()}}`);
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to update the auto-fill setting.');
     applyRuntimeStateAndRender(data);
+    if (on) maybeAutoSynthesizeSignPreview();
     toast(on
       ? 'Auto-fill on — empty character classes now hold 24 template samples.'
       : 'Template auto-fill off.');
@@ -8405,11 +8464,18 @@ async function fillEmptyClassesWithEmnist() {{
     const res = await fetch(`${{baseUrl}}/classes/seed_emnist`, {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{ session: STATE.session, only_empty: true, count: 24 }})
+      body: JSON.stringify(Object.assign(
+        {{ session: STATE.session, only_empty: true, count: 24 }},
+        isSignOcrProject() ? {{
+          sign_sequence: signSequence().join(''),
+          reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+        }} : {{}}
+      ))
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to fill empty classes.');
     applyRuntimeStateAndRender(data);
+    maybeAutoSynthesizeSignPreview();
     return data;
   }} catch (err) {{
     toast(String(err && err.message ? err.message : err));
@@ -9021,7 +9087,10 @@ function stopPreviewPredictLoop() {{
 function previewHeadline(data) {{
   const d = data || {{}};
   const text = d.top_label ? String(d.top_label) : '';
-  if (d.sign_ocr) return text;
+  // The synth endpoint always carries match_text; fall back to it so a
+  // verdict is never described as "no verdict" just because top_label was
+  // left off a payload.
+  if (d.sign_ocr) return text || (d.match_text ? String(d.match_text) : '');
   if (!text) return '';
   const p = Math.round(Number(d.top_prob || 0) * 1000) / 10;
   return `Top: ${{text}} (${{p}}%)`;
@@ -9275,6 +9344,14 @@ function updatePreviewRoiOverlay(crop, isManual) {{
 async function runPreviewUploadPrediction() {{
   if (!previewInputOn || !STATE.export_enabled) return;
   if (!previewUploadImageB64) {{
+    // A sign project has a target but often no road-sign photo on disk —
+    // draw a MATCH plate instead of showing an empty preview.  The guard
+    // inside the synth handler prevents a request loop: it stores the plate
+    // before any later predict call sees an empty image again.
+    if (isSignOcrProject() && !previewSynthInFlight) {{
+      const made = await handleSynthesizeSignPreview('match', {{auto: true}});
+      if (made) return;
+    }}
     const note = document.getElementById('previewNote');
     if (note) note.textContent = 'Click 📁 Upload Image... above (or drop a file on this frame) to test an upload.';
     return;
@@ -9598,7 +9675,14 @@ function previewContextSource() {{
   return src === 'device' ? 'device' : (src === 'upload' ? 'upload' : 'webcam');
 }}
 function previewContextBarSignature() {{
-  return `${{previewContextSource()}}|${{(STATE.webcam_options || []).length}}|${{(STATE.serial_ports || []).length}}`;
+  // The sign flag and target are part of the signature: switching project
+  // type or typing a target character must add/remove/enable the synth
+  // pills, and the bar otherwise only rebuilds when the source or option
+  // lists change.
+  const sign = isSignOcrProject()
+    ? `1:${{signSequence().join('')}}:${{String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))}}:${{STATE.export_enabled ? '1' : '0'}}`
+    : '0';
+  return `${{previewContextSource()}}|${{(STATE.webcam_options || []).length}}|${{(STATE.serial_ports || []).length}}|${{sign}}`;
 }}
 function renderPreviewContextBar() {{
   const host = document.getElementById('previewContextBar');
@@ -9650,6 +9734,33 @@ function renderPreviewContextBar() {{
       row.appendChild(upload);
       row.appendChild(fileInput);
       row.appendChild(fname);
+      // A sign project has a target and no road-sign photo.  These pills
+      // draw one from the project's own samples, so the three-slot split
+      // and the YES/NO verdict are testable with zero files on disk.  They
+      // live in the upload source because that is the input they replace.
+      if (isSignOcrProject()) {{
+        const group = document.createElement('span');
+        group.className = 'preview-synth-group';
+        const defs = [
+          ['match', '🧪 Synth Match', 'Combine current 3 target characters into a synthetic sign image', 'previewSynthMatchBtn'],
+          ['reversed', '🔀 Synth Reversed', 'Combine in reversed order to test LTR/RTL direction', 'previewSynthRevBtn'],
+          ['mismatch', '❌ Synth Mismatch', 'Combine with a wrong character to test NO verdict', 'previewSynthMismatchBtn'],
+        ];
+        defs.forEach(([variant, label, tip, id]) => {{
+          const pill = document.createElement('button');
+          pill.type = 'button';
+          pill.id = id;
+          pill.className = 'preview-synth-pill';
+          pill.textContent = label;
+          pill.title = tip;
+          pill.dataset.synthVariant = variant;
+          // No trained model = no verdict to test; no target = nothing to
+          // combine.  Both are disabled rather than failing on click.
+          pill.disabled = !signSequenceIsSet() || !STATE.export_enabled;
+          group.appendChild(pill);
+        }});
+        row.appendChild(group);
+      }}
     }}
     host.appendChild(row);
     bindPreviewContextBar();
@@ -9687,6 +9798,9 @@ function bindPreviewContextBar() {{
     const el = document.getElementById('previewFileInput');
     if (el) el.click();
   }};
+  document.querySelectorAll('#previewContextBar [data-synth-variant]').forEach((pill) => {{
+    pill.onclick = () => {{ handleSynthesizeSignPreview(pill.dataset.synthVariant); }};
+  }});
 }}
 // Drag-and-drop is part of the upload source, not a global gesture: a drop
 // while Preview is reading the camera would silently switch what the model
@@ -9710,6 +9824,96 @@ function bindPreviewDropTarget() {{
     const file = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null;
     await handlePreviewUploadFile(file);
   }});
+}}
+// One-click "make me a sign to test": draws a composite plate from the
+// project's own glyph samples (EMNIST fallback) on the backend, then shows
+// it exactly like an upload — original plate, processed ROI, three 28x28
+// slot chips and the YES/NO banner.  The backend also stores the bytes as
+// the session's active preview frame, so a later Dark/Lum slider move or
+// ROI/Orig tab switch re-predicts the SAME plate through `reuse=1`.
+async function handleSynthesizeSignPreview(variant, opts) {{
+  const options = opts || {{}};
+  if (!isSignOcrProject()) {{
+    if (!options.auto) toast('Synthetic signs are only available in a sign project.');
+    return null;
+  }}
+  if (!STATE.export_enabled) {{
+    if (!options.auto) toast('Train a model first — the synth plate needs a model to read it.');
+    return null;
+  }}
+  if (!signSequenceIsSet()) {{
+    if (!options.auto) toast('Set the 3-character target sign first.');
+    return null;
+  }}
+  if (previewSynthInFlight) return null;
+  previewSynthInFlight = true;
+  const note = document.getElementById('previewNote');
+  if (note && !options.auto) note.textContent = 'Drawing a synthetic sign from the project samples…';
+  try {{
+    const res = await fetch(`${{baseUrl}}/preview/synthesize_sign`, {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{
+        session: STATE.session,
+        variant: String(variant || 'match'),
+        // The target is the SPA's editor state; the server persists it but
+        // this request must test what is on screen right now.
+        sign_sequence: signSequence().join(''),
+        reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+        bg_dark: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : '',
+        bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 100) : '',
+      }})
+    }});
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to synthesize a sign image.');
+
+    // A synth click means "read the model with this plate", so the Input
+    // light must be ON and the source must be upload — the same state a
+    // real file leaves behind.  persistPreviewState keeps that choice
+    // across the SPA's re-renders.
+    previewSource = 'upload';
+    STATE.preview_source = 'upload';
+    previewInputOn = true;
+    const toggle = document.getElementById('previewInputToggle');
+    if (toggle) toggle.checked = true;
+    previewUploadImageB64 = String(data.image_b64 || '');
+    previewUploadImageSrc = data.image_b64 ? `data:image/png;base64,${{data.image_b64}}` : '';
+    previewUploadFilename = String(data.filename || 'synth_sign.png');
+    previewLastPredictData = data;
+    persistPreviewState();
+    renderPreviewContextBar();
+    applyPreviewSrcToPane(data);
+    renderPreviewOutput(data);
+
+    const uploadName = document.getElementById('previewUploadName');
+    if (uploadName) uploadName.textContent = previewUploadFilename;
+    if (note) {{
+      const verdict = previewHeadline(data) || 'no verdict';
+      const slots = (Array.isArray(data.slots) ? data.slots : [])
+        .map((s) => `${{String((s && s.char) || '?')}}→${{String((s && s.label) || '—')}}`)
+        .join(' ');
+      const kind = String(data.synth_variant || variant || 'match');
+      note.textContent = `Synth (${{kind}}): ${{previewUploadFilename}} · ${{verdict}}${{slots ? ' · ' + slots : ''}}`;
+    }}
+    if (!options.auto) toast(`Synthetic sign ready — ${{previewHeadline(data) || previewUploadFilename}}`);
+    return data;
+  }} catch (err) {{
+    if (note) note.textContent = String(err && err.message ? err.message : err);
+    if (!options.auto) toast(String(err && err.message ? err.message : err));
+    return null;
+  }} finally {{
+    previewSynthInFlight = false;
+  }}
+}}
+// The upload source with no file of its own asks for a match plate instead
+// of showing an empty pane.  Called after auto-fill / training too, so the
+// "ready-to-preview synthetic sign" the backend stored is what the user
+// actually sees.
+function maybeAutoSynthesizeSignPreview() {{
+  if (!isSignOcrProject() || !STATE.export_enabled) return null;
+  if (previewContextSource() !== 'upload' || !previewInputOn) return null;
+  if (previewUploadImageB64) return null;
+  return handleSynthesizeSignPreview('match', {{auto: true}});
 }}
 async function handlePreviewUploadFile(file) {{
   if (!file) return false;
@@ -9981,7 +10185,10 @@ function applyPreviewSrcToPane(data) {{
   if (previewShowRaw && previewShowRoi) src = roiSrc;
   else if (previewShowRaw) src = fullSrc;
   else if (previewShowRoi) src = cropSrc;
-  if (!pane.dataset.ready) {{
+  // `ready` is set even when the pane shows the Input-off empty state, so
+  // the FIRST prediction (including a synth plate clicked before any image
+  // was selected) must be able to replace that placeholder with a stage.
+  if (!pane.dataset.ready || (src && !document.getElementById('previewImage'))) {{
     pane.innerHTML = `<div class="preview-stage"><img id="previewImage" alt="Preview"/><div class="roi-overlay" id="previewRoiOverlay" style="display:none"></div></div>`;
     pane.dataset.ready = '1';
   }}
