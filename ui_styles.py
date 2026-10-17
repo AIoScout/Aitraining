@@ -45,6 +45,38 @@ def inject_teachable_style() -> None:
     padding-left: 18px;
     padding-right: 18px;
   }
+
+  /* ── Workspace mode: full-viewport escape hatch ──────────────────────
+     The Start / Import pages render only Streamlit widgets, so they keep
+     the centered 1100px dashboard above.  The Workspace SPA, however, is
+     a single st.components.v1.html iframe — and that iframe was being
+     boxed by the very same .block-container rule, leaving huge grey
+     margins all round (and clipping the tutorial's fixed dim backdrop).
+     `:has(iframe)` matches ONLY the page that mounts the component, so we
+     can drop the outer container to a true 100vw × 100vh canvas without
+     disturbing the Start page. ───────────────────────────────────────── */
+  .block-container:has(iframe),
+  [data-testid="stMainBlockContainer"]:has(iframe),
+  section[data-testid="stMain"]:has(iframe),
+  [data-testid="stAppViewContainer"] > .main:has(iframe),
+  [data-testid="stAppViewContainer"] > .main > div:has(iframe) {
+    max-width: 100vw !important;
+    width: 100vw !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .stApp:has(iframe) [data-testid="stHeader"],
+  [data-testid="stAppViewContainer"]:has(iframe) [data-testid="stHeader"] {
+    display: none !important;
+  }
+  iframe[title="st.iframe"],
+  [data-testid="stCustomComponentV1"] > iframe {
+    width: 100vw !important;
+    min-height: 100vh !important;
+    border: none !important;
+    display: block !important;
+  }
+
   .tm-top-brand-marker {
     display: none;
   }
@@ -1379,6 +1411,95 @@ def inject_teachable_style() -> None:
     [data-baseweb="select"] p {
       color: #e8eaed !important;
       -webkit-text-fill-color: #e8eaed !important;
+    }
+
+    /* ── Start Page / Import Page: hero panel, workflow bar, section bridge,
+       project cards and outline buttons. These elements carry hardcoded
+       light-mode hex colors in their inline style attribute, so the dark
+       overrides below need !important to win over the element style. ── */
+    .tm-start-hero,
+    .tm-start-panel {
+      background-color: #161b22 !important;
+      border-color: #2a3442 !important;
+    }
+    .tm-start-hero-eyebrow,
+    .tm-start-hero-sub,
+    .tm-start-hero-workflow-label,
+    .tm-start-panel-sub {
+      color: #94a3b8 !important;
+    }
+    .tm-start-hero-title,
+    .tm-start-panel-title,
+    .tm-start-section-title,
+    .tm-start-card-title {
+      color: #f8fafc !important;
+    }
+    .tm-start-hero-workflow {
+      border-top-color: #2a3442 !important;
+    }
+    .tm-start-hero-step-num {
+      background: rgba(138, 180, 248, 0.18) !important;
+      color: #aecbfa !important;
+    }
+    .tm-start-hero-step-label {
+      color: #e2e8f0 !important;
+    }
+    .tm-start-hero-arrow {
+      color: #475569 !important;
+    }
+    .tm-start-hero-watermark {
+      opacity: 0.10 !important;
+      filter: invert(1);
+    }
+    /* Capability chips on the hero. */
+    .tm-chip {
+      background-color: #1e293b !important;
+      border-color: #2a3442 !important;
+      color: #94a3b8 !important;
+    }
+    /* "READY NOW" badge — dark-friendly green tint. */
+    .tm-start-ready-badge {
+      background: rgba(52, 211, 153, 0.16) !important;
+      color: #6ee7b7 !important;
+    }
+    /* Project cards: beat the base `background:#FFFFFF !important` rule so the
+       card title (which inherits the light dark-mode text color) is not
+       white-on-white. */
+    [data-testid="stContainer"]:has(> div > .tm-start-card),
+    [data-testid="stContainer"]:has(.tm-start-card),
+    [data-testid="stColumn"]:has(.tm-start-card) {
+      background-color: #1a212b !important;
+      border-color: #2a3442 !important;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.40) !important;
+    }
+    .tm-start-card-head p {
+      color: #94a3b8 !important;
+    }
+    /* Streamlit secondary (outline) buttons: Open Project / Import / Back. */
+    [data-testid="stButton"] button[kind="secondary"],
+    [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"],
+    [data-testid="stContainer"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"] {
+      background-color: rgba(255, 255, 255, 0.04) !important;
+      border-color: #475569 !important;
+      color: #e2e8f0 !important;
+    }
+    [data-testid="stButton"] button[kind="secondary"]:hover,
+    [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"]:hover,
+    [data-testid="stContainer"]:has(.tm-start-card) [data-testid="stButton"] button[kind="secondary"]:hover,
+    [data-testid="stButton"] button[kind="secondary"]:active {
+      background-color: rgba(138, 180, 248, 0.14) !important;
+      border-color: #8ab4f8 !important;
+      color: #aecbfa !important;
+    }
+    /* Dark-friendly text inputs + file uploader used across the outer views. */
+    [data-testid="stTextInput"] input {
+      background-color: #111821 !important;
+      border-color: #475569 !important;
+      color: #e8eaed !important;
+    }
+    [data-testid="stFileUploader"] section {
+      background-color: #111821 !important;
+      border-color: #475569 !important;
     }
   }
 
