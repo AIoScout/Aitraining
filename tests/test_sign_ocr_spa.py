@@ -494,8 +494,16 @@ _TINY_PNG = (
 _SEED_RESPONSE = {
     "ok": "1",
     "classes": ["A", "1"],
+    "seeded": ["A", "1"],
     "skipped": [],
     "count": "24",
+    "counts": {"A": 27, "1": 26},
+    "sample_previews": {
+        "A": [{"src": _TINY_PNG, "filename": "emnist_seed_00.png"}],
+        "1": [{"src": _TINY_PNG, "filename": "emnist_seed_00.png"}],
+    },
+    "train_enabled": True,
+    "train_rec": {},
     "states": {
         "A": {
             "ok": "1", "class": "A", "count": "27",
@@ -520,7 +528,8 @@ def _stub_seed_endpoint(page, payload=None):
           window.__seedBodies = [];
           const real = window.fetch;
           window.fetch = async (url, opts) => {
-            if (String(url).includes('/samples/seed_emnist')) {
+            if (String(url).includes('/samples/seed_emnist')
+                || String(url).includes('/classes/seed_emnist')) {
               const body = JSON.parse(opts.body);
               window.__seedBodies.push(body);
               if (payload) {
@@ -528,14 +537,35 @@ def _stub_seed_endpoint(page, payload=None):
                   status: 200, headers: {'Content-Type': 'application/json'}
                 });
               }
+              const names = Array.isArray(body.classes) ? body.classes : [];
               const states = {};
-              body.classes.forEach((name) => {
+              names.forEach((name) => {
                 states[name] = {ok: '1', class: name, count: '24', previews: []};
               });
               return new Response(JSON.stringify({
-                ok: '1', classes: body.classes, skipped: [], count: '24',
+                ok: '1', classes: names, seeded: names, skipped: [], count: '24',
                 states, processed_previews: {}
               }), {status: 200, headers: {'Content-Type': 'application/json'}});
+            }
+            return real(url, opts);
+          };
+        }""",
+        payload,
+    )
+
+
+def _stub_live_config(page, payload=None):
+    """Record /live/config writes; answer with `payload` (or {ok:'1'})."""
+    page.evaluate(
+        """(payload) => {
+          window.__liveConfigUrls = [];
+          const real = window.fetch;
+          window.fetch = async (url, opts) => {
+            if (String(url).includes('/live/config')) {
+              window.__liveConfigUrls.push(String(url));
+              return new Response(JSON.stringify(payload || {ok: '1'}), {
+                status: 200, headers: {'Content-Type': 'application/json'}
+              });
             }
             return real(url, opts);
           };
@@ -548,8 +578,8 @@ def assert_seeder_lives_in_advanced_settings(page):
     """The developer shortcut is in Settings -> Advanced and OCR-only."""
     page.evaluate("openGlobalSettings()")
     assert page.evaluate("document.getElementById('settingsEmnistGroup').style.display") == "block"
-    btn = page.evaluate("document.getElementById('settingsSeedEmnistBtn').textContent").strip()
-    assert btn == "Load EMNIST Template Samples (24 / class)", btn
+    btn = page.evaluate("document.getElementById('settingsSeedEmnistNowBtn').textContent").strip()
+    assert btn == "Fill Empty Classes with EMNIST Samples Now", btn
     assert page.evaluate(
         "document.getElementById('settingsAutoSeedEmnist').checked"
     ) is False
@@ -565,17 +595,19 @@ def assert_seeder_lives_in_advanced_settings(page):
     assert page.evaluate("document.getElementById('settingsEmnistGroup').style.display") == "block"
 
 
-def assert_seeder_button_fills_every_class(page):
+def assert_seeder_button_fills_empty_classes(page):
     _reset_sign_state(page)
     page.evaluate("autoSeedEmnistAttempted = new Set()")
     _stub_seed_endpoint(page, _SEED_RESPONSE)
 
     page.evaluate("openGlobalSettings()")
-    page.evaluate("document.getElementById('settingsSeedEmnistBtn').click()")
+    page.evaluate("document.getElementById('settingsSeedEmnistNowBtn').click()")
     page.wait_for_function("window.__seedBodies.length > 0")
 
     bodies = page.evaluate("window.__seedBodies")
-    assert bodies[0]["classes"] == ["A", "1"], bodies[0]
+    # The Settings button is the one-shot "fill the EMPTY ones" action: it
+    # asks the backend to decide, it does not enumerate names on the client.
+    assert bodies[0]["only_empty"] is True, bodies[0]
     assert bodies[0]["session"], bodies[0]
     assert int(bodies[0]["count"]) == 24, bodies[0]
 
@@ -590,7 +622,7 @@ def assert_seeder_button_fills_every_class(page):
     ) == "26 Image Samples"
     assert page.evaluate("STATE.processed_previews.A.length") == 1
     assert page.evaluate("STATE.processed_previews['1'].length") == 1
-    assert "24 template samples" in page.evaluate(
+    assert "Filled 2 empty character classes" in page.evaluate(
         "document.getElementById('toast').textContent"
     )
     # No class warnings appear anywhere in the workspace.
@@ -604,6 +636,7 @@ def assert_auto_seed_fills_a_new_empty_class(page):
     _reset_sign_state(page)
     page.evaluate("autoSeedEmnistAttempted = new Set()")
     _stub_seed_endpoint(page)
+    _stub_live_config(page)
 
     # Turning the checkbox on persists the choice, not just the checkbox.
     page.evaluate("openGlobalSettings()")
@@ -612,6 +645,11 @@ def assert_auto_seed_fills_a_new_empty_class(page):
     assert page.evaluate(
         "window.localStorage.getItem('auto_seed_emnist_samples')"
     ) == "1"
+    # ... and asks the controller to backfill classes that ALREADY exist.
+    assert page.evaluate(
+        "window.__liveConfigUrls.some((u) => u.indexOf('auto_seed_emnist=1') >= 0"
+        " && u.indexOf('include_state=1') >= 0)"
+    ) is True, page.evaluate("window.__liveConfigUrls")
     page.evaluate("closeGlobalSettings()")
 
     # Typing a new character creates a class with zero samples; the auto
@@ -728,7 +766,7 @@ def main() -> int:
             run("menu item and bar follow the type", assert_menu_item_and_bar_follow_the_project_type, page)
             run("settings reset keeps the target", assert_settings_reset_keeps_the_target, page)
             run("seeder is in Advanced settings", assert_seeder_lives_in_advanced_settings, page)
-            run("seeder fills every class", assert_seeder_button_fills_every_class, page)
+            run("seeder fills empty classes", assert_seeder_button_fills_empty_classes, page)
             run("auto-seed fills new empty class", assert_auto_seed_fills_a_new_empty_class, page)
 
             browser.close()

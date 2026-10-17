@@ -2667,6 +2667,50 @@ def _render_tm_old_frontend_html(
       gap: 12px;
       margin-top: 6px;
     }}
+    /* Context bar: exactly ONE input-source control, chosen in Settings.
+       The Preview card never offers a source switcher of its own — showing
+       a webcam picker, a serial picker and an upload button together would
+       ask the user to choose the same thing twice. */
+    #previewContextBar {{ margin-top: 10px; }}
+    #previewContextBar:empty {{ display: none; }}
+    .preview-context-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .preview-context-row select {{
+      flex: 1 1 160px;
+      min-width: 0;
+      padding: 7px 10px;
+      border-radius: 9px;
+      border: 1px solid var(--line, #d7dbe2);
+      background: var(--surface, #fff);
+      color: var(--text, #202124);
+      font-size: 12px;
+      font-weight: 600;
+    }}
+    .preview-context-row .upload-pick {{
+      flex: 0 0 auto;
+    }}
+    .preview-upload-name {{
+      flex: 1 1 120px;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      color: var(--muted, #5f6368);
+    }}
+    .preview-context-row .tm-btn {{
+      flex: 0 0 auto;
+      padding: 7px 12px;
+      font-size: 12px;
+    }}
+    #previewPane.preview-drop-target {{
+      outline: 2px dashed #1a73e8;
+      outline-offset: -4px;
+    }}
     .preview-controls-right {{
       display: inline-flex;
       align-items: center;
@@ -4401,12 +4445,12 @@ def _render_tm_old_frontend_html(
           <label>Developer: EMNIST template samples</label>
           <label class="tm-settings-check">
             <input id="settingsAutoSeedEmnist" type="checkbox"/>
-            <span>Auto-fill empty classes with EMNIST template samples</span>
+            <span>Auto-fill empty classes with EMNIST template samples (24 / class)</span>
           </label>
           <div class="tm-settings-seed-row">
-            <button type="button" class="tm-btn" id="settingsSeedEmnistBtn">Load EMNIST Template Samples (24 / class)</button>
+            <button type="button" class="tm-btn" id="settingsSeedEmnistNowBtn">Fill Empty Classes with EMNIST Samples Now</button>
           </div>
-          <small id="settingsSeedEmnistHint">Draws 24 dark-ink-on-light EMNIST captures into every character class in this project, so the whole capture → preprocess → train → preview pipeline can be exercised before a camera is wired up. Real camera samples are kept.</small>
+          <small id="settingsSeedEmnistHint">Draws 24 dark-ink-on-light EMNIST captures into every EMPTY character class in this project, so the whole capture → preprocess → train → preview pipeline can be exercised before a camera is wired up. Classes with real camera samples are kept untouched.</small>
         </div>
       </div>
     </div>
@@ -4473,6 +4517,7 @@ def _render_tm_old_frontend_html(
           <label class="preview-toggle"><input id="previewRoiToggle" type="checkbox"/><span>ROI</span></label>
           <label class="preview-toggle"><input id="previewRawToggle" type="checkbox"/><span>Orig</span></label>
         </div>
+        <div id="previewContextBar"></div>
         <div id="previewSettingsHost"></div>
         <div class="preview-pane" id="previewPane"></div>
         <div class="preview-thresh-bar" id="previewThreshBar">
@@ -6169,7 +6214,10 @@ function restorePreviewState() {{
     const data = JSON.parse(raw);
     if (!data || typeof data !== 'object') return;
     previewInputOn = !!data.inputOn;
-    if (data.source === 'webcam' || data.source === 'device' || data.source === 'upload') previewSource = String(data.source);
+    if (data.source === 'webcam' || data.source === 'device' || data.source === 'upload') {{
+      previewSource = String(data.source);
+      STATE.preview_source = previewSource;
+    }}
     if (['auto_by_label', 'sign', 'junction', 'manual_roi', 'none'].includes(String(data.preprocess || ''))) {{
       previewPreprocessMode = String(data.preprocess);
     }}
@@ -6188,6 +6236,7 @@ function restorePreviewState() {{
   }} catch (e) {{}}
 }}
 function persistPreviewState() {{
+  STATE.preview_source = String(previewSource || 'webcam');
   try {{
     window.localStorage.setItem(previewStorageKey, JSON.stringify({{
       inputOn: !!previewInputOn,
@@ -7210,7 +7259,7 @@ function openGlobalSettings() {{
     if (seedHint) {{
       const chars = (Array.isArray(STATE.classes) ? STATE.classes : []).filter(isTemplateCharClass);
       seedHint.textContent = chars.length
-        ? `Fills ${{chars.join(', ')}} with 24 dark-ink-on-light template captures each. Real camera samples are kept.`
+        ? `Fills every EMPTY class among ${{chars.join(', ')}} with 24 dark-ink-on-light template captures. Classes with real camera samples are kept.`
         : 'Type a character (A-Z, 0-9) in the target bar first — there are no character classes to fill yet.';
     }}
     // ── Preview group: input source + OOD thresholds (reuse existing state vars) ──
@@ -8200,37 +8249,44 @@ async function seedEmnistSamples(names, opts) {{
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to load template samples.');
     const states = data.states && typeof data.states === 'object' ? data.states : {{}};
-    const processed = data.processed_previews && typeof data.processed_previews === 'object' ? data.processed_previews : {{}};
-    const seeded = (Array.isArray(data.classes) ? data.classes : target)
+    // `classes` is the project's COMPLETE class list and `seeded` names what
+    // this call drew; fall back to the old shape for a stale backend.
+    const seeded = (Array.isArray(data.seeded) ? data.seeded : [])
       .map((n) => String(n))
-      .filter((n) => !!states[n]);
-    seeded.forEach((name) => {{
-      const state = states[name] || {{}};
-      STATE.counts[name] = Number(state.count || 0);
-      STATE.sample_previews[name] = normalizePreviewList(state.previews).slice(0, PREF_MAX_SAMPLES_DISPLAY);
-      if (Object.prototype.hasOwnProperty.call(processed, name)) {{
-        STATE.processed_previews[name] = normalizePreviewList(processed[name]);
-      }}
-    }});
-    recomputeTrainEnabled();
-    refreshTrainRec();
-    syncTrainUi();
-    if (seeded.length) {{
-      let rebuilt = false;
-      seeded.forEach((name) => {{
-        const openHost = document.getElementById(`samplesHost-${{cssSafe(name)}}`);
-        if (openHost) {{
-          updateOpenSamplesPanel(name);
-          rebuilt = true;
+      .concat(
+        (Array.isArray(data.classes) ? data.classes : target)
+          .map((n) => String(n))
+          .filter((n) => !!states[n])
+      )
+      .filter((n, i, all) => all.indexOf(n) === i);
+    // The backend now returns the whole runtime state (classes, counts,
+    // sample_previews, train_enabled, train_rec).  Applying it is what makes
+    // a class that was ALREADY on screen update in place — no reload, no
+    // re-creating the class — so the card shows "24 Image Samples" and the
+    // Train button enables the moment the response lands.  A response that
+    // carries only the per-class `states` (older backend) is folded into the
+    // same shape first, so the cards still update.
+    if (!data.counts && Object.keys(states).length) {{
+      const patchedCounts = Object.assign({{}}, STATE.counts || {{}});
+      const patchedPreviews = Object.assign({{}}, STATE.sample_previews || {{}});
+      Object.keys(states).forEach((name) => {{
+        const state = states[name] || {{}};
+        if (state.count !== undefined) patchedCounts[name] = Number(state.count || 0);
+        if (Array.isArray(state.previews)) {{
+          patchedPreviews[name] = normalizePreviewList(state.previews).slice(0, PREF_MAX_SAMPLES_DISPLAY);
         }}
       }});
-      if (!rebuilt) render();
+      data.counts = patchedCounts;
+      data.sample_previews = patchedPreviews;
     }}
+    applyRuntimeStateAndRender(data);
     if (!options.quiet) {{
       const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
-      toast(skipped
-        ? `Loaded 24 template samples per class (skipped ${{skipped}} non-character class${{skipped === 1 ? '' : 'es'}}).`
-        : `Loaded 24 template samples per class.`);
+      toast(seeded.length
+        ? (skipped
+            ? `Loaded 24 template samples per class (skipped ${{skipped}} non-character class${{skipped === 1 ? '' : 'es'}}).`
+            : `Loaded 24 template samples per class.`)
+        : 'Every character class already has samples — nothing to fill.');
     }}
     return seeded;
   }} catch (err) {{
@@ -8257,6 +8313,108 @@ function autoSeedEmnistForNewClasses(names) {{
   // server response then replaces the counts for the classes it seeded.
   fresh.forEach((name) => autoSeedEmnistAttempted.add(String(name)));
   seedEmnistSamples(fresh, {{quiet: true}});
+}}
+// Apply the full runtime state every class-write response carries.  This is
+// deliberately a REPLACE and not a merge: the server's class list, counts and
+// previews are authoritative, and merging could keep a record for a class the
+// response just removed.  Missing keys are left alone so an older backend
+// that only sends `classes` still works.
+function applyRuntimeState(data) {{
+  const d = data && typeof data === 'object' ? data : {{}};
+  if (Array.isArray(d.classes)) {{
+    STATE.classes = d.classes.map((n) => String(n));
+  }}
+  if (d.counts && typeof d.counts === 'object') {{
+    const counts = {{}};
+    Object.keys(d.counts).forEach((name) => {{
+      counts[name] = Number(d.counts[name] || 0);
+    }});
+    STATE.counts = counts;
+  }}
+  if (d.sample_previews && typeof d.sample_previews === 'object') {{
+    const previews = {{}};
+    Object.keys(d.sample_previews).forEach((name) => {{
+      previews[name] = normalizePreviewList(d.sample_previews[name]).slice(0, PREF_MAX_SAMPLES_DISPLAY);
+    }});
+    STATE.sample_previews = previews;
+  }}
+  if (d.processed_previews && typeof d.processed_previews === 'object') {{
+    const processed = {{}};
+    Object.keys(d.processed_previews).forEach((name) => {{
+      processed[name] = normalizePreviewList(d.processed_previews[name]);
+    }});
+    STATE.processed_previews = processed;
+  }}
+  if (typeof d.train_enabled === 'boolean') STATE.train_enabled = d.train_enabled;
+  else recomputeTrainEnabled();
+  if (d.train_rec && typeof d.train_rec === 'object') STATE.train_rec = d.train_rec;
+  return d;
+}}
+// The class column is built by render(); this is the named entry point a
+// state response calls so "update the cards" reads as one action.  It is
+// intentionally the same path as a normal render: counts, previews, the
+// Train button and the open sample panel must all agree with STATE, and a
+// second, partial renderer would be a second place for them to disagree.
+function renderClassCards() {{
+  render();
+}}
+// Refresh the Training card's derived UI (recommendation, enablement,
+// status) without rebuilding the class column.
+function renderTrainingCard() {{
+  recomputeTrainEnabled();
+  refreshTrainRec();
+  syncTrainUi();
+  renderTrainStatus();
+}}
+function applyRuntimeStateAndRender(data) {{
+  applyRuntimeState(data);
+  renderClassCards();
+  renderTrainingCard();
+}}
+// The Settings checkbox is the master switch for the auto-fill workflow.
+// Flipping it persists the flag on the project AND asks the controller to
+// backfill every class that is ALREADY on disk with zero samples — the
+// classes do not have to be re-created for the fill to happen.
+async function applyAutoSeedEmnistSetting(enabled) {{
+  const on = !!enabled;
+  setAutoSeedEmnistEnabled(on);
+  STATE.train_cfg = Object.assign({{}}, STATE.train_cfg || {{}}, {{
+    auto_seed_emnist_samples: on,
+  }});
+  persistTrainCfgStorage();
+  try {{
+    const params = new URLSearchParams();
+    params.set('session', String(STATE.session || ''));
+    params.set('auto_seed_emnist', on ? '1' : '0');
+    params.set('include_state', '1');
+    const res = await fetch(`${{baseUrl}}/live/config?${{params.toString()}}`);
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to update the auto-fill setting.');
+    applyRuntimeStateAndRender(data);
+    toast(on
+      ? 'Auto-fill on — empty character classes now hold 24 template samples.'
+      : 'Template auto-fill off.');
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+  }}
+}}
+// One-shot "fill the empty ones NOW", independent of the checkbox: the
+// button is an explicit request, so it runs even while auto-fill is off.
+async function fillEmptyClassesWithEmnist() {{
+  try {{
+    const res = await fetch(`${{baseUrl}}/classes/seed_emnist`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{ session: STATE.session, only_empty: true, count: 24 }})
+    }});
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to fill empty classes.');
+    applyRuntimeStateAndRender(data);
+    return data;
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+    return null;
+  }}
 }}
 async function startHoldCapture() {{
   if (holdRecording || !openSourceClass || !openSourceKind || openSourceKind === 'upload') return;
@@ -8723,7 +8881,7 @@ async function refreshWebcamOptions() {{
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1' || !Array.isArray(data.options)) return;
     STATE.webcam_options = data.options;
-    const camSel = document.getElementById('previewCamera');
+    const camSel = document.getElementById('previewWebcamSelect') || document.getElementById('previewCamera');
     if (camSel) camSel.innerHTML = buildWebcamOptions(currentWebcamIndex, currentWebcamUid);
     for (const cls of (Array.isArray(STATE.classes) ? STATE.classes : [])) {{
       const sel = document.getElementById(`sourceCamera-${{cssSafe(cls)}}`);
@@ -9118,7 +9276,7 @@ async function runPreviewUploadPrediction() {{
   if (!previewInputOn || !STATE.export_enabled) return;
   if (!previewUploadImageB64) {{
     const note = document.getElementById('previewNote');
-    if (note) note.textContent = 'Choose an image in settings to test upload preview.';
+    if (note) note.textContent = 'Click 📁 Upload Image... above (or drop a file on this frame) to test an upload.';
     return;
   }}
   if (previewPredictInFlight) return;
@@ -9126,12 +9284,13 @@ async function runPreviewUploadPrediction() {{
   const pane = document.getElementById('previewPane');
   const note = document.getElementById('previewNote');
   try {{
-    const res = await fetch(`${{baseUrl}}/preview/predict_upload`, {{
+    const res = await fetch(`${{baseUrl}}/preview/upload`, {{
       method: 'POST',
       headers: {{'Content-Type':'application/json'}},
       body: JSON.stringify({{
         session: STATE.session,
         image_b64: previewUploadImageB64,
+        filename: String(previewUploadFilename || ''),
         preprocess: previewPreprocessMode,
         bg_dark: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : '',
         bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 0) : '', 
@@ -9150,9 +9309,12 @@ async function runPreviewUploadPrediction() {{
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Preview failed.');
     previewLastPredictData = data;
+    if (data.filename) previewUploadFilename = String(data.filename);
+    const uploadName = document.getElementById('previewUploadName');
+    if (uploadName) uploadName.textContent = previewUploadFilename || 'No image selected';
     applyPreviewSrcToPane(data);
     if (pane && !pane.dataset.ready) {{
-      pane.innerHTML = '<div class="preview-empty">Choose an upload image in settings.</div>';
+      pane.innerHTML = '<div class="preview-empty">Click 📁 Upload Image... above, or drop an image here.</div>';
     }}
     renderPreviewOutput(data);
     if (note) {{
@@ -9306,6 +9468,9 @@ async function setSerialChannelsGlobal(value) {{
 }}
 function buildPreviewSettingsMarkup() {{
   if (!previewSettingsOpen || !STATE.export_enabled) return '';
+  // The input SOURCE is chosen in Settings, once, and the card's context bar
+  // shows only the control that source needs.  It is deliberately absent
+  // here: two switchers for one choice was the confusing part.
   const exportFields = `
     <label>
       Export Name
@@ -9314,14 +9479,6 @@ function buildPreviewSettingsMarkup() {{
     <label>
       Array Name (optional)
       <input id="previewExportArray" value="${{String(exportArrayName || '')}}" placeholder="g_person_detect_model_data"/>
-    </label>
-    <label>
-      Input Source
-      <select id="previewInputSource">
-        <option value="webcam"${{previewSource === 'webcam' ? ' selected' : ''}}>Webcam</option>
-        <option value="device"${{previewSource === 'device' ? ' selected' : ''}}>Device</option>
-        <option value="upload"${{previewSource === 'upload' ? ' selected' : ''}}>Upload File</option>
-      </select>
     </label>
   `;
   const oodFields = `
@@ -9342,80 +9499,28 @@ function buildPreviewSettingsMarkup() {{
       <input id="previewOodEntropyRatioMax" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodEntropyRatioMax ?? 0.70)}}"/>
     </label>
   `;
-  if (previewSource === 'upload') {{
-    return `
-      <div class="source-settings-panel" id="previewSettingsPanel">
-        <div class="source-settings-grid">
-          ${{exportFields}}
-          ${{oodFields}}
-          <label>
-            Test Image
-            <button class="upload-pick" type="button" id="previewUploadPick">Choose image</button>
-          </label>
-          <label>
-            Selected File
-            <input id="previewUploadName" value="${{escapeHtml(String(previewUploadFilename || 'No file selected'))}}" readonly/>
-          </label>
-        </div>
-        <div class="source-settings-actions">
-          <button class="source-settings-cancel" type="button" id="previewSettingsCancel">Close</button>
-          <button class="source-settings-save" type="button" id="previewSettingsSave">Apply</button>
-        </div>
-      </div>
-    `;
-  }}
-  if (previewSource === 'device') {{
-    return `
-      <div class="source-settings-panel" id="previewSettingsPanel">
-        <div class="source-settings-grid">
-          ${{exportFields}}
-          ${{oodFields}}
-          <label>
-            Device Port
-            <select id="previewDevicePort">${{buildDeviceOptions(currentSerialPort)}}</select>
-          </label>
-          <label>
-            Image Size
-            <select id="previewDeviceFrameSide">${{buildSerialFrameSideOptions(currentSerialFrameSide)}}</select>
-          </label>
-          <label>
-            Color Mode
-            <select id="previewDeviceColorMode">${{buildSerialColorModeOptions(currentSerialChannels)}}</select>
-          </label>
-          <label>
-            Baud Rate
-            <select id="previewDeviceBaud">${{buildSerialBaudOptions(currentSerialBaud)}}</select>
-          </label>
-          <label>
-            Sync Header
-            <input id="previewDeviceSync" value="${{escapeHtml(String(currentSerialSync || 'AA 55 AA'))}}" placeholder="AA 55 AA"/>
-          </label>
-        </div>
-        <div class="source-settings-actions">
-          <button class="source-settings-cancel" type="button" id="previewSettingsCancel">Close</button>
-          <button class="source-settings-save" type="button" id="previewSettingsSave">Apply</button>
-        </div>
-      </div>
-    `;
-  }}
+  // One panel regardless of source: the source-specific CONTROLS live in
+  // #previewContextBar (camera picker / serial port / upload), so the gear
+  // panel only owns things that are not a source choice — export names,
+  // OOD gates and the webcam's preview rate.
+  const rateField = previewSource === 'webcam'
+    ? `
+      <label>
+        Preview Rate
+        <select id="previewPreviewRate">
+          <option value="60"${{Number(previewIntervalMs) === 60 ? ' selected' : ''}}>Fast</option>
+          <option value="80"${{Number(previewIntervalMs) === 80 ? ' selected' : ''}}>Balanced</option>
+          <option value="120"${{Number(previewIntervalMs) === 120 ? ' selected' : ''}}>Stable</option>
+          <option value="180"${{Number(previewIntervalMs) === 180 ? ' selected' : ''}}>Low CPU</option>
+        </select>
+      </label>`
+    : '';
   return `
     <div class="source-settings-panel" id="previewSettingsPanel">
       <div class="source-settings-grid">
         ${{exportFields}}
         ${{oodFields}}
-        <label>
-          Camera
-          <select id="previewCamera">${{buildWebcamOptions(currentWebcamIndex, currentWebcamUid)}}</select>
-        </label>
-        <label>
-          Preview Rate
-          <select id="previewPreviewRate">
-            <option value="60"${{Number(previewIntervalMs) === 60 ? ' selected' : ''}}>Fast</option>
-            <option value="80"${{Number(previewIntervalMs) === 80 ? ' selected' : ''}}>Balanced</option>
-            <option value="120"${{Number(previewIntervalMs) === 120 ? ' selected' : ''}}>Stable</option>
-            <option value="180"${{Number(previewIntervalMs) === 180 ? ' selected' : ''}}>Low CPU</option>
-          </select>
-        </label>
+        ${{rateField}}
       </div>
       <div class="source-settings-actions">
         <button class="source-settings-cancel" type="button" id="previewSettingsCancel">Close</button>
@@ -9429,33 +9534,8 @@ function renderPreviewSettings() {{
   if (!host) return;
   host.innerHTML = buildPreviewSettingsMarkup();
   updateFlow();
-  if (previewSource === 'device') {{
-    // Re-query the serial port list EVERY time the settings panel opens —
-    // a port plugged in after page load must appear (same query path as
-    // the class-area device dropdown).  The old guard only refreshed when
-    // the list was empty, so a newly connected port never showed up.
-    refreshSerialPorts(false, 'previewDevicePort').catch(() => {{}});
-  }}
   const cancel = document.getElementById('previewSettingsCancel');
   const save = document.getElementById('previewSettingsSave');
-  const portSel = document.getElementById('previewDevicePort');
-  const sourceSel = document.getElementById('previewInputSource');
-  const uploadPick = document.getElementById('previewUploadPick');
-  if (portSel) {{
-    // Refresh ports once when the settings panel opens — NOT on every
-    // dropdown click (refilling mid-interaction resets the selection).
-    portSel.onchange = () => {{
-      // selection is applied on Save — just keep the UI value
-    }};
-  }}
-  if (sourceSel) sourceSel.onchange = () => {{
-    previewSource = String(sourceSel.value || 'webcam');
-    renderPreviewSettings();
-  }};
-  if (uploadPick) uploadPick.onclick = async () => {{
-    await pickPreviewUploadFile();
-    renderPreviewSettings();
-  }};
   if (cancel) cancel.onclick = () => {{
     previewSettingsOpen = false;
     renderPreviewSettings();
@@ -9464,36 +9544,11 @@ function renderPreviewSettings() {{
     try {{
       const nameEl = document.getElementById('previewExportName');
       const arrayEl = document.getElementById('previewExportArray');
-      const sourceEl = document.getElementById('previewInputSource');
       exportModelName = String(nameEl ? nameEl.value : exportModelName || 'tm').trim() || 'tm';
       exportArrayName = String(arrayEl ? arrayEl.value : exportArrayName || '').trim();
-      const nextSource = String(sourceEl ? sourceEl.value : previewSource || 'webcam');
-      previewSource = nextSource === 'device' ? 'device' : (nextSource === 'upload' ? 'upload' : 'webcam');
-      persistPreviewState();
       persistExportSettings();
-      if (previewSource === 'device') {{
-        const portEl = document.getElementById('previewDevicePort');
-        const sideEl = document.getElementById('previewDeviceFrameSide');
-        const modeEl = document.getElementById('previewDeviceColorMode');
-        const baudEl = document.getElementById('previewDeviceBaud');
-        const syncEl = document.getElementById('previewDeviceSync');
-        await setDevicePortGlobal(portEl ? portEl.value : currentSerialPort);
-        await setSerialFrameSideGlobal(sideEl ? sideEl.value : String(currentSerialFrameSide));
-        await setSerialChannelsGlobal(modeEl ? modeEl.value : String(currentSerialChannels));
-        await setSerialBaudGlobal(baudEl ? baudEl.value : String(currentSerialBaud));
-        await setSerialSyncGlobal(syncEl ? syncEl.value : String(currentSerialSync));
-      }} else if (previewSource === 'webcam') {{
-        const camEl = document.getElementById('previewCamera');
-        const rateEl = document.getElementById('previewPreviewRate');
-        const nextCam = camEl ? camEl.value : String(currentWebcamIndex);
-        const nextUid = camEl && camEl.selectedOptions && camEl.selectedOptions[0] ? String(camEl.selectedOptions[0].dataset.uid || '') : '';
-        const indexChanged = String(nextCam) !== String(currentWebcamIndex);
-        const uidChanged = String(nextUid) !== String(currentWebcamUid || '');
-        if (indexChanged || uidChanged) {{
-          await setWebcamIndexGlobal(nextCam, nextUid);
-        }}
-        if (rateEl) previewIntervalMs = Number(rateEl.value || previewIntervalMs || 80);
-      }}
+      const rateEl = document.getElementById('previewPreviewRate');
+      if (rateEl) previewIntervalMs = Number(rateEl.value || previewIntervalMs || 80);
       const oodSignMinEl = document.getElementById('previewOodSignPctMin');
       const oodSignMaxEl = document.getElementById('previewOodSignPctMax');
       const oodMaxProbEl = document.getElementById('previewOodMaxProbMin');
@@ -9502,63 +9557,181 @@ function renderPreviewSettings() {{
       previewOodSignPctMax = Math.max(0, Math.min(100, Number(oodSignMaxEl ? oodSignMaxEl.value : (previewOodSignPctMax ?? 70.0))));
       previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodMaxProbEl ? oodMaxProbEl.value : (previewOodMaxProbMin ?? 0.60))));
       previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntropyEl ? oodEntropyEl.value : (previewOodEntropyRatioMax ?? 0.70))));
-      const darkEl = document.getElementById('previewDarkThresh');
-      const lumEl = document.getElementById('previewLumThresh');
-      previewDarkThresh = Number(darkEl ? darkEl.value : (previewDarkThresh ?? 0));
-      previewLumThresh = Number(lumEl ? lumEl.value : (previewLumThresh ?? 100));
       persistPreviewState();
-      const needsAutoPick = previewSource === 'upload' && !previewUploadFilename;
-      if (previewSource === 'upload' && previewUploadFilename) {{
-        previewInputOn = true;
-      }}
       previewSettingsOpen = false;
       renderPreviewSettings();
       renderPreviewCard();
+      // Upload mode re-evaluates the stored image with the just-saved
+      // thresholds; the other sources restart their normal loop.
       if (previewSource === 'upload') {{
-        if (needsAutoPick) {{
-          try {{
-            const picked = await pickPreviewUploadFile();
-            if (picked) {{
-              previewInputOn = true;
-              const inputToggle = document.getElementById('previewInputToggle');
-              if (inputToggle) inputToggle.checked = true;
-              renderPreviewCard();
-              persistPreviewState();
-            }} else {{
-              previewInputOn = false;
-              const inputToggle = document.getElementById('previewInputToggle');
-              if (inputToggle) inputToggle.checked = false;
-              const note = document.getElementById('previewNote');
-              if (note) note.textContent = 'Pick a test image in Preview settings (⚙️) → Upload File.';
-              renderPreviewCard();
-            }}
-          }} catch (e) {{
-            toast(String(e && e.message ? e.message : e), 5000);
-          }}
-        }} else {{
-          const inputToggle = document.getElementById('previewInputToggle');
-          if (inputToggle) inputToggle.checked = true;
-          runPreviewUploadPrediction();
-        }}
+        if (previewInputOn) runPreviewUploadPrediction();
+      }} else if (previewInputOn) {{
+        if (previewPredictTimer) stopPreviewPredictLoop();
+        startPreviewPredictLoop();
       }} else {{
-        if (previewInputOn) {{
-          if (previewPredictTimer) stopPreviewPredictLoop();
-          startPreviewPredictLoop();
-        }} else {{
-          // Preview settings Apply with Input OFF + webcam/device source:
-          // no live Preview pane — the visual loop must not run (it opened
-          // the camera without the user toggling Input).  The class-panel
-          // source loop is independent and only ticks when a class source
-          // is actually open (guarded inside refreshPreviewImage).
-          if (previewVisualTimer) stopPreviewVisualLoop();
-          startPreviewLoop();
-        }}
+        if (previewVisualTimer) stopPreviewVisualLoop();
+        startPreviewLoop();
       }}
     }} catch (err) {{
       toast(String(err && err.message ? err.message : err));
     }}
   }};
   scheduleLayoutResync();
+}}
+// ── Preview context bar ─────────────────────────────────────────────────
+// Settings owns WHICH input the Preview card reads from.  The card shows
+// only the one control that source needs, so the page never asks the user
+// to pick the same thing twice:
+//   webcam → compact camera select
+//   device → compact serial-port select + Refresh
+//   upload → an Upload button, a persistent file input, the file name
+//            (plus drag-and-drop onto the preview frame)
+function previewContextSource() {{
+  // STATE.preview_source is the Settings-facing name for the same choice
+  // (set by the master selector and persisted with the SPA).  Prefer it
+  // when valid so a caller that updates STATE sees the bar follow even
+  // before the next persistPreviewState().
+  const fromState = String((STATE && STATE.preview_source) || '');
+  const src = (fromState === 'device' || fromState === 'upload' || fromState === 'webcam')
+    ? fromState
+    : String(previewSource || 'webcam');
+  return src === 'device' ? 'device' : (src === 'upload' ? 'upload' : 'webcam');
+}}
+function previewContextBarSignature() {{
+  return `${{previewContextSource()}}|${{(STATE.webcam_options || []).length}}|${{(STATE.serial_ports || []).length}}`;
+}}
+function renderPreviewContextBar() {{
+  const host = document.getElementById('previewContextBar');
+  if (!host) return;
+  const src = previewContextSource();
+  // Rebuild only when the source (or the option lists it draws from)
+  // changes.  Rebuilding a <select> on every render would drop focus and
+  // reset a value the user is in the middle of choosing.
+  if (host.dataset.signature !== previewContextBarSignature()) {{
+    host.dataset.signature = previewContextBarSignature();
+    host.dataset.source = src;
+    host.innerHTML = '';
+    const row = document.createElement('div');
+    row.className = 'preview-context-row';
+    if (src === 'webcam') {{
+      const sel = document.createElement('select');
+      sel.id = 'previewWebcamSelect';
+      sel.title = 'Camera used by the Preview input';
+      sel.innerHTML = buildWebcamOptions(currentWebcamIndex, currentWebcamUid);
+      row.appendChild(sel);
+    }} else if (src === 'device') {{
+      const sel = document.createElement('select');
+      sel.id = 'previewSerialPortSelect';
+      sel.title = 'Serial port of the MCU device';
+      sel.innerHTML = buildDeviceOptions(currentSerialPort);
+      const refresh = document.createElement('button');
+      refresh.type = 'button';
+      refresh.id = 'previewSerialRefreshBtn';
+      refresh.className = 'tm-btn';
+      refresh.textContent = 'Refresh';
+      refresh.title = 'Re-scan serial ports';
+      row.appendChild(sel);
+      row.appendChild(refresh);
+    }} else {{
+      const upload = document.createElement('button');
+      upload.type = 'button';
+      upload.id = 'previewUploadBtn';
+      upload.className = 'upload-pick';
+      upload.textContent = '📁 Upload Image...';
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.id = 'previewFileInput';
+      fileInput.accept = 'image/*';
+      fileInput.style.display = 'none';
+      const fname = document.createElement('span');
+      fname.id = 'previewUploadName';
+      fname.className = 'preview-upload-name';
+      fname.textContent = previewUploadFilename || 'No image selected';
+      row.appendChild(upload);
+      row.appendChild(fileInput);
+      row.appendChild(fname);
+    }}
+    host.appendChild(row);
+    bindPreviewContextBar();
+    if (src === 'device') refreshSerialPorts(false, 'previewSerialPortSelect').catch(() => {{}});
+  }} else if (src === 'upload') {{
+    const fname = document.getElementById('previewUploadName');
+    if (fname) fname.textContent = previewUploadFilename || 'No image selected';
+  }}
+}}
+function bindPreviewContextBar() {{
+  const camSel = document.getElementById('previewWebcamSelect');
+  if (camSel) camSel.onchange = async () => {{
+    const uid = camSel.selectedOptions && camSel.selectedOptions[0]
+      ? String(camSel.selectedOptions[0].dataset.uid || '') : '';
+    await setWebcamIndexGlobal(camSel.value, uid);
+    persistPreviewState();
+    if (previewInputOn) {{ stopPreviewPredictLoop(); startPreviewPredictLoop(); }}
+  }};
+  const portSel = document.getElementById('previewSerialPortSelect');
+  if (portSel) portSel.onchange = async () => {{
+    await setDevicePortGlobal(portSel.value);
+    persistPreviewState();
+    if (previewInputOn) {{ stopPreviewPredictLoop(); startPreviewPredictLoop(); }}
+  }};
+  const refreshBtn = document.getElementById('previewSerialRefreshBtn');
+  if (refreshBtn) refreshBtn.onclick = () => {{
+    refreshSerialPorts(false, 'previewSerialPortSelect').catch(() => {{}});
+  }};
+  const fileInput = document.getElementById('previewFileInput');
+  if (fileInput) fileInput.onchange = () => {{
+    handlePreviewUploadFile(fileInput.files && fileInput.files[0]);
+  }};
+  const uploadBtn = document.getElementById('previewUploadBtn');
+  if (uploadBtn) uploadBtn.onclick = () => {{
+    const el = document.getElementById('previewFileInput');
+    if (el) el.click();
+  }};
+}}
+// Drag-and-drop is part of the upload source, not a global gesture: a drop
+// while Preview is reading the camera would silently switch what the model
+// is looking at.
+function bindPreviewDropTarget() {{
+  const pane = document.getElementById('previewPane');
+  if (!pane || pane.dataset.dropBound === '1') return;
+  pane.dataset.dropBound = '1';
+  const clear = () => pane.classList.remove('preview-drop-target');
+  pane.addEventListener('dragover', (e) => {{
+    if (previewContextSource() !== 'upload') return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    pane.classList.add('preview-drop-target');
+  }});
+  pane.addEventListener('dragleave', clear);
+  pane.addEventListener('drop', async (e) => {{
+    if (previewContextSource() !== 'upload') return;
+    e.preventDefault();
+    clear();
+    const file = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files[0] : null;
+    await handlePreviewUploadFile(file);
+  }});
+}}
+async function handlePreviewUploadFile(file) {{
+  if (!file) return false;
+  try {{
+    const b64 = await fileToB64(file);
+    const mime = String(file.type || 'image/png');
+    previewUploadImageB64 = String(b64 || '');
+    previewUploadImageSrc = `data:${{mime}};base64,${{b64}}`;
+    previewUploadFilename = String(file.name || 'upload');
+    previewSource = 'upload';
+    previewInputOn = true;
+    const inputToggle = document.getElementById('previewInputToggle');
+    if (inputToggle) inputToggle.checked = true;
+    persistPreviewState();
+    renderPreviewCard();
+    renderPreviewContextBar();
+    await runPreviewUploadPrediction();
+    return true;
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+    return false;
+  }}
 }}
 function showTrainWarningModal(text) {{
   let m = document.getElementById('trainWarningModal');
@@ -9677,6 +9850,13 @@ function setCheckedSilent(el, value) {{
   }}
 }}
 function renderPreviewCard() {{
+  // Keep the module-level source and STATE.preview_source (the name the
+  // Settings selector persists) in lockstep — the bar, the loops and the
+  // upload path all branch on the same value.
+  const stateSource = String((STATE && STATE.preview_source) || '');
+  if (stateSource === 'webcam' || stateSource === 'device' || stateSource === 'upload') {{
+    previewSource = stateSource;
+  }}
   const pane = document.getElementById('previewPane');
   const note = document.getElementById('previewNote');
   const output = document.getElementById('previewOutput');
@@ -9698,6 +9878,12 @@ function renderPreviewCard() {{
     stopPreviewPredictLoop();
     previewSettingsOpen = false;
     renderPreviewSettings();
+    const ctx = document.getElementById('previewContextBar');
+    if (ctx) {{
+      ctx.innerHTML = '';
+      ctx.dataset.signature = '';
+      ctx.dataset.source = '';
+    }}
     pane.removeAttribute('data-ready');
     pane.innerHTML = '<div class="preview-empty">Train a model on the left to enable preview.</div>';
     output.innerHTML = '';
@@ -9734,6 +9920,8 @@ function renderPreviewCard() {{
   setCheckedSilent(roiToggle, !!previewShowRoi);
   bindPreviewThreshBar();
   renderPreviewSettings();
+  renderPreviewContextBar();
+  bindPreviewDropTarget();
   const staticSrc = previewSource === 'upload' ? previewUploadImageSrc : latestPreviewImage();
   if (!pane.dataset.ready) {{
     pane.innerHTML = staticSrc
@@ -10686,8 +10874,15 @@ async function syncSignClassesToSequence() {{
     signSyncSavedTarget = key;
     if (!signClassesMatch(next)) {{
       applySignClassesState(next);
-      render();
     }}
+    // The response also carries the post-sync runtime state.  Applying it
+    // AFTER applySignClassesState (which rebuilds counts from the local
+    // snapshot) is what makes a newly added slot character show its 24
+    // template samples immediately, without waiting for a second request.
+    if (data.counts || data.sample_previews || typeof data.train_enabled === 'boolean') {{
+      applyRuntimeState(data);
+    }}
+    render();
     // A slot character that has just become a class starts empty.  When the
     // developer shortcut is on, fill it with template captures now — quiet,
     // because this rides on a background sync rather than a user action.
@@ -12142,29 +12337,32 @@ function render() {{
         advBody.style.display = expanded ? 'none' : 'flex';
       }};
     }}
-    // Template-sample seeder (Settings -> Advanced, OCR projects only).
+    // Template-sample auto-fill (Settings -> Advanced, OCR projects only).
+    // The checkbox does BOTH things at once: that is the point of "existing
+    // classes update immediately".  Turning it on persists the flag, then
+    // the controller backfills every character class that already exists
+    // with zero samples and returns the full state — which is applied to
+    // STATE and re-rendered right here, with no reload.
     const autoSeedBox = document.getElementById('settingsAutoSeedEmnist');
     if (autoSeedBox) {{
       autoSeedBox.onchange = (e) => {{
         if (e) e.stopPropagation();
-        setAutoSeedEmnistEnabled(!!autoSeedBox.checked);
-        toast(autoSeedBox.checked
-          ? 'Empty character classes will be filled with template samples.'
-          : 'Template auto-fill off.');
+        applyAutoSeedEmnistSetting(!!autoSeedBox.checked);
       }};
     }}
-    const seedBtn = document.getElementById('settingsSeedEmnistBtn');
+    const seedBtn = document.getElementById('settingsSeedEmnistNowBtn');
     if (seedBtn) {{
       seedBtn.onclick = async (e) => {{
         if (e) e.stopPropagation();
-        const names = (Array.isArray(STATE.classes) ? STATE.classes : []).filter(isTemplateCharClass);
-        if (!names.length) {{
-          toast('Nothing to fill — add a character class first.');
-          return;
-        }}
         seedBtn.disabled = true;
         try {{
-          await seedEmnistSamples(names);
+          const data = await fillEmptyClassesWithEmnist();
+          if (data) {{
+            const seeded = Array.isArray(data.seeded) ? data.seeded : [];
+            toast(seeded.length
+              ? `Filled ${{seeded.length}} empty character class${{seeded.length === 1 ? '' : 'es'}} with 24 template samples each.`
+              : 'Every character class already has samples — nothing to fill.');
+          }}
         }} finally {{
           seedBtn.disabled = false;
         }}

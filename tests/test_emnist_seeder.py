@@ -90,6 +90,9 @@ def test_seeder_writes_camera_style_templates():
         _seed_classes(ctrl, dataset, SEQUENCE)
 
         out = ctrl._samples_seed_emnist("s", classes=SEQUENCE)
+        # `classes` is the project's COMPLETE class list (it rides along with
+        # the runtime state); `seeded` names what this call drew.
+        assert out["seeded"] == SEQUENCE, out["seeded"]
         assert out["classes"] == SEQUENCE, out["classes"]
         assert out["skipped"] == [], out["skipped"]
         assert int(out["count"]) == 24
@@ -129,12 +132,12 @@ def test_seeder_writes_camera_style_templates():
         # A class name that is not one sign character is skipped, not guessed.
         ctrl._classes_save(dataset, SEQUENCE + ["Sign"])
         out = ctrl._samples_seed_emnist("s", classes=["sign", "a"])
-        assert out["classes"] == ["A"], out
+        assert out["seeded"] == ["A"], out
         assert out["skipped"] == ["Sign"], out
 
         # Basic OCR uses the same glyph pipeline, so the seeder is allowed there.
         ctrl._configs["s"] = _session_config(dataset, project_type=PROJECT_TYPE_OCR)
-        assert ctrl._samples_seed_emnist("s", classes=["1"])["classes"] == ["1"]
+        assert ctrl._samples_seed_emnist("s", classes=["1"])["seeded"] == ["1"]
 
         # An image project has no character classes to seed.
         ctrl._configs["s"] = _session_config(dataset, project_type="image")

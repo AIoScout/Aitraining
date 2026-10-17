@@ -230,6 +230,40 @@ def _is_truthy(value: Any) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
+def _parse_multipart_form(raw: bytes, content_type: str) -> Dict[str, Any]:
+    """Minimal multipart/form-data splitter for /preview/upload.
+
+    Only what that endpoint needs: text fields come back as strings and the
+    first file part becomes `image_bytes`.  Deliberately dependency-free —
+    the controller already speaks a small hand-rolled HTTP protocol, and a
+    full MIME parser would be far more machinery than one image upload.
+    """
+    m = re.search(r'boundary="?([^";]+)"?', str(content_type or ""), re.I)
+    if not m:
+        return {}
+    boundary = ("--" + m.group(1)).encode("latin-1")
+    out: Dict[str, Any] = {}
+    for part in raw.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--" or b"\r\n\r\n" not in part:
+            continue
+        head, body = part.split(b"\r\n\r\n", 1)
+        body = body.rstrip(b"\r\n")
+        header = head.decode("utf-8", "replace")
+        name_match = re.search(r'name="([^"]+)"', header, re.I)
+        if not name_match:
+            continue
+        name = name_match.group(1)
+        if re.search(r"filename=", header, re.I):
+            out["image_bytes"] = body
+            fname_match = re.search(r'filename="([^"]*)"', header, re.I)
+            if fname_match and fname_match.group(1):
+                out.setdefault("filename", fname_match.group(1))
+        else:
+            out[name] = body.decode("utf-8", "replace")
+    return out
+
+
 # ── TrainConfig (de)serialisation ───────────────────────────────────────
 # The .tmproj train_cfg is a TrainConfig snapshot, and the set of fields it
 # carries is DERIVED from the dataclass rather than listed by hand here.
@@ -534,6 +568,11 @@ class RecordController:
         self._train_conds: Dict[str, threading.Condition] = {}
         self._preview: Dict[str, Dict[str, Any]] = {}
         self._preview_locks: Dict[str, threading.Lock] = {}
+        # The most recent uploaded Preview image per session.  /preview/upload
+        # keeps it so a Dark/Lum slider move or an ROI/Orig tab switch can
+        # re-run inference on the SAME picture without re-uploading it; the
+        # SPA sends reuse=1 for those re-evaluations.
+        self._preview_uploads: Dict[str, Dict[str, Any]] = {}
         self._server: Optional[ThreadingHTTPServer] = None
         self._port: Optional[int] = None
         self._thread: Optional[threading.Thread] = None
@@ -936,6 +975,8 @@ class RecordController:
             direct_tensor_raw = (qs.get("direct_tensor_stream") or [None])[0]
             project_type_raw = (qs.get("project_type") or [None])[0]
             fps_raw = (qs.get("fps") or [None])[0]
+            auto_seed_raw = (qs.get("auto_seed_emnist") or [None])[0]
+            include_state_raw = (qs.get("include_state") or [None])[0]
             try:
                 if serial_sync_raw not in (None, ""):
                     parse_sync_header(serial_sync_raw)
@@ -971,30 +1012,48 @@ class RecordController:
             with self._lock:
                 wc_state = self._live.get(self._live_key(session_id, "webcam"))
             wc_actual = dict((wc_state or {}).get("actual") or {})
-            _send_json(
-                req,
-                {
-                    "ok": "1",
-                    "direct_tensor_stream": "1" if bool(getattr(cfg, "direct_tensor_stream", False)) else "0",
-                    "webcam_index": str(int(cfg.webcam_index)),
-                    "webcam_id": str(cfg.webcam_id or ""),
-                    "webcam_actual_backend": str(wc_actual.get("backend") or ""),
-                    "webcam_actual_uid": str(wc_actual.get("unique_id") or ""),
-                    "img_size": str(int(cfg.img_size)),
-                    "project_type": str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
-                    "serial_port": str(cfg.serial_port),
-                    "serial_baud": str(int(cfg.serial_baud)),
-                    "serial_sync": str(cfg.serial_sync),
-                    "serial_frame_side": str(int(cfg.serial_frame_side)),
-                    "serial_channels": str(int(cfg.serial_channels)),
-                    # Read-back for the Settings FPS field.  fps PACES the
-                    # record thread, so a page that showed its local default
-                    # (8.0) while the session actually ran at another rate was
-                    # reporting a number the capture did not obey.
-                    "fps": str(float(cfg.fps)),
-                },
-                cors=True,
-            )
+            # The Settings checkbox speaks through this endpoint when it
+            # flips: persist the flag, then backfill any class that is
+            # already on disk with zero samples.  `include_state=1` is the
+            # read-only variant used when the SPA wants the full state back
+            # after a live-setting change.
+            response: Dict[str, Any] = {
+                "ok": "1",
+                "direct_tensor_stream": "1" if bool(getattr(cfg, "direct_tensor_stream", False)) else "0",
+                "webcam_index": str(int(cfg.webcam_index)),
+                "webcam_id": str(cfg.webcam_id or ""),
+                "webcam_actual_backend": str(wc_actual.get("backend") or ""),
+                "webcam_actual_uid": str(wc_actual.get("unique_id") or ""),
+                "img_size": str(int(cfg.img_size)),
+                "project_type": str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                "serial_port": str(cfg.serial_port),
+                "serial_baud": str(int(cfg.serial_baud)),
+                "serial_sync": str(cfg.serial_sync),
+                "serial_frame_side": str(int(cfg.serial_frame_side)),
+                "serial_channels": str(int(cfg.serial_channels)),
+                # Read-back for the Settings FPS field.  fps PACES the
+                # record thread, so a page that showed its local default
+                # (8.0) while the session actually ran at another rate was
+                # reporting a number the capture did not obey.
+                "fps": str(float(cfg.fps)),
+            }
+            if auto_seed_raw is not None:
+                try:
+                    enabled = _is_truthy(auto_seed_raw)
+                    self._save_train_cfg(
+                        session_id,
+                        {"auto_seed_emnist_samples": enabled},
+                    )
+                    if enabled:
+                        self._seed_empty_char_classes(session_id)
+                except Exception:
+                    pass
+            if auto_seed_raw is not None or _is_truthy(include_state_raw):
+                try:
+                    response.update(self._runtime_state_payload(session_id))
+                except Exception:
+                    pass
+            _send_json(req, response, cors=True)
             return
         if path == "/live/frame":
             session_id = (qs.get("session") or [""])[0]
@@ -1344,8 +1403,10 @@ class RecordController:
             "/samples/delete",
             "/samples/clear",
             "/samples/seed_emnist",
+            "/classes/seed_emnist",
             "/preprocess/preview",
             "/preview/predict_upload",
+            "/preview/upload",
             "/classes/save_config",
             "/classes/reorder",
         }:
@@ -1357,7 +1418,35 @@ class RecordController:
             _send_json(req, {"ok": "0", "error": "empty body"}, status=400, cors=True)
             return
         raw = req.rfile.read(content_len)
-        payload = json.loads(raw.decode("utf-8"))
+        content_type = str(req.headers.get("Content-Type", "") or "").lower()
+        if path == "/preview/upload" and "application/json" not in content_type:
+            # A real file upload: the body IS the PNG/JPG bytes (either raw
+            # with an image/* Content-Type or multipart/form-data).  Session
+            # and options may ride on the query string so a bare `curl
+            # --data-binary @sign.png` works without a JSON envelope.
+            qs_params = parse_qs(parsed.query)
+            payload: Dict[str, Any] = {
+                "session": (qs_params.get("session") or [""])[0],
+                "image_bytes": raw,
+            }
+            if "multipart/form-data" in content_type:
+                payload.update(_parse_multipart_form(raw, content_type))
+            for key in (
+                "reuse",
+                "filename",
+                "preprocess",
+                "dark",
+                "bg_dark",
+                "lum",
+                "bg_lum",
+                "sign_sequence",
+                "reading_order",
+                "match_min",
+            ):
+                if key in qs_params:
+                    payload[key] = (qs_params[key] or [""])[0]
+        else:
+            payload = json.loads(raw.decode("utf-8"))
         if path == "/upload":
             session_id = str(payload.get("session") or "").strip()
             class_name = str(payload.get("class") or "").strip()
@@ -1450,10 +1539,24 @@ class RecordController:
                         self.update_config(session_id, img_size=size)
                 except Exception:
                     pass
+                # The auto-fill toggle lives in TrainConfig, so saving a
+                # config that turns it ON is exactly the moment to backfill
+                # classes that already exist and are still empty — no page
+                # reload, no waiting for the next class edit.
+                try:
+                    if isinstance(cfg, dict) and _is_truthy(cfg.get("auto_seed_emnist_samples")):
+                        self._seed_empty_char_classes(session_id)
+                except Exception:
+                    pass
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(req, {"ok": "1"}, cors=True)
+            response = {"ok": "1"}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
             return
         if path == "/train/recommend":
             session_id = str(payload.get("session") or "").strip()
@@ -1611,6 +1714,132 @@ class RecordController:
                 cors=True,
             )
             return
+        if path == "/preview/upload":
+            # Accepts the image either as JSON (image_b64) or as the raw
+            # request body (see the parser at the top of _handle_post), keeps
+            # the most recent one per session, and answers with everything
+            # the Preview card draws: the ORIGINAL picture, the processed
+            # ROI, the per-slot glyphs and the sign verdict (sign projects)
+            # or class ranking (image/OCR).  `reuse=1` re-runs inference on
+            # the stored image when the Dark/Lum sliders or the ROI/Orig
+            # tabs change — no second upload.
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            image_bytes = payload.get("image_bytes")
+            image_b64_in = str(payload.get("image_b64") or "").strip()
+            reuse = _is_truthy(payload.get("reuse"))
+            filename = str(payload.get("filename") or "").strip()
+            if not image_bytes and image_b64_in:
+                try:
+                    image_bytes = base64.b64decode(image_b64_in, validate=True)
+                except Exception as e:
+                    _send_json(req, {"ok": "0", "error": f"invalid image data: {e}"}, status=400, cors=True)
+                    return
+            if not image_bytes and reuse:
+                with self._lock:
+                    stored = dict(self._preview_uploads.get(session_id) or {})
+                image_bytes = stored.get("bytes")
+                filename = filename or str(stored.get("filename") or "")
+            if not image_bytes:
+                _send_json(
+                    req,
+                    {"ok": "0", "error": "missing image (send image_b64 or raw image bytes)"},
+                    status=400,
+                    cors=True,
+                )
+                return
+            # Re-encode to a clean PNG BEFORE storing: EXIF-rotated phone
+            # photos and palette/CMYK JPEGs would otherwise make the same
+            # upload preprocess differently from the preview shown.
+            try:
+                src_img = Image.open(_bytes_io(image_bytes))
+                try:
+                    src_img = ImageOps.exif_transpose(src_img)
+                    if src_img.mode not in {"L", "RGB"}:
+                        src_img = src_img.convert("RGB")
+                    orig_png = _to_png_bytes(src_img)
+                finally:
+                    try:
+                        src_img.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": f"unsupported image: {e}"}, status=400, cors=True)
+                return
+            with self._lock:
+                self._preview_uploads[session_id] = {
+                    "bytes": orig_png,
+                    "filename": filename,
+                }
+
+            def _opt_int(*keys: str) -> Optional[int]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return int(float(raw))
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            def _opt_float(*keys: str) -> Optional[float]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return float(raw)
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            bg_dark_thresh = _opt_int("bg_dark", "dark")
+            bg_lum_thresh = _opt_int("bg_lum", "lum")
+            try:
+                if self._is_sign_ocr_session(session_id):
+                    pred = self._preview_predict_sign_ocr(
+                        session_id=session_id,
+                        png=orig_png,
+                        sign_sequence=payload.get("sign_sequence"),
+                        reading_order=payload.get("reading_order"),
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        match_min_prob=_opt_float("match_min", "match_min_prob"),
+                    )
+                else:
+                    pred = self._preview_predict(
+                        session_id=session_id,
+                        png=orig_png,
+                        preprocess_mode=str(payload.get("preprocess") or "").strip(),
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        ood_sign_pct_min=_opt_float("ood_sign_min"),
+                        ood_sign_pct_max=_opt_float("ood_sign_max"),
+                        ood_max_prob_min=_opt_float("ood_max_prob"),
+                        ood_entropy_ratio_max=_opt_float("ood_entropy_max"),
+                    )
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            orig_b64 = base64.b64encode(orig_png).decode("ascii")
+            _send_json(
+                req,
+                {
+                    "ok": "1",
+                    **pred,
+                    # `orig` is the untouched upload (EXIF-corrected); `roi`
+                    # is the exact model-input rendering.  Kept as separate
+                    # keys because the SPA's ROI/Orig toggles use them by
+                    # name; image_b64 stays for older callers.
+                    "image_b64": orig_b64,
+                    "orig_b64": orig_b64,
+                    "roi_b64": str(pred.get("processed_image_b64") or ""),
+                    "filename": filename or "upload",
+                },
+                cors=True,
+            )
+            return
         if path == "/export/run":
             session_id = str(payload.get("session") or "").strip()
             export_dir = str(payload.get("export_dir") or "").strip()
@@ -1741,10 +1970,16 @@ class RecordController:
                 return
             try:
                 classes = self._classes_add(session_id=session_id)
+                self._seed_empty_char_classes(session_id)
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(req, {"ok": "1", "classes": classes}, cors=True)
+            response = {"ok": "1", "classes": classes}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
             return
         if path == "/classes/add_named":
             # Same response shape as /classes/add so the two are interchangeable
@@ -1764,10 +1999,16 @@ class RecordController:
                     names=names,
                     prune_empty_placeholders=bool(payload.get("prune_placeholders")),
                 )
+                self._seed_empty_char_classes(session_id)
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(req, {"ok": "1", "classes": classes}, cors=True)
+            response = {"ok": "1", "classes": classes}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
             return
         if path == "/classes/sync_ocr":
             # The road-sign UI has no class editor: its three inline slots ARE
@@ -1785,10 +2026,21 @@ class RecordController:
                 return
             try:
                 classes = self._classes_sync_ocr(session_id=session_id, names=names)
+                # A slot character that just became a class starts empty.
+                # When the developer auto-fill is on, the class exists with
+                # its 24 template captures by the time this response lands —
+                # the SPA can render "24 Image Samples" without a second
+                # round trip (and without a reload).
+                seeded = self._seed_empty_char_classes(session_id)
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(req, {"ok": "1", "classes": classes}, cors=True)
+            response = {"ok": "1", "classes": classes, "seeded": seeded}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
             return
         if path == "/samples/delete":
             session_id = str(payload.get("session") or "").strip()
@@ -1817,17 +2069,22 @@ class RecordController:
                 return
             _send_json(req, {"ok": "1", "state": state}, cors=True)
             return
-        if path == "/samples/seed_emnist":
+        if path in ("/samples/seed_emnist", "/classes/seed_emnist"):
             session_id = str(payload.get("session") or "").strip()
             names = payload.get("classes")
+            only_empty = any(
+                _is_truthy(payload.get(key))
+                for key in ("only_empty", "fill_empty", "all_empty")
+            )
             if not session_id:
                 _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
                 return
             try:
                 result = self._samples_seed_emnist(
                     session_id=session_id,
-                    classes=names if isinstance(names, list) else None,
+                    classes=names if isinstance(names, list) and names else None,
                     count=payload.get("count", TEMPLATE_SAMPLE_DEFAULT_COUNT),
+                    only_empty=only_empty,
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -3019,6 +3276,16 @@ class RecordController:
                         resolved_size = size
                 except Exception:
                     pass
+            # An archive with no recorded geometry still declares a project
+            # type, and the type implies one.  Without this, opening a legacy
+            # OCR file from an Image session left the session at 96x96 while
+            # the glyph pipeline ran at 28x28 — the next capture would then
+            # write 96x96 frames into a cache the file restored at 28x28.
+            if not resolved_size and resolved_type:
+                implied = int(default_img_size(resolved_type) or 0)
+                if 8 <= implied <= 512:
+                    self.update_config(session_id, img_size=implied)
+                    resolved_size = implied
 
             self._project_reset(session_id=session_id)
 
@@ -3071,26 +3338,48 @@ class RecordController:
             if processed_cache_in.exists():
                 shutil.copytree(processed_cache_in, processed_cache_out)
 
+            # A trained model survives this open only when the ARCHIVE ITSELF
+            # bundled one.  The record inside names absolute paths from the
+            # machine that saved the file, and those routinely still resolve
+            # here (two projects saved in the same default workspace share
+            # `runs/latest`), so writing it back would let
+            # _project_state_payload report export_enabled="1" off a graph
+            # this session never loaded — which is exactly how an Image model
+            # stayed "trained" inside a freshly opened OCR project.  Bundled
+            # wins; absent means no model, never a stale one.
             latest_in = tmp_dir / "tm_train_latest.json"
             latest_out = self._train_result_path(dataset_root)
             run_dir_hint = str(manifest.get("train_run_dir") or "")
+            run_dst = workspace_root / "runs" / "latest"
+            restored = False
             if latest_in.exists():
-                meta = json.loads(latest_in.read_text(encoding="utf-8"))
+                try:
+                    meta = json.loads(latest_in.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = None
                 run_src = (tmp_dir / run_dir_hint) if run_dir_hint else None
-                run_dst = workspace_root / "runs" / "latest"
-                if run_src is not None and run_src.exists():
+                if isinstance(meta, dict) and run_src is not None and run_src.exists():
                     if run_dst.exists():
                         shutil.rmtree(run_dst)
                     run_dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copytree(run_src, run_dst)
-                    if isinstance(meta, dict):
-                        meta["run_dir"] = str(run_dst)
-                        for key in ["keras_model_path", "tflite_path", "model_h_path", "model_cpp_path"]:
-                            nm = Path(str(meta.get(key) or "")).name
-                            cand = run_dst / nm if nm else None
-                            if cand is not None and cand.exists():
-                                meta[key] = str(cand)
-                latest_out.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    meta["run_dir"] = str(run_dst)
+                    for key in ["keras_model_path", "tflite_path", "model_h_path", "model_cpp_path"]:
+                        nm = Path(str(meta.get(key) or "")).name
+                        cand = run_dst / nm if nm else None
+                        if cand is not None and cand.exists():
+                            meta[key] = str(cand)
+                    restored = self._run_matches_project(run_dst, resolved_type, resolved_size)
+                if restored:
+                    latest_out.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                else:
+                    # Nothing usable came out of the archive: leave the
+                    # RESET state alone (no latest record, no run directory),
+                    # so export_enabled is false and the preview has no
+                    # interpreter to reuse.
+                    if run_dst.exists():
+                        shutil.rmtree(run_dst, ignore_errors=True)
+                    latest_out.unlink(missing_ok=True)
             project_state_in = tmp_dir / str(manifest.get("project_state") or "tm_project_state.json")
             project_state: Optional[Dict[str, Any]] = None
             if project_state_in.exists():
@@ -3130,6 +3419,40 @@ class RecordController:
         finally:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir)
+
+    def _run_matches_project(self, run_dir: Path, project_type: str, img_size: int) -> bool:
+        """Does a restored run belong to the project being opened?
+
+        A quantized graph is only usable by the workspace that will run it:
+        an OCR archive must not adopt an Image project's 96x96 model — nor a
+        28x28 one the other way round — just because both were trained in a
+        `runs/latest` this machine still has.  The run's own
+        `train_config.json` is the record the trainer wrote, and it carries
+        both the project type and the input geometry, so it answers the
+        question without guessing.  A run that does not say (an older
+        archive, or a hand-made directory) is not refused on this basis
+        alone — the archive's own header already gates it.
+        """
+        cfg_path = run_dir / "train_config.json"
+        if not cfg_path.exists():
+            return True
+        try:
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            return True
+        run_cfg = pick_train_cfg(loaded) if isinstance(loaded, dict) else {}
+        if project_type:
+            run_type = str(run_cfg.get("project_type") or "").strip().lower()
+            if run_type and run_type != project_type:
+                return False
+        if img_size:
+            try:
+                run_size = int(run_cfg.get("img_size") or 0)
+            except Exception:
+                run_size = 0
+            if run_size and run_size != int(img_size):
+                return False
+        return True
 
     def _project_reset(self, session_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -3276,6 +3599,7 @@ class RecordController:
         session_id: str,
         classes: Optional[List[Any]] = None,
         count: Any = TEMPLATE_SAMPLE_DEFAULT_COUNT,
+        only_empty: bool = False,
     ) -> Dict[str, Any]:
         """Fill character classes with camera-realistic EMNIST template samples.
 
@@ -3329,10 +3653,29 @@ class RecordController:
             ch = map_class_to_char(name)
             ch = ch.upper() if ch else ""
             if len(ch) == 1 and ch in TEMPLATE_SIGN_CHARS:
+                # only_empty is the auto-fill rule: a class that already holds
+                # ANY sample — a camera capture or a previous seed — is left
+                # alone.  "Empty" is the same count the class card shows.
+                if only_empty:
+                    class_dir = dataset_root / sanitize_class_name(name)
+                    if class_dir.exists() and _list_class_image_files(class_dir):
+                        continue
                 targets.append(name)
             else:
                 skipped.append(name)
         if not targets:
+            if only_empty:
+                # Nothing to do is the steady state of an auto-fill pass, not
+                # an error: every class is already populated.  The caller
+                # still gets the full runtime state so the UI can re-render.
+                return {
+                    "seeded": [],
+                    "skipped": skipped,
+                    "count": str(n),
+                    "states": {},
+                    "processed_previews": {},
+                    **self._runtime_state_payload(session_id, dataset_root),
+                }
             raise ValueError("no character classes to seed")
 
         bank = load_emnist_template_bank(cache_root=emnist_cache_dir(app_data_dir()))
@@ -3384,15 +3727,129 @@ class RecordController:
                 sample_preprocess=sample_preprocess,
             )
 
+        # Full post-seed state, not just the classes this call touched: the
+        # SPA applies it verbatim (STATE.classes / counts / sample_previews /
+        # train_enabled / train_rec) and re-renders the cards in place, so a
+        # class that was empty when the toggle flipped must show "24 Image
+        # Samples" before the toast even fades.  `classes` is the project's
+        # COMPLETE list; `seeded` names the ones this call actually drew.
         return {
-            "classes": targets,
+            "seeded": targets,
             "skipped": skipped,
             "count": str(n),
             "states": {
                 name: self._class_state_payload(dataset_root, name) for name in targets
             },
-            "processed_previews": self._processed_previews_payload(dataset_root, targets),
+            **self._runtime_state_payload(session_id, dataset_root),
         }
+
+    def _auto_seed_emnist_enabled(self, dataset_root: Path) -> bool:
+        """Is the project's "fill empty classes" developer shortcut on?
+
+        Read from the persisted train config, never from a request: the flag
+        is project state, so a class-write endpoint must honour the same
+        value the Settings checkbox last saved even when the caller is a
+        background sync that carries no options at all.
+        """
+        run_cfg = Path(dataset_root).parent / "runs" / "latest" / "train_config.json"
+        if not run_cfg.exists():
+            return False
+        try:
+            saved = pick_train_cfg(json.loads(run_cfg.read_text(encoding="utf-8")))
+        except Exception:
+            return False
+        return bool(saved.get("auto_seed_emnist_samples"))
+
+    def _seed_empty_char_classes(self, session_id: str) -> List[str]:
+        """Auto-fill every EMPTY character class, when the shortcut is on.
+
+        Runs after every class mutation (`/classes/add_named`,
+        `/classes/sync_ocr`, ...) and after `/train/config` saves the toggle,
+        so a class created before the flag flipped is filled by the very next
+        write instead of waiting for the next page load.  Returns the names
+        actually seeded; failures are swallowed on purpose — a seeder problem
+        must never turn "add a class" into an error.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            return []
+        try:
+            if not self._auto_seed_emnist_enabled(cfg.dataset_root):
+                return []
+            from ocr_dataset import TEMPLATE_SIGN_CHARS, map_class_to_char
+
+            empty: List[str] = []
+            for name in self._classes_load(cfg.dataset_root):
+                ch = (map_class_to_char(name) or "").upper()
+                if len(ch) != 1 or ch not in TEMPLATE_SIGN_CHARS:
+                    continue
+                class_dir = cfg.dataset_root / sanitize_class_name(name)
+                if class_dir.exists() and _list_class_image_files(class_dir):
+                    continue
+                empty.append(name)
+            if not empty:
+                return []
+            result = self._samples_seed_emnist(
+                session_id=session_id,
+                classes=empty,
+                count=TEMPLATE_SAMPLE_DEFAULT_COUNT,
+                only_empty=True,
+            )
+            return list(result.get("seeded") or [])
+        except Exception:
+            return []
+
+    def _runtime_state_payload(
+        self, session_id: str, dataset_root: Optional[Path] = None
+    ) -> Dict[str, Any]:
+        """The whole workspace state a class mutation can change.
+
+        The SPA's `STATE` is the source of truth for the cards, so a write
+        that only returns `classes` leaves counts, thumbnails and the Train
+        button stale until a reload.  This payload is the one shape every
+        such response carries: the ordered class list, the per-class counts
+        and sample previews, whether training is now enabled (the SAME rule
+        the client applies — >=2 classes, every class non-empty), and the
+        dataset-aware training recommendation.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        root = Path(dataset_root if dataset_root is not None else (cfg.dataset_root if cfg is not None else ""))
+        classes = self._classes_load(root)
+        counts: Dict[str, int] = {}
+        sample_previews: Dict[str, List[Dict[str, str]]] = {}
+        for name in classes:
+            class_dir = root / sanitize_class_name(name)
+            files = _list_class_image_files(class_dir) if class_dir.exists() else []
+            counts[name] = len(files)
+            previews: List[Dict[str, str]] = []
+            for sample in files[:12]:
+                try:
+                    previews.append(_preview_item_payload(sample))
+                except Exception:
+                    continue
+            sample_previews[name] = previews
+        non_empty = sum(1 for name in classes if counts.get(name, 0) > 0)
+        total = sum(counts.values())
+        payload: Dict[str, Any] = {
+            "classes": classes,
+            "counts": counts,
+            "sample_previews": sample_previews,
+            "processed_previews": self._processed_previews_payload(root, classes),
+            "train_enabled": bool(
+                len(classes) >= 2
+                and non_empty >= 2
+                and non_empty == len(classes)
+                and total > 0
+            ),
+        }
+        if session_id:
+            try:
+                payload.update(self._train_recommend(session_id=session_id, cfg={}))
+            except Exception:
+                pass
+        return payload
 
     def _processed_preview_item_payload(self, path: Path) -> Dict[str, str]:
         return _preview_item_payload(path)

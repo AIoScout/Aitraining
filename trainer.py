@@ -59,11 +59,26 @@ class TrainConfig:
     min_steps_per_epoch: int = 4
     auto_adjust_batch_and_epochs: bool = True
 
+    # Global ink polarity override for OCR projects. 0 = dark ink on a bright
+    # background (camera captures), 1 = bright ink on a dark background
+    # (EMNIST/MNIST style). Applied to every class at train time so the user
+    # does not have to set it per-class. Ignored by the image-project trainer.
+    ink_polarity: int = 0
+
     # Reading direction for multi-glyph sequences (road signs: "L 50", "STOP").
     # "ltr" reads left to right, "rtl" right to left. Only the sign-OCR
     # pipeline consumes it; single-character OCR and image projects read one
     # glyph or one label at a time and ignore it.
     reading_order: str = "ltr"
+
+    # Developer shortcut for the glyph projects: while this is on, every
+    # class-write endpoint fills any character class that still has ZERO
+    # samples with camera-realistic EMNIST template captures (24 dark-ink-on-
+    # light 96x96 PNGs).  It is project state, not a training hyperparameter —
+    # it rides in TrainConfig so it is saved with the project and read back by
+    # the controller after every class mutation.  A class with real captures
+    # is never touched, and turning it off does not remove what it drew.
+    auto_seed_emnist_samples: bool = False
 
     # The road sign's label, one character per slot, in the order it reads
     # (['A','1','A'] for a sign printed "A 1 A").  This is the TARGET the
