@@ -376,6 +376,197 @@ def segment_glyph_box(ink: np.ndarray, min_run: int = MIN_GLYPH_RUN) -> Optional
 
 
 # ════════════════════════════════════════════════════════════════════════
+# 3b. Sign sequences — reading a multi-glyph sign as one label
+#
+# A road sign carries its label as SEVERAL glyphs printed side by side:
+# "L 50", "3 0" (a speed limit), "A 1".  The whole label is one class, so
+# the glyph front-end has to hand the model three separate 28x28 crops,
+# one per character, in the order a reader would say them.
+#
+# That is the same segmentation problem as the single-glyph case with one
+# extra requirement the single-glyph case never had: the answer has to be
+# EXACTLY `count` boxes.  A frame with three clean gaps and a frame with
+# the glyphs touching must both produce three crops, because the model
+# always gets three inputs and the label always has three characters —
+# "we found two runs" is not a thing the caller can act on.
+# ════════════════════════════════════════════════════════════════════════
+SIGN_SEQUENCE_LEN = 3  # characters on a road-sign label
+# What an unfilled slot holds.  Deliberately a character no sign prints and
+# no class is ever named after, so "the third slot is blank" is a state the
+# matcher can recognise rather than a '0' it would cheerfully match.
+SIGN_SEQUENCE_PAD = "?"
+
+
+def normalize_sign_sequence(value: Any, length: int = SIGN_SEQUENCE_LEN) -> List[str]:
+    """Coerce anything a UI or a manifest can hold into `length` characters.
+
+    Accepts a list/tuple of strings, or a single string read as its
+    characters ("A1A" and "A 1 A" both give ['A', '1', 'A']).  Each entry
+    is upper-cased and trimmed to one character — a sign label is
+    glyph-by-glyph, and the class cards are named for those same single
+    characters, so a two-character entry could never match a class.  Short
+    input is padded with '?' — the placeholder that cannot collide with a
+    real class name — so the result is ALWAYS `length` long and the caller
+    never has to handle a ragged sequence.
+
+    This is the one place the shape is decided: the SPA's edit modal, the
+    preview pipeline and the saved project all round-trip through it.
+    """
+    try:
+        n = int(length)
+    except Exception:
+        n = SIGN_SEQUENCE_LEN
+    n = max(1, n)
+    chars: List[str] = []
+    if isinstance(value, str):
+        raw: List[Any] = [c for c in value if not c.isspace()]
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        raw = []
+    for item in raw:
+        text = "" if item is None else str(item).strip()
+        chars.append(text[:1].upper() if text else "")
+    chars = [c for c in chars if c]
+    if len(chars) > n:
+        chars = chars[:n]
+    while len(chars) < n:
+        chars.append(SIGN_SEQUENCE_PAD)
+    return chars
+
+
+def _union_box(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+    """Exclusive-ended bbox covering both inputs."""
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def _equal_split_boxes(
+    x1: int, x2: int, y1: int, y2: int, count: int
+) -> List[Tuple[int, int, int, int]]:
+    """`count` equal-width column bands spanning [x1, x2), all at [y1, y2).
+
+    The last band ends exactly on x2 rather than at `x1 + count*band`, so
+    the bands always tile the span with no gap and no overlap however the
+    integer division falls.  This is the fallback for a frame with no ink
+    to find valleys in — the caller still gets its three crops, and they
+    are the three crops the geometry alone would predict.
+    """
+    width = max(0, int(x2) - int(x1))
+    boxes: List[Tuple[int, int, int, int]] = []
+    for i in range(count):
+        bx1 = x1 + (width * i) // count
+        bx2 = x2 if i == count - 1 else x1 + (width * (i + 1)) // count
+        boxes.append((int(bx1), int(y1), int(bx2), int(y2)))
+    return boxes
+
+
+def _deepest_valley(ink: np.ndarray, x1: int, x2: int) -> Optional[int]:
+    """The column boundary inside (x1, x2) that cuts through the least ink.
+
+    Returns a p meaning "cut between column p-1 and column p", i.e. the
+    span [x1, x2) becomes [x1, p) + [p, x2).  The cut is scored on the ink
+    of the two columns it separates — the amount of stroke it would slice
+    — so a cut through the middle of a broad gap, where both neighbours are
+    empty, always beats one that clips a stroke.  Ties go to the boundary
+    nearest the midpoint, so two equally clean gaps split the span into
+    even halves rather than hugging one end.
+
+    None when the span is too narrow to hold a cut at all.
+    """
+    if x2 - x1 < 2:
+        return None
+    proj = ink.sum(axis=0, dtype=np.int64)
+    mid2 = int(x1) + int(x2)
+    best_p: Optional[int] = None
+    best_cost: Optional[int] = None
+    best_dist: Optional[int] = None
+    for p in range(int(x1) + 1, int(x2)):
+        cost = int(proj[p - 1]) + int(proj[p])
+        dist = abs(2 * p - mid2)
+        if best_cost is None or cost < best_cost or (cost == best_cost and dist < best_dist):
+            best_p, best_cost, best_dist = p, cost, dist
+    return best_p
+
+
+def split_sign_glyph_boxes(
+    ink: np.ndarray, count: int = SIGN_SEQUENCE_LEN, min_run: int = MIN_GLYPH_RUN
+) -> List[Tuple[int, int, int, int]]:
+    """EXACTLY `count` exclusive-ended glyph boxes, in left-to-right order.
+
+    Three moves, in order, and the last one cannot fail:
+
+    1. THE PROJECTION ALREADY AGREES.  `segment_glyph_boxes` finds exactly
+       `count` column runs — three glyphs with three separate ink columns.
+       Use them verbatim; this is the ordinary case for a printed sign.
+    2. IT DOES NOT.  Reconcile:
+       - too many runs (a "4" with a detached stem, a speck of sensor
+         noise): repeatedly MERGE THE NARROWEST RUN into its closer
+         neighbour.  Narrowest rather than "smallest gap", and the
+         difference is measured: on a sign whose three real glyphs sit at
+         x=10/30/60 with a 2 px speck at x=90, the smallest gaps are the
+         12 px ones BETWEEN the glyphs, so gap-first merging fuses glyphs
+         1 and 2 and keeps the speck.  Width is the signal that survives
+         both failure modes — a broken stroke's fragment and a noise speck
+         are both narrower than the glyphs beside them.
+       - too few runs (touching glyphs, a "111" that never separates):
+         SPLIT the widest box at its deepest valley, repeatedly.  Widest
+         first because the widest box is the one most likely to be holding
+         more than one glyph.
+    3. NEITHER MOVE IS AVAILABLE — no ink at all, or a span too narrow to
+       hold a cut.  Equal thirds of the union bbox.  The caller's contract
+       is three crops; this is the last one that can honour it.
+
+    Deterministic: every loop breaks a tie by index order, so the same
+    frame always yields the same boxes.
+    """
+    try:
+        n = int(count)
+    except Exception:
+        n = SIGN_SEQUENCE_LEN
+    n = max(1, n)
+    arr = np.asarray(ink)
+    if arr.ndim != 2 or arr.size == 0:
+        return []
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+
+    boxes = segment_glyph_boxes(arr, min_run=min_run)
+    if not boxes:
+        return _equal_split_boxes(0, w, 0, h, n)
+
+    while len(boxes) > n:
+        k = min(range(len(boxes)), key=lambda i: (boxes[i][2] - boxes[i][0], i))
+        if k == 0:
+            j = 1
+        elif k == len(boxes) - 1:
+            j = k - 1
+        else:
+            j = k - 1 if (boxes[k][0] - boxes[k - 1][2]) <= (boxes[k + 1][0] - boxes[k][2]) else k + 1
+        lo, hi = (j, k) if j < k else (k, j)
+        boxes[lo : hi + 1] = [_union_box(boxes[lo], boxes[hi])]
+
+    while len(boxes) < n:
+        i = max(range(len(boxes)), key=lambda k: (boxes[k][2] - boxes[k][0], -k))
+        bx1, by1, bx2, by2 = boxes[i]
+        p = _deepest_valley(arr, bx1, bx2)
+        if p is None:
+            # This box cannot be cut.  Give up on the reconciliation and
+            # answer geometrically over the whole span, so the result is
+            # still exactly `n` boxes hugging whatever ink was found.
+            whole = _union_box(boxes[0], boxes[-1])
+            return _equal_split_boxes(whole[0], whole[2], whole[1], whole[3], n)
+        left = _column_span_bbox(arr, bx1, p)
+        right = _column_span_bbox(arr, p, bx2)
+        # A sub-span with no ink of its own keeps the parent's rows: it is a
+        # blank slot, and reporting it as such is more useful than dropping
+        # it (the model still gets a 28x28 crop, and it reads as empty).
+        boxes[i : i + 1] = [
+            left if left is not None else (bx1, by1, p, by2),
+            right if right is not None else (p, by1, bx2, by2),
+        ]
+    return boxes
+
+
+# ════════════════════════════════════════════════════════════════════════
 # 4. Nearest-neighbour resize — exact rational box-centre mapping
 # ════════════════════════════════════════════════════════════════════════
 def nn_source_indices(in_len: int, out_len: int) -> np.ndarray:
@@ -671,3 +862,148 @@ def preprocess_glyph_capture(src: np.ndarray, out_size: int = GLYPH_SIZE,
         src, out_size=out_size, polarity=polarity,
         apply_segmentation=True, convention=convention,
     )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 7. Sign sequences — the multi-glyph front-end
+# ════════════════════════════════════════════════════════════════════════
+def preprocess_sign_sequence(
+    src: np.ndarray,
+    sign_sequence: Any = None,
+    reading_order: str = "ltr",
+    out_size: int = GLYPH_SIZE,
+    polarity: int = INK_DARK,
+    apply_segmentation: bool = True,
+    convention: str = NORM_CANON,
+    thresh: Optional[int] = None,
+    dark_thr: int = 0,
+) -> Dict[str, Any]:
+    """One sign frame -> one 28x28 glyph PER CHARACTER of the label.
+
+    The single-glyph path asks "where is the glyph?"; this asks "where is
+    each of the three glyphs, in the order the label is read?".  Everything
+    downstream of the split is the SAME transform — `preprocess_glyph` is
+    called once per slot on the slot's own crop — so a model trained on
+    single characters is being fed exactly the distribution it was trained
+    on, and there is no second normalisation implementation to keep in
+    step with the device port.
+
+    reading_order is applied AFTER the split, not before: the split is
+    physical (left to right across the frame), and "rtl" means the leftmost
+    glyph is the LAST character of the label, so slot 0 must come from the
+    rightmost crop.  Applying it to the split rather than to the image
+    keeps a mirror out of the pipeline entirely — mirroring the frame would
+    hand the model mirrored glyphs, which is a different, wrong, input.
+
+    Returns a dict (never raises):
+      slots      : one dict per label character, in LABEL order —
+                   {char, glyph, ink, box, box_norm, ok, empty}
+      glyphs     : [np.ndarray (out_size, out_size)] in label order
+      sign_box   : union bbox of every glyph, in SOURCE pixels
+      sign_box_norm : the same box as (x1,y1,x2,y2) fractions of the frame
+      ink        : the bool mask the split was taken from
+      thresh     : the binarisation threshold actually used
+      ok         : True when at least one slot found ink
+    """
+    seq = normalize_sign_sequence(sign_sequence)
+    n = len(seq)
+    order = str(reading_order or "ltr").strip().lower()
+    if order not in ("ltr", "rtl"):
+        order = "ltr"
+
+    blank_glyph = np.zeros((out_size, out_size), dtype=np.uint8)
+    out: Dict[str, Any] = {
+        "slots": [],
+        "glyphs": [blank_glyph.copy() for _ in range(n)],
+        "sign_box": None,
+        "sign_box_norm": None,
+        "ink": None,
+        "thresh": 0,
+        "ok": False,
+        "empty": True,
+        "reading_order": order,
+        "sign_sequence": list(seq),
+    }
+    try:
+        gray = rgb_to_lum_u8(src)
+        if gray.ndim != 2 or gray.shape[0] < 1 or gray.shape[1] < 1:
+            return out
+        h, w = int(gray.shape[0]), int(gray.shape[1])
+
+        t = int(otsu_threshold_u8(gray)) if thresh is None else int(thresh)
+        out["thresh"] = t
+        if t == 0 and thresh is None:
+            # No valid split existed (flat frame).  Same answer as the
+            # single-glyph path: there is no ink, so there is nothing to
+            # segment — report the frame split geometrically and stop.
+            ink = np.zeros(gray.shape, dtype=bool)
+        else:
+            ink = binarize_ink(gray, t, polarity=polarity)
+            if dark_thr > 0:
+                ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+        out["ink"] = ink
+
+        boxes: List[Tuple[int, int, int, int]]
+        if apply_segmentation:
+            boxes = split_sign_glyph_boxes(ink, count=n)
+        else:
+            # The frame is already the sign (a tight capture).  Slice it
+            # into n equal bands — the caller has told us segmentation has
+            # nothing to find.
+            boxes = _equal_split_boxes(0, w, 0, h, n)
+        if len(boxes) != n:
+            return out
+
+        if order == "rtl":
+            boxes = list(reversed(boxes))
+
+        for idx, (x1, y1, x2, y2) in enumerate(boxes):
+            crop = np.ascontiguousarray(gray[y1:y2, x1:x2])
+            if crop.size == 0:
+                res: Dict[str, Any] = {"glyph": blank_glyph.copy(), "ok": False, "empty": True}
+            else:
+                # Segmentation is OFF for the slot: the box already IS one
+                # glyph, and re-running the projection inside it could only
+                # re-find the same run — or, on a slot whose ink is a
+                # fragment, drop it below `min_run` and blank the slot.
+                res = preprocess_glyph(
+                    crop,
+                    out_size=int(out_size),
+                    polarity=polarity,
+                    apply_segmentation=False,
+                    convention=convention,
+                    thresh=thresh,
+                    dark_thr=dark_thr,
+                )
+            glyph = np.asarray(res["glyph"], dtype=np.uint8)
+            out["glyphs"][idx] = glyph
+            out["slots"].append(
+                {
+                    "char": str(seq[idx]),
+                    "glyph": glyph,
+                    "ink": res.get("ink"),
+                    "box": [int(x1), int(y1), int(x2), int(y2)],
+                    "box_norm": [
+                        float(x1) / float(w),
+                        float(y1) / float(h),
+                        float(x2) / float(w),
+                        float(y2) / float(h),
+                    ],
+                    "ok": bool(res.get("ok")),
+                    "empty": bool(res.get("empty", True)),
+                }
+            )
+
+        union = _union_box(boxes[0], boxes[-1])
+        out["sign_box"] = [int(v) for v in union]
+        out["sign_box_norm"] = [
+            float(union[0]) / float(w),
+            float(union[1]) / float(h),
+            float(union[2]) / float(w),
+            float(union[3]) / float(h),
+        ]
+        out["ok"] = any(bool(s.get("ok")) for s in out["slots"])
+        out["empty"] = not out["ok"]
+        return out
+    except Exception:
+        return out

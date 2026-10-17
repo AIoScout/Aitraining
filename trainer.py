@@ -20,7 +20,7 @@ from image_preprocess import (
     normalize_manual_roi,
     preprocess_for_label,
 )
-from dataset_io import PROJECT_TYPE_IMAGE, PROJECT_TYPE_OCR
+from dataset_io import PROJECT_TYPE_IMAGE, PROJECT_TYPE_OCR, PROJECT_TYPE_SIGN_OCR, is_glyph_project
 from ocr_dataset import BACKGROUND_CLASS_NAME, DEFAULT_EMNIST_SPLIT
 
 
@@ -58,6 +58,28 @@ class TrainConfig:
     class_names_order: Optional[List[str]] = None
     min_steps_per_epoch: int = 4
     auto_adjust_batch_and_epochs: bool = True
+
+    # Reading direction for multi-glyph sequences (road signs: "L 50", "STOP").
+    # "ltr" reads left to right, "rtl" right to left. Only the sign-OCR
+    # pipeline consumes it; single-character OCR and image projects read one
+    # glyph or one label at a time and ignore it.
+    reading_order: str = "ltr"
+
+    # The road sign's label, one character per slot, in the order it reads
+    # (['A','1','A'] for a sign printed "A 1 A").  This is the TARGET the
+    # preview matches against: the model's classes are the individual
+    # CHARACTERS, not the sign, so nothing else in the run records which
+    # sign is being built.
+    #
+    # It rides in TrainConfig (and so in the .tmproj) rather than in a store
+    # of its own because it is project state like any other — reopening the
+    # file has to restore the sign that was being built.
+    #
+    # Written and read through ocr_preprocess.normalize_sign_sequence, which
+    # guarantees exactly SIGN_SEQUENCE_LEN upper-cased characters, so the
+    # pipeline never sees a ragged or oversized sequence.  None and an
+    # all-placeholder sequence both mean "not set yet".
+    sign_sequence: Optional[List[str]] = None
 
     # ── OCR / character project ─────────────────────────────────────────
     # Only consulted when project_type == PROJECT_TYPE_OCR; the image
@@ -730,8 +752,13 @@ DEFAULT_STRATEGY = TrainStrategy(
 
 def get_train_strategy(project_type: object) -> TrainStrategy:
     """The strategy for a project type; unknown types get the image one."""
-    key = str(project_type or PROJECT_TYPE_IMAGE).strip().lower()
-    if key == PROJECT_TYPE_OCR:
+    # Membership of the glyph family, not equality with one type: sign_ocr
+    # trains the SAME per-character model OCR does (its classes are single
+    # characters, its samples are 28x28 glyphs, its EMNIST mix is the same
+    # one) — only the preview reads a whole sign at a time.  Naming a single
+    # type here is what would make the third glyph project silently train
+    # with the 96x96 image strategy.
+    if is_glyph_project(project_type):
         # Imported lazily: ocr_trainer imports THIS module for the shared
         # conv stack and head, so a module-level import would be a cycle.
         from ocr_trainer import OCR_STRATEGY

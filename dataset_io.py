@@ -28,6 +28,13 @@ COMMON_SPLIT_NAMES = {
 # project type never means forking the persistence or training lifecycle.
 PROJECT_TYPE_IMAGE = "image"
 PROJECT_TYPE_OCR = "ocr"
+# Road signs: a 3-character label read as a SEQUENCE.  Same glyph front-end
+# and the same per-character training set as OCR — what differs is that one
+# frame holds several glyphs, so the preview splits it and runs the model
+# once per slot.  The type exists (rather than a flag on the OCR project)
+# because the two answer different questions: OCR reads whatever character
+# is in the crop, sign_ocr asks whether the sign in view is the trained one.
+PROJECT_TYPE_SIGN_OCR = "sign_ocr"
 # The classified-import page is an image-project variant, not a third
 # pipeline: it produces the same workspace and trains with the same code.
 PROJECT_TYPE_CLASSIFIED_IMPORT = "image_classified_import"
@@ -35,17 +42,35 @@ PROJECT_TYPE_CLASSIFIED_IMPORT = "image_classified_import"
 KNOWN_PROJECT_TYPES = (
     PROJECT_TYPE_IMAGE,
     PROJECT_TYPE_OCR,
+    PROJECT_TYPE_SIGN_OCR,
     PROJECT_TYPE_CLASSIFIED_IMPORT,
 )
 
+# The types that share the character pipeline — a 28x28 glyph per class,
+# the integer-exact ocr_preprocess front-end, and (on export) the OCR
+# device sketch.  Membership is the whole test: anything that must behave
+# one way for "a project whose classes are characters" rather than for one
+# specific project type asks this instead of comparing to a single string,
+# so the third such type cannot be added and silently miss half the
+# dispatch sites.  (It already nearly happened: the sample dispatch and the
+# export's device-sketch choice are in two different modules.)
+GLYPH_PROJECT_TYPES = (PROJECT_TYPE_OCR, PROJECT_TYPE_SIGN_OCR)
+
 # Model input size per project type.  The image project's 96 is the default
-# in TrainConfig/SessionConfig; OCR works on 28x28 glyphs and reuses the SAME
-# img_size plumbing rather than introducing a second size concept.
+# in TrainConfig/SessionConfig; the glyph projects work on 28x28 characters
+# and reuse the SAME img_size plumbing rather than introducing a second size
+# concept.
 DEFAULT_IMG_SIZE_BY_PROJECT = {
     PROJECT_TYPE_IMAGE: 96,
     PROJECT_TYPE_CLASSIFIED_IMPORT: 96,
     PROJECT_TYPE_OCR: 28,
+    PROJECT_TYPE_SIGN_OCR: 28,
 }
+
+
+def is_glyph_project(project_type: object) -> bool:
+    """True for the projects whose samples are 28x28 character glyphs."""
+    return str(project_type or "").strip().lower() in GLYPH_PROJECT_TYPES
 
 # ── .tmproj format header ───────────────────────────────────────────────
 # Also the ONE place these are named: the writer (record_controller
