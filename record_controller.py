@@ -1332,6 +1332,7 @@ class RecordController:
             "/classes/rename",
             "/classes/add",
             "/classes/add_named",
+            "/classes/sync_ocr",
             "/classes/delete",
             "/samples/delete",
             "/samples/clear",
@@ -1760,6 +1761,27 @@ class RecordController:
                 return
             _send_json(req, {"ok": "1", "classes": classes}, cors=True)
             return
+        if path == "/classes/sync_ocr":
+            # The road-sign UI has no class editor: its three inline slots ARE
+            # the class list.  This endpoint is the one write that makes the
+            # stored list (and, with it, the model's label order) agree with
+            # them after every edit.  Response shape matches the other class
+            # routes so the client can hand it straight to applyClassesState().
+            session_id = str(payload.get("session") or "").strip()
+            names = payload.get("names")
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            if not isinstance(names, list) or not names:
+                _send_json(req, {"ok": "0", "error": "missing names"}, status=400, cors=True)
+                return
+            try:
+                classes = self._classes_sync_ocr(session_id=session_id, names=names)
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {"ok": "1", "classes": classes}, cors=True)
+            return
         if path == "/samples/delete":
             session_id = str(payload.get("session") or "").strip()
             class_name = str(payload.get("class") or "").strip()
@@ -2072,6 +2094,134 @@ class RecordController:
         classes = list(classes) + added
         self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
         return classes
+
+    def _classes_sync_ocr(self, session_id: str, names: List[Any]) -> List[str]:
+        """Make the class list exactly the sign's characters, in sequence order.
+
+        The road-sign UI has no class editor of its own: the three inline slots
+        ARE the class list.  Every edit — typing a slot, swapping two, opening
+        a saved project — calls this, so STATE.classes and the dataset can
+        never drift from the sequence the model is being trained to read.
+
+        Keeping a character keeps its samples: a class is a name in an ordered
+        list plus its directory, so an existing class contributes its name and
+        directory and only the list is rewritten.  A character the sequence
+        does NOT name is removed together with its preprocess entries and
+        processed cache — in this project type such a class has no card to
+        capture into and no slot that can match it, so it would survive only
+        as a stale model output that makes every real sign carry an extra
+        near-miss.
+
+        Case is reconciled rather than treated as a second class:
+        sanitize_class_name() collides "a" with "A", and the device compares
+        characters uppercased, so an old lowercase class is renamed to the
+        slot's character instead of being duplicated.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+
+        wanted: List[str] = []
+        for raw in names:
+            text = str(raw).strip()
+            if not text:
+                continue
+            if len(text) != 1:
+                raise ValueError("Sign characters must be one character each.")
+            text = text.upper()
+            if not re.fullmatch(r"[0-9A-Z]", text):
+                raise ValueError(f"Not a sign character: {raw!r}")
+            if text not in wanted:
+                wanted.append(text)
+        if not wanted:
+            raise ValueError("The sign needs at least one character.")
+
+        from ocr_dataset import BACKGROUND_CLASS_NAME
+
+        if any(n.lower() == BACKGROUND_CLASS_NAME.lower() for n in wanted):
+            raise ValueError(f'"{BACKGROUND_CLASS_NAME}" is reserved for the reject class.')
+
+        classes = self._classes_load(cfg.dataset_root)
+        class_preprocess = self._class_preprocess_load(cfg.dataset_root)
+        sample_preprocess = self._sample_preprocess_load(cfg.dataset_root)
+
+        # Existing names are matched the way the filesystem matches them —
+        # through sanitize_class_name(), case-insensitively — so this never
+        # creates a second class beside one that is already training samples.
+        wanted_keys = {n.lower() for n in wanted}
+        actual_by_key: Dict[str, str] = {}
+        for c in classes:
+            actual_by_key.setdefault(sanitize_class_name(str(c)).lower(), str(c))
+
+        keep: List[str] = []
+        for name in wanted:
+            actual = actual_by_key.get(name.lower())
+            if actual is None:
+                keep.append(name)
+                continue
+            if actual != name:
+                self._rename_class_storage(cfg.dataset_root, actual, name)
+                if actual in class_preprocess:
+                    class_preprocess[name] = class_preprocess.pop(actual)
+                if actual in sample_preprocess:
+                    sample_preprocess[name] = sample_preprocess.pop(actual)
+            keep.append(name)
+
+        # Decide what leaves BEFORE any rename: a case-variant of a kept
+        # character must not be deleted after its directory became the kept
+        # one's directory (a no-op rename on a case-insensitive filesystem).
+        dropped = [
+            c for c in classes
+            if sanitize_class_name(str(c)).lower() not in wanted_keys
+        ]
+        for name in dropped:
+            class_preprocess.pop(name, None)
+            sample_preprocess.pop(name, None)
+            # Mirror _classes_delete: the directory, the processed cache and
+            # both preprocess records travel together.  A survivor would
+            # otherwise reappear on the next directory scan.
+            for d in (
+                cfg.dataset_root / sanitize_class_name(name),
+                self._processed_cache_dir(cfg.dataset_root) / sanitize_class_name(name),
+            ):
+                if d.exists():
+                    try:
+                        shutil.rmtree(d)
+                    except Exception:
+                        pass
+
+        self._classes_save(
+            cfg.dataset_root,
+            keep,
+            class_preprocess=class_preprocess,
+            sample_preprocess=sample_preprocess,
+        )
+        return list(keep)
+
+    def _rename_class_storage(self, dataset_root: Path, old_name: str, new_name: str) -> None:
+        """Move a class's directory and processed cache to a new spelling.
+
+        Only the case can differ here (the caller has already matched the two
+        names through sanitize_class_name), and on macOS those paths are the
+        same inode: rename() then reports the destination exists, which is
+        success from the class list's point of view.  Both failures are
+        non-fatal because the class NAME is what the UI and the model use.
+        """
+        old_dir = dataset_root / sanitize_class_name(old_name)
+        new_dir = dataset_root / sanitize_class_name(new_name)
+        if old_dir.exists() and not new_dir.exists():
+            try:
+                old_dir.rename(new_dir)
+            except Exception:
+                pass
+        old_cache = self._processed_cache_dir(dataset_root) / sanitize_class_name(old_name)
+        new_cache = self._processed_cache_dir(dataset_root) / sanitize_class_name(new_name)
+        if old_cache.exists() and not new_cache.exists():
+            try:
+                old_cache.rename(new_cache)
+            except Exception:
+                pass
 
     def _classes_delete(self, session_id: str, name: str) -> List[str]:
         with self._lock:

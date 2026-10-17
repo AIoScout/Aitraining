@@ -4118,7 +4118,6 @@ def _render_tm_old_frontend_html(
     <div class="tm-toolbar-dropdown" id="menuEditDropdown">
       <button type="button" id="navEditCharacters" style="display:none"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"></polyline><line x1="9" y1="20" x2="15" y2="20"></line><line x1="12" y1="4" x2="12" y2="20"></line></svg></span>Edit characters</button>
       <button type="button" id="navGlyphSettings" style="display:none"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line><circle cx="9" cy="6" r="2"></circle><circle cx="15" cy="12" r="2"></circle><circle cx="11" cy="18" r="2"></circle></svg></span>Glyph settings…</button>
-      <button type="button" id="navSignChars" style="display:none"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="6" height="12" rx="1"></rect><rect x="9" y="6" width="6" height="12" rx="1"></rect><rect x="16" y="6" width="6" height="12" rx="1"></rect></svg></span>Edit sign characters…</button>
       <div class="dd-sep" id="navEditCharactersSep" style="display:none"></div>
       <button type="button" class="danger" id="navResetProject"><span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg></span>Reset project</button>
     </div>
@@ -4177,47 +4176,33 @@ def _render_tm_old_frontend_html(
     font-size: 12px; font-weight: 700; color: #1E3A8A;
     text-transform: uppercase; letter-spacing: 0.6px; flex: 1 1 auto;
   }}
-  .signseq-row {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+  .signseq-row {{ display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }}
+  .signseq-slot-wrap {{ display: flex; flex-direction: column; align-items: center; gap: 4px; }}
+  /* The slot is an <input>, not a div: the characters are edited in place, so
+     there is no second editing surface (and no modal) to open. */
   .signseq-slot {{
-    width: 46px; height: 46px; border-radius: 10px; border: 2px solid #2563EB;
-    background: #FFFFFF; color: #0F172A; display: flex; align-items: center;
-    justify-content: center; font-size: 22px; font-weight: 800; line-height: 1;
+    width: 56px; height: 56px; border-radius: 12px; border: 2px solid #2563EB;
+    background: #FFFFFF; color: #0F172A; text-align: center; padding: 0;
+    font-size: 26px; font-weight: 800; line-height: 1; text-transform: uppercase;
+    -webkit-appearance: none; appearance: none;
   }}
-  /* A slot still holding the pad is not a character: dashed and greyed so an
-     unset target never reads as the target "?". */
+  .signseq-slot:focus {{ outline: none; border-color: #1D4ED8; box-shadow: 0 0 0 3px #DBEAFE; }}
+  /* An unset slot is dashed and greyed, so it never reads as the character "?". */
   .signseq-slot.empty {{ border-style: dashed; border-color: #94A3B8; color: #94A3B8; }}
-  .signseq-sep {{ color: #64748B; font-size: 16px; font-weight: 700; }}
-  .signseq-note {{ font-size: 12px; color: #475569; line-height: 1.45; }}
-  .signseq-warn {{ color: #B45309; font-weight: 600; }}
-  .signseq-btn {{
-    border: 1px solid #2563EB; background: #FFFFFF; color: #1D4ED8;
-    border-radius: 8px; padding: 5px 10px; font-size: 12px; font-weight: 700; cursor: pointer;
-  }}
-  .signseq-btn:hover {{ background: #DBEAFE; }}
-  .signseq-btn.primary {{ background: #2563EB; border-color: #2563EB; color: #FFFFFF; }}
-  .signseq-btn.primary:hover {{ background: #1D4ED8; }}
-  .signseq-btn:disabled {{ opacity: 0.5; cursor: default; }}
-
-  .signchar-grid {{ display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }}
-  .signchar-slot {{ display: flex; flex-direction: column; align-items: center; gap: 6px; }}
-  .signchar-pos {{ font-size: 11px; font-weight: 700; color: #64748B; letter-spacing: 0.5px; }}
-  .signchar-input {{
-    width: 58px; height: 58px; text-align: center; font-size: 26px; font-weight: 800;
-    text-transform: uppercase; border: 2px solid #CBD5E1; border-radius: 12px;
-    background: #FFFFFF; color: #0F172A; padding: 0;
-  }}
-  .signchar-input:focus {{ outline: none; border-color: #2563EB; }}
-  .signchar-move {{ display: flex; gap: 4px; }}
-  .signchar-move button {{
-    width: 26px; height: 24px; border: 1px solid #CBD5E1; border-radius: 6px;
+  .signseq-move {{ display: flex; gap: 4px; }}
+  .signseq-move button {{
+    width: 26px; height: 22px; border: 1px solid #CBD5E1; border-radius: 6px;
     background: #FFFFFF; color: #334155; font-size: 11px; cursor: pointer; line-height: 1;
   }}
-  .signchar-move button:hover:not(:disabled) {{ background: #E2E8F0; }}
-  .signchar-move button:disabled {{ opacity: 0.35; cursor: default; }}
-  .signchar-has {{ font-size: 11px; font-weight: 600; }}
-  .signchar-has.ok {{ color: #15803D; }}
-  .signchar-has.miss {{ color: #B45309; }}
-  .signchar-row {{ display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; margin-top: 4px; }}
+  .signseq-move button:hover:not(:disabled) {{ background: #E2E8F0; }}
+  .signseq-move button:disabled {{ opacity: 0.35; cursor: default; }}
+  .signseq-note {{ font-size: 12px; color: #475569; line-height: 1.45; }}
+  /* "Slots 1 & 3": which positions of the sign this one class is matched in. */
+  .signslot-badge {{
+    margin-left: 8px; padding: 2px 7px; border-radius: 999px;
+    background: #E0E7FF; color: #3730A3; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.3px; vertical-align: middle;
+  }}
 
   /* The MATCH banner.  Sized to be read from across a desk — the answer is the
      whole point of the project, so it is the loudest thing in the pane. */
@@ -4253,7 +4238,6 @@ def _render_tm_old_frontend_html(
   }}
   .signmatch-hint {{ font-size: 12px; color: #475569; margin-top: 8px; line-height: 1.45; }}
 </style>
-<div class="modal-backdrop" id="signCharModal"></div>
 <!-- Problem 3.2: Global Input Settings (Single Source of Truth) -->
 <div class="tm-settings-modal" id="globalSettingsModal" role="dialog" aria-modal="true">
   <div class="tm-settings-card">
@@ -10308,8 +10292,8 @@ const SIGN_MATCH_TEXT = '🟢 YES — MATCH';
 const SIGN_NOMATCH_TEXT = '🔴 NO — NOT MATCH';
 
 // JS mirror of ocr_preprocess.normalize_sign_sequence — the one place the
-// shape of a sequence is decided, so the bar, the modal, the save payload and
-// the preview all agree.  Takes an array or a plain string ("A1A" and "A 1 A"
+// shape of a sequence is decided, so the bar, the save payload and the
+// preview all agree.  Takes an array or a plain string ("A1A" and "A 1 A"
 // both give A,1,A), upper-cases, keeps ONE character per slot (a class card is
 // named for a single character, so a two-character slot could never match one)
 // and pads short input, so callers always get exactly SIGN_SEQUENCE_LEN
@@ -10334,8 +10318,8 @@ function signSequence() {{
 
 // True once at least one slot names a character.  A project whose every slot
 // is still the pad has no target, and the preview has nothing to answer
-// against — the bar says so rather than letting the banner read NOT MATCH for
-// a question nobody asked.
+// against — the three empty slots show that rather than letting the banner
+// read NOT MATCH for a question nobody asked.
 function signSequenceIsSet() {{
   return signSequence().some((c) => c !== SIGN_SEQUENCE_PAD);
 }}
@@ -10352,15 +10336,48 @@ function signSequenceClasses() {{
   return out;
 }}
 
-// Edit ▸ Edit sign characters.  Deliberately NOT folded into
-// syncOcrPanelVisibility(): that function is the one place the OCR panels
-// decide what they show, and this item is not one of them — it is the
-// road-sign feature's own entry point.  It follows the same idiom (the button
-// ships in the markup hidden and is revealed here) so there is still exactly
-// one writer for "is this item visible", just not the same writer.
-function syncSignNavVisibility() {{
-  const el = document.getElementById('navSignChars');
-  if (el) el.style.display = isSignOcrProject() ? '' : 'none';
+// A sign slot is one character a model output can name: 0-9 or A-Z.  The
+// inline inputs reject everything else on the way in, so the sequence, the
+// class list and the device's kTargetSignSequence all speak one alphabet.
+const SIGN_SLOT_RE = /^[0-9A-Z]$/;
+
+// The positions one character occupies: ['A','1','A'] gives A -> [1, 3].
+// Used for the class card badge, so a repeated character still reads as one
+// class without hiding the fact that it is matched twice.
+function signSlotPositions(ch) {{
+  const out = [];
+  signSequence().forEach((c, idx) => {{ if (c === ch) out.push(idx + 1); }});
+  return out;
+}}
+
+function signSlotLabel(ch) {{
+  const pos = signSlotPositions(ch);
+  if (pos.length < 2) return '';
+  if (pos.length === 2) return `Slots ${{pos[0]}} & ${{pos[1]}}`;
+  return `Slots ${{pos.slice(0, -1).join(', ')}} & ${{pos[pos.length - 1]}}`;
+}}
+
+// Focus survives the rebuilds a sequence edit causes.  render() clears
+// #classes and renderSignSequenceBar() refills the bar; either would drop the
+// caret the user is typing through.  A snapshot is taken before the DOM is
+// cleared and restored on the new input with the same id.
+function signSlotFocusSnapshot() {{
+  const el = document.activeElement;
+  const id = String((el && el.id) || '');
+  if (!/^signSeqSlot-[0-9]+$/.test(id)) return null;
+  let start = null, end = null;
+  try {{ start = el.selectionStart; end = el.selectionEnd; }} catch (e) {{}}
+  return {{ id: id, start: start, end: end }};
+}}
+
+function restoreSignSlotFocus(snapshot) {{
+  if (!snapshot) return;
+  const el = document.getElementById(snapshot.id);
+  if (!el) return;
+  try {{
+    el.focus();
+    if (snapshot.start != null) el.setSelectionRange(snapshot.start, snapshot.end);
+  }} catch (e) {{}}
 }}
 
 function setSignSequence(seq) {{
@@ -10370,8 +10387,14 @@ function setSignSequence(seq) {{
   // persistTrainCfgStorage() is deliberately NOT called.  See the note above:
   // the sequence is project content, and letting it join the localStorage
   // allow-list would carry it into the next project the user opens.
-  renderSignSequenceBar();
-  renderSignCharModal();
+  //
+  // The class cards are part of the sequence, not a second thing to keep in
+  // step.  adoptSignSequenceClasses() rewrites STATE.classes to the unique
+  // characters here, render() mounts them, and render()'s tail asks the
+  // server to persist the same list.  Typing a slot, swapping two slots and
+  // opening a saved project therefore take ONE path.
+  adoptSignSequenceClasses();
+  render();
   // The verdict on screen was computed against the OLD target, which makes it
   // stale the instant this runs — and a stale green YES is the one wrong
   // answer that matters.  The loop is RESTARTED rather than the banner patched
@@ -10397,11 +10420,150 @@ function moveSignSlot(index, delta) {{
   setSignSequence(seq);
 }}
 
-// The bar is re-read from the DOM rather than re-rendered with the column:
-// editing a slot must not rebuild the class cards, throw away the scroll
-// position or close an open source panel.  render() mounts it (first child of
-// the column, before the cards); everything else just refills it.
+// ── Automatic class sync ──────────────────────────────────────────────────
+// In a sign project the class list is not an independent thing the user
+// curates: it is exactly the unique characters of the three slots, in slot
+// order.  Two directions are needed and both live here:
+//
+//   adoptSignSequenceClasses()   local, synchronous, before the cards render
+//   syncSignClassesToSequence()  remote, debounced, persists the same list
+//
+// The local half means the cards are correct on the first frame after an
+// edit; the remote half means a reopened project, the trainer and the export
+// all see the same order.  No "Add as classes" button exists because there is
+// nothing left for it to do.
+function signClassesMatch(target) {{
+  const have = Array.isArray(STATE.classes) ? STATE.classes : [];
+  return have.length === target.length && target.every((c, i) => String(have[i]) === c);
+}}
+
+// Rewrite the local class list to the sequence.  Unlike a reorder/rename on
+// the ordinary cards, this must NOT fall back to the class that used to sit at
+// the same index: inserting "7" before "A" is a NEW empty class, not a rename
+// of A, and inheriting A's count and previews would show samples that do not
+// exist.  Every record is looked up by its own name; a character that stayed
+// keeps its samples, a character that arrived starts at zero, and a character
+// that left takes its records with it.
+function applySignClassesState(target) {{
+  const oldCounts = Object.assign({{}}, STATE.counts || {{}});
+  const oldPreviews = Object.assign({{}}, STATE.sample_previews || {{}});
+  const oldProcessed = Object.assign({{}}, STATE.processed_previews || {{}});
+  const oldClassPreprocess = Object.assign({{}}, STATE.class_preprocess || {{}});
+  const oldSamplePreprocess = normalizeSamplePreprocessMap(STATE.sample_preprocess || {{}});
+  const nextCounts = {{}};
+  const nextPreviews = {{}};
+  const nextProcessed = {{}};
+  const nextClassPreprocess = {{}};
+  const nextSamplePreprocess = {{}};
+  target.forEach((name) => {{
+    nextCounts[name] = Number(oldCounts[name] || 0);
+    nextPreviews[name] = normalizePreviewList(oldPreviews[name]);
+    nextProcessed[name] = normalizePreviewList(oldProcessed[name]);
+    nextClassPreprocess[name] = normalizeClassPreprocessConfig(oldClassPreprocess[name]);
+    const sampleMap = oldSamplePreprocess[name];
+    if (sampleMap && typeof sampleMap === 'object' && Object.keys(sampleMap).length) {{
+      nextSamplePreprocess[name] = normalizeSamplePreprocessMap({{ [name]: sampleMap }})[name] || {{}};
+    }}
+  }});
+  STATE.classes = target.slice();
+  STATE.counts = nextCounts;
+  STATE.sample_previews = nextPreviews;
+  STATE.processed_previews = nextProcessed;
+  STATE.class_preprocess = nextClassPreprocess;
+  STATE.sample_preprocess = nextSamplePreprocess;
+}}
+
+function adoptSignSequenceClasses() {{
+  if (!isSignOcrProject()) return false;
+  const target = signSequenceClasses();
+  if (!target.length) return false;   // all slots cleared: do not wipe the project
+  if (signClassesMatch(target)) return false;
+  applySignClassesState(target);
+  return true;
+}}
+
+let signSyncTimer = 0;
+let signSyncInFlight = false;
+let signSyncQueued = false;
+// The target the SERVER has acknowledged.  Kept separate from "the local list
+// matches" so the first render of a project (whose payload may already be in
+// order) still reconciles once, and so a failed call is retried by the next
+// render instead of being forgotten.
+let signSyncSavedTarget = '';
+
+function scheduleSignClassSync(delay) {{
+  if (!isSignOcrProject()) return;
+  if (signSyncTimer) window.clearTimeout(signSyncTimer);
+  signSyncTimer = window.setTimeout(() => {{
+    signSyncTimer = 0;
+    syncSignClassesToSequence();
+  }}, delay == null ? 120 : delay);
+}}
+
+async function syncSignClassesToSequence() {{
+  if (!isSignOcrProject()) return;
+  const target = signSequenceClasses();
+  if (!target.length) return;           // no target: never delete every class
+  const key = target.join('');
+  if (key === signSyncSavedTarget && signClassesMatch(target)) return;
+  if (signSyncInFlight) {{ signSyncQueued = true; return; }}
+  signSyncInFlight = true;
+  try {{
+    const res = await fetch(`${{baseUrl}}/classes/sync_ocr`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{session: STATE.session, names: target}})
+    }});
+    const data = await res.json().catch(() => ({{ok: '0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to sync sign classes.');
+    // A newer edit may have landed while this request was in flight.  Its
+    // response describes the OLD sequence; applying it would make the cards
+    // jump back, so ignore it and let the queued pass send the new one.
+    if (signSequenceClasses().join('') !== key) {{
+      signSyncQueued = true;
+      return;
+    }}
+    const next = Array.isArray(data.classes) && data.classes.length ? data.classes : target;
+    signSyncSavedTarget = key;
+    if (!signClassesMatch(next)) {{
+      applySignClassesState(next);
+      render();
+    }}
+  }} catch (e) {{
+    // The local list already follows the slots, so the screen stays honest;
+    // the next render retries because savedTarget was not advanced.
+    toast(String(e && e.message ? e.message : e));
+  }} finally {{
+    signSyncInFlight = false;
+    if (signSyncQueued) {{
+      signSyncQueued = false;
+      scheduleSignClassSync(0);
+    }}
+  }}
+}}
+
+// A brand-new road-sign project starts as a real, readable sign rather than
+// an empty target: three slots and three matching capture cards, with no
+// picker and no button.  Only a fresh project (placeholder classes, no
+// samples) gets this — an existing project whose slots the user emptied stays
+// empty, because its target was a decision, not a default.
+const SIGN_DEFAULT_SEQUENCE = ['A', 'B', 'C'];
+function ensureSignSequenceDefault() {{
+  if (!isSignOcrProject()) return false;
+  if (signSequenceIsSet()) return false;
+  if (!ocrIsFreshProject()) return false;
+  const next = Object.assign({{}}, STATE.train_cfg || {{}});
+  next.sign_sequence = SIGN_DEFAULT_SEQUENCE.slice();
+  STATE.train_cfg = next;
+  return true;
+}}
+
+// The bar is the editor.  There is no modal: the three boxes are <input>s and
+// every valid keystroke updates the sequence, auto-advances to the next slot
+// and syncs the class cards.  render() mounts it as the column's first child;
+// setSignSequence() re-renders the column whenever the sequence changes.
 function renderSignSequenceBar(root) {{
+  const focus = signSlotFocusSnapshot();
   const existing = document.getElementById('signSeqBar');
   if (!isSignOcrProject()) {{
     if (existing) existing.remove();
@@ -10423,248 +10585,140 @@ function renderSignSequenceBar(root) {{
   head.className = 'signseq-head';
   const title = document.createElement('div');
   title.className = 'signseq-title';
-  title.textContent = 'Target sign — read left to right';
+  title.textContent = 'Target sign';
   head.appendChild(title);
-  // The direction is the other agent's control (#advReadingOrderRow) and stays
-  // the single writer for it; echoing it here is a read, so the user can see
-  // which way the slots will be ordered without going to Advanced settings.
+  // The direction is the Settings control (#advReadingOrderRow) and stays the
+  // single writer for it; echoing it here is a read, so the user can see which
+  // way the slots will be ordered without opening Advanced settings.
   const order = String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')).toLowerCase();
   const rtl = order === 'rtl';
   const dirTag = document.createElement('span');
   dirTag.className = 'signseq-note';
   dirTag.textContent = rtl ? 'right → left' : 'left → right';
   head.appendChild(dirTag);
-  const edit = document.createElement('button');
-  edit.type = 'button';
-  edit.className = 'signseq-btn';
-  edit.textContent = 'Edit';
-  edit.onclick = (e) => {{ if (e) e.stopPropagation(); openSignCharModal(); }};
-  head.appendChild(edit);
   box.appendChild(head);
+
+  // The one-line instruction is the whole tutorial.  Everything below it is an
+  // input; there is no Edit button, no character picker and no class button.
+  const steps = document.createElement('div');
+  steps.className = 'signseq-note';
+  steps.textContent = 'Step 1: Type the 3 sign characters in order below ➔ Step 2: Capture samples for each character card ➔ Step 3: Train & Preview (YES/NO).';
+  box.appendChild(steps);
 
   const row = document.createElement('div');
   row.className = 'signseq-row';
   const seq = signSequence();
-  const have = ocrTrainedChars();
-  seq.forEach((ch, idx) => {{
-    const slot = document.createElement('div');
-    const unset = ch === SIGN_SEQUENCE_PAD;
-    const trained = !unset && !!have[ch];
-    slot.className = 'signseq-slot' + (unset ? ' empty' : '');
-    slot.textContent = ch;
-    slot.title = unset
-      ? `Position ${{idx + 1}}: not set`
-      : (trained
-        ? `Position ${{idx + 1}}: ${{ch}} — trained`
-        : `Position ${{idx + 1}}: ${{ch}} — no class yet`);
-    row.appendChild(slot);
-    if (idx < seq.length - 1) {{
-      const sep = document.createElement('span');
-      sep.className = 'signseq-sep';
-      sep.textContent = rtl ? '◀' : '▶';
-      row.appendChild(sep);
-    }}
-  }});
-  box.appendChild(row);
-
-  const note = document.createElement('div');
-  note.className = 'signseq-note';
-  if (!signSequenceIsSet()) {{
-    note.innerHTML = 'No target set yet. <span class="signseq-warn">Pick the three characters this sign reads</span> — the preview will not answer until you do.';
-  }} else {{
-    const missing = signSequenceClasses().filter((c) => !have[c]);
-    const span = missing.length
-      ? ` <span class="signseq-warn">No class yet for ${{missing.join(', ')}} — capture samples for ${{missing.length === 1 ? 'it' : 'them'}} before training.</span>`
-      : '';
-    note.innerHTML = `Classes trained: ${{signSequenceClasses().join(', ') || '—'}}.${{span}}`;
-  }}
-  box.appendChild(note);
-}}
-
-// Outside the panel for the same reason ocrCharDraft is: any class edit
-// rebuilds the column, and a half-typed slot must not be committed by that.
-let signCharDraft = null;
-let signCharModalOpen = false;
-
-function openSignCharModal() {{
-  signCharModalOpen = true;
-  signCharDraft = null;
-  renderSignCharModal();
-}}
-function closeSignCharModal() {{
-  signCharModalOpen = false;
-  signCharDraft = null;
-  renderSignCharModal();
-}}
-
-// What the boxes currently hold: the uncommitted draft if there is one, else
-// the stored sequence.  The draft is only written back on an actual edit, so
-// opening and closing the modal changes nothing.
-function signCharWorking() {{
-  return signCharDraft ? signCharDraft.slice() : signSequence();
-}}
-
-function commitSignCharDraft(next) {{
-  signCharDraft = normalizeSignSequence(next);
-  setSignSequence(signCharDraft);
-}}
-
-function renderSignCharModal() {{
-  const host = document.getElementById('signCharModal');
-  if (!host) return;
-  if (!signCharModalOpen) {{
-    host.style.display = 'none';
-    host.innerHTML = '';
-    return;
-  }}
-  host.style.display = 'flex';
-  host.innerHTML = '';
-  const card = document.createElement('div');
-  card.className = 'modal ocr-char-modal';
-
-  const head = document.createElement('div');
-  head.className = 'modal-head';
-  const title = document.createElement('strong');
-  title.textContent = 'Sign characters';
-  head.appendChild(title);
-  const count = document.createElement('span');
-  count.className = 'charsel-count';
-  const n = Array.isArray(STATE.classes) ? STATE.classes.length : 0;
-  count.textContent = n === 1 ? '1 class' : `${{n}} classes`;
-  head.appendChild(count);
-  const close = document.createElement('button');
-  close.type = 'button';
-  close.className = 'iconbtn';
-  close.id = 'signCharModalClose';
-  close.title = 'Close';
-  close.textContent = '✕';
-  close.onclick = (e) => {{ if (e) e.stopPropagation(); closeSignCharModal(); }};
-  head.appendChild(close);
-  card.appendChild(head);
-
-  const body = document.createElement('div');
-  body.className = 'modal-body';
-
-  const help = document.createElement('div');
-  help.className = 'charsel-help';
-  help.textContent = 'The three characters this sign shows, in the order a reader sees them. A character used twice (A-1-A) stays ONE training class — the sequence records the repetition, the class list does not.';
-  body.appendChild(help);
-
-  const grid = document.createElement('div');
-  grid.className = 'signchar-grid';
-  const seq = signCharWorking();
-  const have = ocrTrainedChars();
   seq.forEach((ch, idx) => {{
     const unset = ch === SIGN_SEQUENCE_PAD;
     const holder = document.createElement('div');
-    holder.className = 'signchar-slot';
-
-    const pos = document.createElement('div');
-    pos.className = 'signchar-pos';
-    pos.textContent = `POSITION ${{idx + 1}}`;
-    holder.appendChild(pos);
+    holder.className = 'signseq-slot-wrap';
 
     const input = document.createElement('input');
-    input.className = 'signchar-input';
     input.type = 'text';
-    input.maxLength = 1;
+    input.className = 'signseq-slot' + (unset ? ' empty' : '');
+    input.id = `signSeqSlot-${{idx}}`;
     input.value = unset ? '' : ch;
+    input.maxLength = 1;
     input.placeholder = SIGN_SEQUENCE_PAD;
-    input.title = 'One character. Clear the box to leave this position unset.';
+    input.autocomplete = 'off';
+    input.autocapitalize = 'characters';
+    input.spellcheck = false;
+    input.setAttribute('aria-label', `Sign character ${{idx + 1}}`);
+    input.title = `Position ${{idx + 1}}`;
+    // Clicking a filled slot selects its character, so the next keystroke
+    // replaces it instead of being refused by maxlength.
+    input.onfocus = () => {{ try {{ input.select(); }} catch (e) {{}} }};
+    input.onclick = () => {{ try {{ input.select(); }} catch (e) {{}} }};
     input.oninput = () => {{
-      // Read through the live draft, not the stored sequence: typing into
-      // slot 3 must not discard what was just typed into slot 1.  maxLength
-      // already caps it at one character; the normaliser caps it again, since
-      // a paste can bypass maxLength in some browsers.
-      const next = signCharWorking().slice();
-      const text = String(input.value || '').trim();
-      next[idx] = text ? text.slice(0, 1).toUpperCase() : SIGN_SEQUENCE_PAD;
-      commitSignCharDraft(next);
+      const raw = String(input.value || '').trim().toUpperCase();
+      const nextCh = SIGN_SLOT_RE.test(raw.slice(0, 1)) ? raw.slice(0, 1) : '';
+      input.value = nextCh;
+      const next = signSequence();
+      if (next[idx] !== (nextCh || SIGN_SEQUENCE_PAD)) {{
+        next[idx] = nextCh || SIGN_SEQUENCE_PAD;
+        setSignSequence(next);
+      }}
+      // OTP ergonomics: a complete character moves the caret on, and the
+      // destination is selected so the next keystroke replaces it.  The last
+      // slot stays focused — there is nowhere left to go.
+      if (nextCh && idx < SIGN_SEQUENCE_LEN - 1) {{
+        const following = document.getElementById(`signSeqSlot-${{idx + 1}}`);
+        if (following) {{
+          following.focus();
+          try {{ following.select(); }} catch (e) {{}}
+        }}
+      }}
+    }};
+    input.onkeydown = (e) => {{
+      if (e.key === 'Backspace' && !input.value && idx > 0) {{
+        e.preventDefault();
+        const next = signSequence();
+        if (next[idx - 1] !== SIGN_SEQUENCE_PAD) {{
+          next[idx - 1] = SIGN_SEQUENCE_PAD;
+          setSignSequence(next);
+        }}
+        const previous = document.getElementById(`signSeqSlot-${{idx - 1}}`);
+        if (previous) {{
+          previous.focus();
+          try {{ previous.select(); }} catch (err) {{}}
+        }}
+      }} else if (e.key === 'ArrowLeft' && idx > 0) {{
+        e.preventDefault();
+        const previous = document.getElementById(`signSeqSlot-${{idx - 1}}`);
+        if (previous) {{ previous.focus(); try {{ previous.select(); }} catch (err) {{}} }}
+      }} else if (e.key === 'ArrowRight' && idx < SIGN_SEQUENCE_LEN - 1) {{
+        e.preventDefault();
+        const following = document.getElementById(`signSeqSlot-${{idx + 1}}`);
+        if (following) {{ following.focus(); try {{ following.select(); }} catch (err) {{}} }}
+      }}
+    }};
+    input.onpaste = (e) => {{
+      // Pasting "12A" over slot 1 fills all three slots, which is faster than
+      // three clicks and is what a user copying a sign number expects.
+      const clip = e.clipboardData || window.clipboardData;
+      if (!clip) return;
+      const text = String(clip.getData('text') || '');
+      const chars = text.toUpperCase().split('')
+        .filter((c) => SIGN_SLOT_RE.test(c))
+        .slice(0, SIGN_SEQUENCE_LEN - idx);
+      if (!chars.length) return;
+      e.preventDefault();
+      const next = signSequence();
+      chars.forEach((c, offset) => {{ next[idx + offset] = c; }});
+      setSignSequence(next);
+      const last = Math.min(idx + chars.length, SIGN_SEQUENCE_LEN - 1);
+      const target = document.getElementById(`signSeqSlot-${{last}}`);
+      if (target) {{ target.focus(); try {{ target.select(); }} catch (err) {{}} }}
     }};
     holder.appendChild(input);
 
     const move = document.createElement('div');
-    move.className = 'signchar-move';
+    move.className = 'signseq-move';
     const left = document.createElement('button');
     left.type = 'button';
+    left.className = 'signseq-move-left';
+    left.id = `signSeqLeft-${{idx}}`;
     left.textContent = '◀';
-    left.title = 'Move left';
+    left.title = 'Swap with the character on the left';
     left.disabled = idx === 0;
-    left.onclick = () => {{
-      const next = signCharWorking().slice();
-      const t = next[idx - 1]; next[idx - 1] = next[idx]; next[idx] = t;
-      commitSignCharDraft(next);
-    }};
+    left.onclick = (e) => {{ if (e) e.stopPropagation(); moveSignSlot(idx, -1); }};
     const right = document.createElement('button');
     right.type = 'button';
+    right.className = 'signseq-move-right';
+    right.id = `signSeqRight-${{idx}}`;
     right.textContent = '▶';
-    right.title = 'Move right';
-    right.disabled = idx === seq.length - 1;
-    right.onclick = () => {{
-      const next = signCharWorking().slice();
-      const t = next[idx + 1]; next[idx + 1] = next[idx]; next[idx] = t;
-      commitSignCharDraft(next);
-    }};
+    right.title = 'Swap with the character on the right';
+    right.disabled = idx === SIGN_SEQUENCE_LEN - 1;
+    right.onclick = (e) => {{ if (e) e.stopPropagation(); moveSignSlot(idx, 1); }};
     move.appendChild(left);
     move.appendChild(right);
     holder.appendChild(move);
 
-    const has = document.createElement('div');
-    const trained = !unset && !!have[ch];
-    has.className = 'signchar-has ' + (trained ? 'ok' : 'miss');
-    has.textContent = unset ? 'not set' : (trained ? '✓ class' : 'no class');
-    holder.appendChild(has);
-
-    grid.appendChild(holder);
+    row.appendChild(holder);
   }});
-  body.appendChild(grid);
+  box.appendChild(row);
 
-  const row = document.createElement('div');
-  row.className = 'signchar-row';
-  // The sequence, deduplicated.  createClass naming is the server's and it
-  // already ignores names that exist, so a repeated character adds nothing —
-  // but this is where the rule is STATED, so it is stated explicitly rather
-  // than relying on that.
-  const wanted = signSequenceClasses();
-  const missing = wanted.filter((c) => !have[c]);
-  const addBtn = document.createElement('button');
-  addBtn.type = 'button';
-  addBtn.className = 'signseq-btn primary';
-  addBtn.textContent = missing.length
-    ? `Add ${{missing.join(', ')}} as class${{missing.length === 1 ? '' : 'es'}}`
-    : 'All sign characters have classes';
-  addBtn.disabled = !missing.length;
-  addBtn.onclick = () => {{
-    const todo = signSequenceClasses().filter((c) => !ocrTrainedChars()[c]);
-    if (!todo.length) return;
-    addOcrCharacters(todo);
-  }};
-  row.appendChild(addBtn);
-
-  // The other direction: characters the project already trains that this sign
-  // does not use.  Not an error — a project may hold several signs — so it is
-  // offered as a way to extend the current one rather than flagged as a
-  // problem, and it APPENDS, which is what "and also train these" means.
-  const extras = (Array.isArray(STATE.classes) ? STATE.classes : [])
-    .map((c) => String(c == null ? '' : c).trim().toUpperCase())
-    .filter((c) => c.length === 1 && wanted.indexOf(c) === -1);
-  if (extras.length) {{
-    const extraNote = document.createElement('span');
-    extraNote.className = 'signseq-note';
-    extraNote.textContent = `Also trained here: ${{extras.join(', ')}}.`;
-    row.appendChild(extraNote);
-  }}
-  body.appendChild(row);
-
-  const hint = document.createElement('div');
-  hint.className = 'signmatch-hint';
-  hint.textContent = 'Training stays per character: each class card holds samples of ONE glyph. The three-way split happens at preview time, where the sign is cut into three slots and each slot is matched against its target.';
-  body.appendChild(hint);
-
-  card.appendChild(body);
-  host.appendChild(card);
-  host.onclick = (e) => {{ if (e.target === host) closeSignCharModal(); }};
-  card.onclick = (e) => e.stopPropagation();
+  restoreSignSlotFocus(focus);
 }}
 
 // ── Glyph settings (OCR only) ──────────────────────────────────────────────
@@ -11217,20 +11271,22 @@ function syncOcrPanelVisibility() {{
     const el = document.getElementById(id);
     if (el) el.style.display = on ? '' : 'none';
   }};
-  // Edit ▸ Edit characters.  Same idiom as the advanced rows below: the button
-  // ships in the markup and is revealed here, so there is one place that
-  // decides what an OCR project shows.  The separator is toggled alongside it
-  // rather than wrapping the pair in a container, because the dropdown's
-  // children are laid out by flex-direction: column and an extra div would
-  // need its own display rule to stay in the flow.
-  show('navEditCharacters', ocr);
+  // Edit ▸ Edit characters belongs to BASIC OCR only.  A road-sign project's
+  // characters are edited in the three inline slots on the target bar — there
+  // is nothing a second character editor could add, and two places writing the
+  // same list is exactly how they drift apart.  The separator is toggled
+  // alongside the item rather than wrapping the pair in a container, because
+  // the dropdown's children are laid out by flex-direction: column and an
+  // extra div would need its own display rule to stay in the flow.
+  const basicOcr = String((STATE && STATE.project_type) || '').toLowerCase() === 'ocr';
+  show('navEditCharacters', basicOcr);
   // Glyph settings are PER CLASS, so the item only makes sense once there is a
   // class to configure.  In a fresh OCR project the only classes are the ones
   // the empty state has already promised to delete on the first pick — opening
   // a configuration form for them would invite the user to tune settings that
   // are about to stop existing.
   show('navGlyphSettings', ocr && !ocrIsFreshProject());
-  show('navEditCharactersSep', ocr);
+  show('navEditCharactersSep', basicOcr);
   const mix = !!nullish(cfg.ocr_emnist_enabled, true);
   show('advOcrSplitRow', ocr && mix);
   show('advOcrPerClassRow', ocr && mix);
@@ -11502,6 +11558,15 @@ function render() {{
   // #region debug-point B:render-entry
   dbgEvent('B', 'app.py:render', '[DEBUG] render start', {{classes: STATE.classes, openSourceClass, openSourceKind, initial_open_source_class: STATE.initial_open_source_class, initial_open_source_kind: STATE.initial_open_source_kind}});
   // #endregion
+  const signFocus = signSlotFocusSnapshot();
+  // A fresh sign project starts with a real target, and every project's class
+  // list is rewritten to its slots BEFORE the cards are built — so the
+  // column's first frame already shows the three character cards, never an
+  // auto-named placeholder and never the OCR picker.
+  try {{
+    ensureSignSequenceDefault();
+    adoptSignSequenceClasses();
+  }} catch (e) {{ console.error('[render] sign class adopt', e); }}
   const root = document.getElementById('classes');
   root.innerHTML = '';
   // The target sequence goes above the cards, before the loop builds them.
@@ -11509,8 +11574,8 @@ function render() {{
   // column: the sign a project is being built to read should be readable
   // before any of the characters it is built from.
   try {{
-    syncSignNavVisibility();
     renderSignSequenceBar(root);
+    restoreSignSlotFocus(signFocus);
   }} catch (e) {{ console.error('[render] sign sequence bar', e); }}
   // A fresh OCR project presents onboarding instead of two untouched
   // placeholders.  Decided once, before the loop, because the loop's input is
@@ -11526,21 +11591,40 @@ function render() {{
       card.className = 'card class-card';
       const head = document.createElement('div');
       head.className = 'class-head';
-      const dragHandle = document.createElement('span');
-      dragHandle.className = 'class-drag-handle';
-      dragHandle.textContent = '⠿';
-      dragHandle.title = 'Drag to reorder classes';
-      bindClassDragHandle(dragHandle, i);
-      head.appendChild(dragHandle);
+      // A sign project's cards follow the three slots: there is no manual
+      // add, delete, rename or drag, because every one of those would be
+      // undone by the next sync.  The card stays a capture surface for its
+      // character, which is the only thing the sequence does not decide.
+      const signMode = isSignOcrProject();
+      if (!signMode) {{
+        const dragHandle = document.createElement('span');
+        dragHandle.className = 'class-drag-handle';
+        dragHandle.textContent = '⠿';
+        dragHandle.title = 'Drag to reorder classes';
+        bindClassDragHandle(dragHandle, i);
+        head.appendChild(dragHandle);
+      }}
       const title = document.createElement('div');
       title.className = 'class-title';
       title.textContent = name;
-      const edit = document.createElement('button');
-      edit.className = 'iconbtn tm-rename-btn';
-      edit.title = 'Rename this class';
-      edit.innerHTML = createIcon('rename');
-      edit.onclick = () => renameClass(name);
-      title.appendChild(edit);
+      if (signMode) {{
+        // A character used in more than one slot is still ONE class; the
+        // badge says which positions it answers for ("Slots 1 & 3").
+        const slots = signSlotLabel(String(name == null ? '' : name).toUpperCase());
+        if (slots) {{
+          const badge = document.createElement('span');
+          badge.className = 'signslot-badge';
+          badge.textContent = slots;
+          title.appendChild(badge);
+        }}
+      }} else {{
+        const edit = document.createElement('button');
+        edit.className = 'iconbtn tm-rename-btn';
+        edit.title = 'Rename this class';
+        edit.innerHTML = createIcon('rename');
+        edit.onclick = () => renameClass(name);
+        title.appendChild(edit);
+      }}
       head.appendChild(title);
       const more = document.createElement('button');
       more.className = 'iconbtn more tm-delete-class';
@@ -11580,7 +11664,7 @@ function render() {{
       }};
       head.appendChild(preprocessBtn);
       head.appendChild(clearBtn);
-      head.appendChild(more);  // delete ⋮ sits at the head's right end
+      if (!signMode) head.appendChild(more);  // delete ⋮ sits at the head's right end
       card.appendChild(head);
       const div = document.createElement('div');
       div.className = 'divider';
@@ -11758,6 +11842,12 @@ function render() {{
     // the selector now lives in the Edit menu's modal, which is rendered in
     // the tail below so it survives this rebuild.
 
+    // The cards above are showing the sequence's characters; make the
+    // server's class list agree.  Deferred to a timer so this render always
+    // finishes first — a response can itself trigger a render when the
+    // server normalises a name.
+    if (isSignOcrProject()) scheduleSignClassSync(0);
+
     const trainBtn = document.getElementById('trainBtn');
     recomputeTrainEnabled();
     refreshTrainRec();
@@ -11805,7 +11895,6 @@ function render() {{
       // modal stays open across a pick, and addOcrCharacters() re-renders.
       renderOcrCharModal();
       renderOcrGlyphModal();
-      renderSignCharModal();
     }} catch (previewErr) {{
       console.error('[render] preview/train binding failed', previewErr);
       toast(`Preview init failed: ${{String(previewErr && previewErr.message || previewErr)}}`, 8000);
@@ -11858,14 +11947,6 @@ function render() {{
       if (e) e.stopPropagation();
       closeToolbarDropdowns();
       openOcrGlyphModal();
-    }};
-    // Road signs only — syncSignNavVisibility() hides it everywhere else, so
-    // this binding is dormant outside a sign_ocr project.
-    const navSignChars = document.getElementById('navSignChars');
-    if (navSignChars) navSignChars.onclick = (e) => {{
-      if (e) e.stopPropagation();
-      closeToolbarDropdowns();
-      openSignCharModal();
     }};
     // Settings button (Problem 3.2 SSOT modal) + settings close/save bindings
     const navSettings = document.getElementById('navSettings');

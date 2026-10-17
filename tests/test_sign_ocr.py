@@ -438,6 +438,57 @@ def _with_roi(ctrl, roi):
     )
 
 
+# ── class list follows the sequence ───────────────────────────────────────
+def test_classes_sync_ocr_rewrites_the_class_list():
+    """The classes ARE the three slots: keep, add, reorder and prune in one call."""
+    import json
+    import tempfile
+    from types import SimpleNamespace
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        dataset = root / "dataset"
+        dataset.mkdir()
+        for name in ("N", "A", "Y"):
+            (dataset / name).mkdir()
+            (dataset / name / "000000.png").write_bytes(b"sample")
+
+        ctrl = object.__new__(record_controller.RecordController)
+        ctrl._lock = threading.RLock()
+        ctrl._configs = {"s": SimpleNamespace(dataset_root=dataset)}
+        record_controller.RecordController._classes_save(
+            ctrl, dataset, ["N", "A", "Y"]
+        )
+
+        # Repeated characters are ONE class; unlisted classes leave with their
+        # directory; the kept character keeps its sample.
+        assert ctrl._classes_sync_ocr("s", ["A", "1", "A"]) == ["A", "1"]
+        meta = json.loads((root / "tm_classes.json").read_text(encoding="utf-8"))
+        assert meta["classes"] == ["A", "1"]
+        assert (dataset / "A" / "000000.png").exists()
+        assert not (dataset / "N").exists()
+        assert not (dataset / "Y").exists()
+
+        # Idempotent, and it matches on the sanitized name (case-insensitive):
+        # that is what collides on disk, so it must not become a second class.
+        assert ctrl._classes_sync_ocr("s", ["a", "1"]) == ["A", "1"]
+
+        # A route guard, not a truncation: a multi-character "slot" would be a
+        # class no single-glyph model output could ever match.
+        try:
+            ctrl._classes_sync_ocr("s", ["AB"])
+        except ValueError as exc:
+            assert "one character" in str(exc)
+        else:
+            raise AssertionError("multi-character slot was accepted")
+        try:
+            ctrl._classes_sync_ocr("s", ["?"])
+        except ValueError as exc:
+            assert "Not a sign character" in str(exc)
+        else:
+            raise AssertionError("pad character was accepted")
+
+
 # ── project routing ───────────────────────────────────────────────────────
 def test_tmproj_detection_and_open_whitelist():
     import app

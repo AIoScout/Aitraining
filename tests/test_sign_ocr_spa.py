@@ -8,12 +8,16 @@ shipped code, not a paraphrase of it.
 
 Covered:
   normalisation   the JS mirror agrees with ocr_preprocess, input for input
-  sequence bar    three slots, dedup note, missing-class warning, read order
-  editor modal    open/close, per-slot edits, ◀/▶ reordering, disabled arrows
+  inline editor   three <input> slots, no modal: typing upper-cases and
+                  auto-advances, ◀/▶ swap neighbours, class cards follow the
+                  sequence in order (including create/delete/reorder) with no
+                  "Add as classes" button
+  fresh project   a new sign project starts with three inline slots and three
+                  matching cards; unrelated/placeholder classes disappear
   banner          YES / NO / idle, slot chips, RTL order, failing-slot reasons
-  wiring          the predict request carries sign_seq + reading; the menu item
-                  and the bar appear only in a sign project; a settings reset
-                  keeps the target
+  wiring          the predict request carries sign_seq + reading; the Edit
+                  menu's character editor is OCR-only; a settings reset keeps
+                  the target
 
 Requires Playwright with a system Chrome:
     .venv/bin/python tests/test_sign_ocr_spa.py
@@ -61,154 +65,219 @@ def assert_js_shape_rules(page):
     assert page.evaluate("signSequenceIsSet()") is True
 
 
-# ── sequence bar ──────────────────────────────────────────────────────────
+# ── inline sequence bar ───────────────────────────────────────────────────
+def _wait_sync(page):
+    """Let the debounced /classes/sync_ocr round-trip land."""
+    page.wait_for_timeout(250)
+
+
+def _reset_sign_state(page):
+    page.evaluate(
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.classes = ['A', '1'];
+          STATE.counts = {A: 3, 1: 2};
+          STATE.sample_previews = {};
+          STATE.processed_previews = {};
+          STATE.class_preprocess = {};
+          STATE.sample_preprocess = {};
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            sign_sequence: ['A', '1', 'A'], reading_order: 'ltr'
+          });
+          signSyncSavedTarget = '';
+          render();
+        }"""
+    )
+    _wait_sync(page)
+
+
+def _slot_values(page):
+    return page.evaluate(
+        "Array.from(document.querySelectorAll('#signSeqBar .signseq-slot')).map((e) => e.value)"
+    )
+
+
+def _class_titles(page):
+    return page.evaluate(
+        "Array.from(document.querySelectorAll('#classes .class-card .class-title')).map("
+        "  (e) => e.firstChild ? String(e.firstChild.textContent).trim() : e.textContent.trim())"
+    )
+
+
 def assert_bar_renders_the_target(page):
     n = page.evaluate("document.querySelectorAll('#signSeqBar .signseq-slot').length")
     assert n == 3, f"expected 3 slots, got {n}"
-    texts = page.evaluate(
-        "Array.from(document.querySelectorAll('#signSeqBar .signseq-slot')).map((e) => e.textContent)"
+    tags = page.evaluate(
+        "Array.from(document.querySelectorAll('#signSeqBar .signseq-slot')).map((e) => e.tagName)"
     )
-    assert texts == ["A", "1", "A"]
+    assert tags == ["INPUT", "INPUT", "INPUT"], tags
+    assert _slot_values(page) == ["A", "1", "A"]
     # First child of the column: the target is above the class cards.
     assert page.evaluate(
         "document.getElementById('classes').firstElementChild.id"
     ) == "signSeqBar"
     note = page.evaluate("document.getElementById('signSeqBar').textContent")
-    assert "Classes trained: A, 1." in note
-    # Every character has a class in this fixture, so no warning.
-    assert "No class yet" not in note
+    assert "Step 1: Type the 3 sign characters in order below" in note, note
+    assert "Step 2: Capture samples for each character card" in note, note
+    assert "Step 3: Train & Preview (YES/NO)." in note, note
+    # The old advise-and-button surface is gone, not merely hidden.
+    assert "No class yet" not in note, note
+    assert page.evaluate("!document.querySelector('#signSeqBar .signseq-btn')")
+    assert page.evaluate("!document.getElementById('signCharModal')")
+    assert page.evaluate("typeof openSignCharModal") == "undefined"
 
 
-def assert_bar_warns_about_untrained_characters(page):
+def assert_typing_auto_advances_and_syncs(page):
+    _reset_sign_state(page)
+    page.evaluate("window.__syncBodies = []")
+
+    # Type over slot 1: lower-case input is upper-cased in place, the sequence
+    # changes, and the caret moves on to slot 2 with its text selected.
+    page.locator("#signSeqSlot-0").click()
+    page.keyboard.type("x")
+    _wait_sync(page)
+    assert _slot_values(page) == ["X", "1", "A"], _slot_values(page)
+    assert page.evaluate("JSON.stringify(signSequence())") == '["X","1","A"]'
+    assert page.evaluate("document.activeElement.id") == "signSeqSlot-1"
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["X","1","A"]'
+    assert _class_titles(page) == ["X", "1", "A"]
+    # The new character starts empty; it must not inherit A's samples merely
+    # because it occupies the index A used to occupy.
+    counts = page.evaluate("STATE.counts")
+    assert counts == {"X": 0, "1": 2, "A": 3}, counts
+
+    # The keyboard is already on slot 2, and its character is selected: typing
+    # replaces it instead of being refused by maxlength.
+    page.keyboard.type("9")
+    _wait_sync(page)
+    assert page.evaluate("JSON.stringify(signSequence())") == '["X","9","A"]'
+    assert page.evaluate("document.activeElement.id") == "signSeqSlot-2"
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["X","9","A"]'
+    assert _class_titles(page) == ["X", "9", "A"]
+
+    bodies = page.evaluate("window.__syncBodies")
+    assert ["X", "9", "A"] in bodies, bodies
+    # No character selector and no "Add as classes" was needed to get here.
+    assert page.evaluate("!document.querySelector('.charsel')")
+    assert page.evaluate("!document.querySelector('.addclass')")
+
+
+def assert_arrows_swap_and_sync_classes(page):
+    _reset_sign_state(page)
+    page.evaluate("window.__syncBodies = []")
+
+    # Slot 1's ▶ swaps it with slot 2: A,1,A -> 1,A,A.
+    page.locator("#signSeqRight-0").click()
+    _wait_sync(page)
+    assert page.evaluate("JSON.stringify(signSequence())") == '["1","A","A"]'
+    assert _slot_values(page) == ["1", "A", "A"]
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["1","A"]'
+    assert _class_titles(page) == ["1", "A"]
+    # Repeated character: one card, badged with both positions.
+    assert page.evaluate(
+        "Array.from(document.querySelectorAll('#classes .signslot-badge')).map((e) => e.textContent)"
+    ) == ["Slots 2 & 3"]
+    assert ["1", "A"] in page.evaluate("window.__syncBodies"), page.evaluate("window.__syncBodies")
+
+    # The edge buttons say so rather than doing nothing.
+    assert page.evaluate("document.getElementById('signSeqLeft-0').disabled") is True
+    assert page.evaluate("document.getElementById('signSeqRight-2').disabled") is True
+
+
+def assert_unrelated_classes_are_cleaned_up(page):
+    # This is the payload an old project can arrive with: two untouched
+    # placeholders plus characters from a previous sign, none of which the
+    # new target names.
     page.evaluate(
-        "() => { const c = Object.assign({}, STATE.train_cfg, {sign_sequence: ['A','1','B']});"
-        " STATE.train_cfg = c; renderSignSequenceBar(); }"
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.classes = ['Class 1', 'N', 'Y'];
+          STATE.counts = {'Class 1': 0, N: 0, Y: 0};
+          STATE.sample_previews = {};
+          STATE.processed_previews = {};
+          STATE.class_preprocess = {};
+          STATE.sample_preprocess = {};
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            sign_sequence: ['1', '2', 'A'], reading_order: 'ltr'
+          });
+          signSyncSavedTarget = '';
+          window.__syncBodies = [];
+          render();
+        }"""
     )
-    note = page.evaluate("document.getElementById('signSeqBar').textContent")
-    assert "No class yet for B" in note, note
-    texts = page.evaluate(
-        "Array.from(document.querySelectorAll('#signSeqBar .signseq-slot')).map((e) => e.textContent)"
-    )
-    assert texts == ["A", "1", "B"]
+    _wait_sync(page)
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["1","2","A"]'
+    assert _class_titles(page) == ["1", "2", "A"]
+    assert ["1", "2", "A"] in page.evaluate("window.__syncBodies")
+    # A sign card has no manual add/delete/rename/drag controls at all.
+    assert page.evaluate("!document.querySelector('.addclass')")
+    assert page.evaluate("document.querySelectorAll('#classes .tm-delete-class').length") == 0
+    assert page.evaluate("document.querySelectorAll('#classes .tm-rename-btn').length") == 0
+    assert page.evaluate("document.querySelectorAll('#classes .class-drag-handle').length") == 0
+
+
+def assert_fresh_project_starts_with_three_cards(page):
     page.evaluate(
-        "() => { const c = Object.assign({}, STATE.train_cfg, {sign_sequence: ['A','1','A']});"
-        " STATE.train_cfg = c; renderSignSequenceBar(); }"
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.classes = ['Class 1', 'Class 2'];
+          STATE.counts = {'Class 1': 0, 'Class 2': 0};
+          STATE.sample_previews = {};
+          STATE.processed_previews = {};
+          STATE.class_preprocess = {};
+          STATE.sample_preprocess = {};
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            sign_sequence: null, reading_order: 'ltr'
+          });
+          signSyncSavedTarget = '';
+          window.__syncBodies = [];
+          render();
+        }"""
     )
+    _wait_sync(page)
+    assert page.evaluate("JSON.stringify(signSequence())") == '["A","B","C"]'
+    assert _slot_values(page) == ["A", "B", "C"]
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["A","B","C"]'
+    assert _class_titles(page) == ["A", "B", "C"]
+    assert ["A", "B", "C"] in page.evaluate("window.__syncBodies")
+
+
+# ── initial project load ──────────────────────────────────────────────────
+def assert_boot_cleans_unrelated_classes(page):
+    """A project arriving with stale classes is fixed by the first render."""
+    page.wait_for_timeout(500)
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["1","2","A"]'
+    assert _class_titles(page) == ["1", "2", "A"]
+    assert _slot_values(page) == ["1", "2", "A"]
+
+
+def assert_fresh_boot_has_three_cards(page):
+    """A brand-new sign project needs zero clicks to become usable."""
+    page.wait_for_timeout(500)
+    assert page.evaluate("JSON.stringify(signSequence())") == '["A","B","C"]'
+    assert _slot_values(page) == ["A", "B", "C"]
+    assert _class_titles(page) == ["A", "B", "C"]
 
 
 def assert_bar_says_when_no_target_is_set(page):
+    # A cleared target is visible as three empty dashed slots.  It is not a
+    # warning, and it must not delete the project's existing classes.
     page.evaluate(
-        "() => { const c = Object.assign({}, STATE.train_cfg, {sign_sequence: null});"
-        " STATE.train_cfg = c; renderSignSequenceBar(); }"
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.classes = ['A', '1'];
+          STATE.counts = {A: 3, 1: 2};
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {sign_sequence: null});
+          render();
+        }"""
     )
+    _wait_sync(page)
     note = page.evaluate("document.getElementById('signSeqBar').textContent")
-    assert "No target set yet" in note, note
-    # An unset slot is drawn as EMPTY rather than as a literal '?'.
-    empty = page.evaluate("document.querySelectorAll('#signSeqBar .signseq-slot.empty').length")
-    assert empty == 3
-    page.evaluate(
-        "() => { const c = Object.assign({}, STATE.train_cfg, {sign_sequence: ['A','1','A']});"
-        " STATE.train_cfg = c; renderSignSequenceBar(); }"
-    )
-
-
-# ── editor modal ──────────────────────────────────────────────────────────
-def assert_modal_opens_with_the_sequence(page):
-    page.evaluate("openSignCharModal()")
-    assert page.evaluate(
-        "getComputedStyle(document.getElementById('signCharModal')).display"
-    ) == "flex"
-    values = page.evaluate(
-        "Array.from(document.querySelectorAll('#signCharModal .signchar-input')).map((e) => e.value)"
-    )
-    assert values == ["A", "1", "A"], values
-    # Arrows are disabled at the ends, not unbound: the first slot has no
-    # left neighbour and saying so is clearer than a button that does nothing.
-    disabled = page.evaluate(
-        "Array.from(document.querySelectorAll('#signCharModal .signchar-move')).map("
-        "  (m) => [m.children[0].disabled, m.children[1].disabled])"
-    )
-    assert disabled == [[True, False], [False, False], [False, True]], disabled
-
-
-def assert_modal_reorders_by_swap(page):
-    # Second slot's ◀ swaps it with the first: A,1,A -> 1,A,A.
-    page.evaluate("document.querySelectorAll('#signCharModal .signchar-move')[1].children[0].click()")
-    assert page.evaluate("JSON.stringify(signSequence())") == '["1","A","A"]'
-    # The bar follows immediately — the target is one fact, not two views.
-    texts = page.evaluate(
-        "Array.from(document.querySelectorAll('#signSeqBar .signseq-slot')).map((e) => e.textContent)"
-    )
-    assert texts == ["1", "A", "A"]
-    # ▶ on the first slot puts it back.
-    page.evaluate("document.querySelectorAll('#signCharModal .signchar-move')[0].children[1].click()")
-    assert page.evaluate("JSON.stringify(signSequence())") == '["A","1","A"]'
-
-
-def assert_modal_edits_and_keeps_other_slots(page):
-    # Type into slot 1 and then slot 3 without reopening: the second edit must
-    # not discard the first, which is what the draft exists for.
-    page.evaluate(
-        """() => {
-          const inputs = document.querySelectorAll('#signCharModal .signchar-input');
-          inputs[0].value = 'x';
-          inputs[0].dispatchEvent(new Event('input'));
-        }"""
-    )
-    page.evaluate(
-        """() => {
-          const inputs = document.querySelectorAll('#signCharModal .signchar-input');
-          inputs[2].value = '9';
-          inputs[2].dispatchEvent(new Event('input'));
-        }"""
-    )
-    assert page.evaluate("JSON.stringify(signSequence())") == '["X","1","9"]'
-
-
-def assert_modal_clears_a_slot_to_unset(page):
-    page.evaluate(
-        """() => {
-          const inputs = document.querySelectorAll('#signCharModal .signchar-input');
-          inputs[1].value = '';
-          inputs[1].dispatchEvent(new Event('input'));
-        }"""
-    )
-    assert page.evaluate("JSON.stringify(signSequence())") == '["X","?","9"]'
-    assert page.evaluate("signSequenceIsSet()") is True
-
-
-def assert_modal_close_keeps_the_edit(page):
-    page.evaluate("closeSignCharModal()")
-    assert page.evaluate(
-        "getComputedStyle(document.getElementById('signCharModal')).display"
-    ) == "none"
-    assert page.evaluate("JSON.stringify(signSequence())") == '["X","?","9"]'
-
-
-def assert_dedup_adds_only_missing_classes(page):
-    # The modal's add button is driven by signSequenceClasses(): a sequence
-    # naming one character twice must ask the server for one name, not two.
-    asked = page.evaluate(
-        """() => {
-          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {sign_sequence: ['Q','7','Q']});
-          let sent = null;
-          const realFetch = window.fetch;
-          window.fetch = async (url, opts) => {
-            if (String(url).includes('/classes/add_named')) sent = JSON.parse(opts.body).names;
-            return realFetch(url, opts);
-          };
-          openSignCharModal();
-          const btns = document.querySelectorAll('#signCharModal .signseq-btn.primary');
-          btns[0].click();
-          window.fetch = realFetch;
-          return sent;
-        }"""
-    )
-    assert asked == ["Q", "7"], asked
-    page.evaluate(
-        "() => { STATE.train_cfg = Object.assign({}, STATE.train_cfg, {sign_sequence: ['A','1','A']});"
-        " closeSignCharModal(); renderSignSequenceBar(); }"
-    )
+    assert "No target set yet" not in note, note
+    assert page.evaluate("document.querySelectorAll('#signSeqBar .signseq-slot.empty').length") == 3
+    assert _slot_values(page) == ["", "", ""]
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["A","1"]'
+    _reset_sign_state(page)
 
 
 # ── MATCH banner ──────────────────────────────────────────────────────────
@@ -346,6 +415,7 @@ def assert_preview_output_dispatches(page):
 
 # ── wiring ────────────────────────────────────────────────────────────────
 def assert_predict_request_carries_the_target(page):
+    _reset_sign_state(page)
     url = page.evaluate(
         """async () => {
           window.__fetches = [];
@@ -373,33 +443,37 @@ def assert_predict_request_carries_the_target(page):
 
 
 def assert_menu_item_and_bar_follow_the_project_type(page):
-    page.evaluate("syncSignNavVisibility()")
-    assert page.evaluate("document.getElementById('navSignChars').style.display") == ""
-    # In a plain OCR project the bar and the menu item are both gone.
+    page.evaluate("syncOcrPanelVisibility()")
+    # A sign project edits its characters in the bar; the Edit-menu character
+    # editor belongs to basic OCR and there is no second sign-characters item.
+    assert page.evaluate("document.getElementById('navEditCharacters').style.display") == "none"
+    assert page.evaluate("!document.getElementById('navSignChars')")
+    # In a plain OCR project the bar is gone and the character editor returns.
     page.evaluate(
         """() => {
           STATE.project_type = 'ocr';
-          syncSignNavVisibility();
+          syncOcrPanelVisibility();
           renderSignSequenceBar();
         }"""
     )
-    assert page.evaluate("document.getElementById('navSignChars').style.display") == "none"
+    assert page.evaluate("document.getElementById('navEditCharacters').style.display") == ""
     assert page.evaluate("!document.getElementById('signSeqBar')")
     # Back to a sign project: the bar is remounted as the column's first child.
     page.evaluate(
         """() => {
           STATE.project_type = 'sign_ocr';
-          syncSignNavVisibility();
+          syncOcrPanelVisibility();
           renderSignSequenceBar(document.getElementById('classes'));
         }"""
     )
     assert page.evaluate("!!document.getElementById('signSeqBar')")
+    assert page.evaluate("document.getElementById('navEditCharacters').style.display") == "none"
 
 
 def assert_settings_reset_keeps_the_target(page):
+    _reset_sign_state(page)
     kept = page.evaluate(
         """() => {
-          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {sign_sequence: ['A','1','A']});
           resetTrainCfg();
           return signSequence();
         }"""
@@ -408,7 +482,21 @@ def assert_settings_reset_keeps_the_target(page):
 
 
 def main() -> int:
+    base_cfg = boot_payload()["train_cfg"]
     html = build_spa_html(boot_payload())
+    # Two more real boot payloads: one that arrives with stale classes, and a
+    # fresh project.  These exercise the path the app actually takes on load,
+    # not a test-only render() call.
+    clean_html = build_spa_html(boot_payload(
+        classes=["Class 1", "N", "Y"],
+        counts={"Class 1": 0, "N": 0, "Y": 0},
+        train_cfg=dict(base_cfg, sign_sequence=["1", "2", "A"]),
+    ))
+    fresh_html = build_spa_html(boot_payload(
+        classes=["Class 1", "Class 2"],
+        counts={"Class 1": 0, "Class 2": 0},
+        train_cfg=dict(base_cfg, sign_sequence=None),
+    ))
     results = []
 
     def run(name, fn, page):
@@ -422,7 +510,7 @@ def main() -> int:
             results.append((name, True))
             print(f"ok   {name}")
 
-    with serve(html) as url:
+    with serve(html) as url, serve(clean_html) as clean_url, serve(fresh_html) as fresh_url:
         with sync_playwright() as p:
             browser = p.chromium.launch(channel="chrome", headless=True)
             page = browser.new_page()
@@ -433,17 +521,42 @@ def main() -> int:
             page.wait_for_function("typeof renderSignSequenceBar === 'function'")
             page.wait_for_timeout(300)
 
+            page2 = browser.new_page()
+            page2.on("pageerror", lambda e: errors.append("stale-boot: " + str(e)))
+            page2.add_init_script(STUB_FETCH)
+            page2.goto(clean_url)
+            page2.wait_for_function("typeof renderSignSequenceBar === 'function'")
+
+            page3 = browser.new_page()
+            page3.on("pageerror", lambda e: errors.append("fresh-boot: " + str(e)))
+            page3.add_init_script(STUB_FETCH)
+            page3.goto(fresh_url)
+            page3.wait_for_function("typeof renderSignSequenceBar === 'function'")
+            # Record the names each auto-sync sends, without changing what the
+            # stub returns (so a test sees the request the SPA really built).
+            page.evaluate(
+                """() => {
+                  window.__syncBodies = [];
+                  const real = window.fetch;
+                  window.fetch = async (url, opts) => {
+                    if (String(url).includes('/classes/sync_ocr') && opts && opts.body) {
+                      try { window.__syncBodies.push(JSON.parse(opts.body).names); } catch (e) {}
+                    }
+                    return real(url, opts);
+                  };
+                }"""
+            )
+
             run("normalisation matches Python", assert_normalisation_matches_python, page)
             run("sequence helpers", assert_js_shape_rules, page)
-            run("bar renders the target", assert_bar_renders_the_target, page)
-            run("bar warns about untrained chars", assert_bar_warns_about_untrained_characters, page)
+            run("bar renders the target inline", assert_bar_renders_the_target, page)
+            run("boot cleans unrelated classes", assert_boot_cleans_unrelated_classes, page2)
+            run("fresh boot has three cards", assert_fresh_boot_has_three_cards, page3)
+            run("typing auto-advances and syncs", assert_typing_auto_advances_and_syncs, page)
+            run("arrows swap and sync classes", assert_arrows_swap_and_sync_classes, page)
+            run("unrelated classes are cleaned up", assert_unrelated_classes_are_cleaned_up, page)
+            run("fresh project starts with three cards", assert_fresh_project_starts_with_three_cards, page)
             run("bar says when no target is set", assert_bar_says_when_no_target_is_set, page)
-            run("modal opens with the sequence", assert_modal_opens_with_the_sequence, page)
-            run("modal reorders by swap", assert_modal_reorders_by_swap, page)
-            run("modal edits keep other slots", assert_modal_edits_and_keeps_other_slots, page)
-            run("modal clears a slot", assert_modal_clears_a_slot_to_unset, page)
-            run("modal close keeps the edit", assert_modal_close_keeps_the_edit, page)
-            run("dedup adds only missing classes", assert_dedup_adds_only_missing_classes, page)
             run("banner says YES", assert_banner_says_yes, page)
             run("banner says NO and explains", assert_banner_says_no_and_explains, page)
             run("banner explains a background slot", assert_banner_explains_a_background_slot, page)
