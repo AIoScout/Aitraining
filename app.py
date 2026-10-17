@@ -7724,6 +7724,17 @@ function buildExportRuntimeConfig() {{
     ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.70),
     bg_dark_thresh: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : 0,
     bg_lum_thresh: previewThreshUserModified ? Number(previewLumThresh ?? 100) : 100,
+    // sign_ocr only.  The server ignores these for every other project
+    // type; sending them unconditionally keeps this one function the copy
+    // point for "what the device is told", instead of a second branch that
+    // only sign projects take.  The target sequence is what the model was
+    // trained to read, so it must come from the same TrainConfig state the
+    // trainer and the preview use.
+    sign_sequence: signSequence().join(''),
+    reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+    // No SPA control yet: the per-slot confidence floor is the server's
+    // documented default, and exporting it makes that explicit on-device.
+    match_min_prob: 0.60,
   }};
 }}
 async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arrayNameValue) {{

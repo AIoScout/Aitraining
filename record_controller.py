@@ -1627,6 +1627,12 @@ class RecordController:
                 "ood_entropy_max": _num("ood_entropy_max", 0.70),
                 "bg_dark_thresh": _num("bg_dark_thresh", 0, cast=int),
                 "bg_lum_thresh": _num("bg_lum_thresh", 100, cast=int),
+                # sign_ocr only.  String/None pass through; _export_run
+                # normalises them and falls back to the TrainConfig when the
+                # SPA did not send them (older SPA builds).
+                "sign_sequence": payload.get("sign_sequence"),
+                "reading_order": payload.get("reading_order"),
+                "match_min_prob": _num("match_min_prob", 0.60),
             }
             if not session_id or not export_dir:
                 _send_json(req, {"ok": "0", "error": "missing fields"}, status=400, cors=True)
@@ -2390,6 +2396,69 @@ class RecordController:
             is_glyph_project(getattr(cfg, "project_type", ""))
             or any(str(x).strip().lower() == "_background" for x in labels)
         )
+        # sign_ocr is a glyph project too, but it belongs to its OWN sketch:
+        # the sign model reads three 28x28 slots per frame, while TFLite_OCR/
+        # is the single-glyph reader.  The routing therefore needs both flags,
+        # and each .ino refuses the other's export at compile time.
+        sign_export = (
+            str(getattr(cfg, "project_type", "") or "").strip().lower()
+            == PROJECT_TYPE_SIGN_OCR
+        )
+        # The target the exported model is expected to read.  runtime_config
+        # wins (the SPA forwards the live editor values), then the TrainConfig
+        # the model was trained with.  normalize_sign_sequence pads a short
+        # sequence, so the arrays below always have SIGN_SEQUENCE_LEN entries.
+        # The sequence is a property of the TRAINING RUN, not of the session
+        # config: the SPA forwards its live editor state in runtime_config,
+        # and the run's train_config.json is the fallback for an older SPA.
+        sign_seq_src = rc.get("sign_sequence")
+        if sign_seq_src is None or sign_seq_src == "" or sign_seq_src == []:
+            train_cfg_saved = self._project_train_cfg(cfg.dataset_root)
+            sign_seq_src = train_cfg_saved.get("sign_sequence")
+        else:
+            train_cfg_saved = None
+        sign_seq = normalize_sign_sequence(sign_seq_src)
+        reading_src = rc.get("reading_order")
+        if reading_src is None or str(reading_src).strip() == "":
+            if train_cfg_saved is None:
+                train_cfg_saved = self._project_train_cfg(cfg.dataset_root)
+            reading_src = train_cfg_saved.get("reading_order")
+        reading_order = str(reading_src or "ltr").strip().lower()
+        if reading_order not in ("ltr", "rtl"):
+            reading_order = "ltr"
+        try:
+            sign_match_min_prob = float(rc.get("match_min_prob", 0.60))
+        except (TypeError, ValueError):
+            sign_match_min_prob = 0.60
+        sign_match_min_prob = max(0.0, min(1.0, sign_match_min_prob))
+        # Map each target character to its class index the same way the
+        # device's match rule compares: label.upper() == char.upper().  -1
+        # means "no such class" and the device treats that slot as never
+        # matching (it refuses anything outside [-1, kCategoryCount)).
+        upper_labels = [str(x).strip().upper() for x in labels]
+        sign_class_indices = []
+        for ch in sign_seq:
+            try:
+                sign_class_indices.append(upper_labels.index(str(ch).strip().upper()))
+            except ValueError:
+                sign_class_indices.append(-1)
+        sign_target_lines = []
+        if sign_export:
+            sign_target_lines = [
+                "// ── Sign OCR target (project_type == sign_ocr) ─────────────────",
+                "// The character the model is expected to read in each slot, in",
+                "// LABEL order.  kSignReadingOrder applies AFTER the split: 0 =",
+                "// left-to-right, 1 = right-to-left (boxes reversed, never mirrored).",
+                "// A class index of -1 means the character has no class in this",
+                "// export, so that slot can never match.",
+                "constexpr char kTargetSignSequence[] = " + _c_str("".join(sign_seq)) + ";",
+                "constexpr int kTargetSignClassIndices["
+                + str(int(len(sign_class_indices))) + "] = {"
+                + ", ".join(str(int(i)) for i in sign_class_indices) + "};",
+                "constexpr int kSignReadingOrder = " + ("1" if reading_order == "rtl" else "0") + ";",
+                "constexpr float kSignMatchMinProb = " + f"{sign_match_min_prob:.6f}f;",
+                "",
+            ]
         model_settings_h = "\n".join(
             [
                 "/*",
@@ -2408,14 +2477,29 @@ class RecordController:
                 # 1 = OCR glyph model (28x28 canvas, "_background" rejector,
                 # ocr_glyph.c front-end) / 0 = legacy 96x96 sign model.
                 "// TM_OCR_GLYPH_MODEL says which device sketch this model belongs to:",
-                "//   1 = TFLite_OCR/ (28x28 glyph canvas, \"_background\" rejector)",
-                "//   0 = TFLite/ (legacy 96x96 crop/resize/contrast-stretch)",
-                "// Each sketch #errors if it is handed the other one's export.",
-                "#define TM_OCR_GLYPH_MODEL " + ("1" if ocr_export else "0"),
+                "//   1 = TFLite_OCR/ (single-glyph, 28x28 canvas, \"_background\" rejector)",
+                "//   0 = TFLite/ (legacy 96x96) or TFLite_Sign/ (3-character sign reader)",
+                "// Each sketch #errors if it is handed another sketch's export.",
+                "#define TM_OCR_GLYPH_MODEL " + ("1" if (ocr_export and not sign_export) else "0"),
+                "// TM_SIGN_OCR_MODEL is the 3-character sign reader:",
+                "//   1 = TFLite_Sign/ (split -> three 28x28 slots -> binary verdict)",
+                "//   0 = every other sketch",
+                "#define TM_SIGN_OCR_MODEL " + ("1" if sign_export else "0"),
+                "",
+                "// ── The Dark Thr / Lum Thr window the project was trained through ──",
+                "// The device derives its ink bounds exactly as the host does:",
+                "//   adjusted = (kDarkThr != 0) || (kLumThr != 100)   // 0/100 = Otsu",
+                "//   thresh   = adjusted ? clamp(kLumThr - 1, 1, 254) : -1  (Otsu)",
+                "//   dark_thr = adjusted ? clamp(kDarkThr + 1, 0, 255) : 0",
+                "// so the defaults are a bit-exact no-op.",
+                "#define TM_THRESHOLD_WINDOW_EXPORTED 1",
+                "#define kDarkThr " + str(int(bg_dark_thresh)),
+                "#define kLumThr " + str(int(bg_lum_thresh)),
                 "",
                 "constexpr int kCategoryCount = " + str(int(len(labels))) + ";",
                 "extern const char* kCategoryLabels[kCategoryCount];",
                 "",
+                *sign_target_lines,
                 "// ── Runtime tuning exported from the Preview panel ───────────────",
                 "// OOD (out-of-distribution) rejection thresholds.  The device loop",
                 "// uses these the same way the Python preview does so a sign is only",
@@ -4372,6 +4456,16 @@ class RecordController:
                 ocr_head_lr=float(cfg_dict.get("ocr_head_lr") or 0.0015),
                 ocr_finetune_lr=float(cfg_dict.get("ocr_finetune_lr") or 0.0002),
                 ocr_unfreeze_blocks=int(cfg_dict.get("ocr_unfreeze_blocks") or 1),
+                # sign_ocr: the target label the exported device sketch will
+                # verify each slot against.  Recorded in train_config.json so
+                # an export (or a reopened project) can recover what THIS
+                # model was trained to read instead of guessing from the
+                # current editor state.
+                sign_sequence=(
+                    normalize_sign_sequence(cfg_dict.get("sign_sequence"))
+                    if cfg_dict.get("sign_sequence") is not None else None
+                ),
+                reading_order=str(cfg_dict.get("reading_order") or "ltr"),
             )
 
             workspace_root = sess_cfg.dataset_root.parent
