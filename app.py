@@ -2395,6 +2395,21 @@ def _render_tm_old_frontend_html(
       flex-direction: column;
       gap: 12px;
     }}
+    /* Developer/demo shortcut: a checkbox row that reads as sentence case,
+       not as another uppercase field label, plus the action button row. */
+    .tm-settings-check {{
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      line-height: 1.35;
+      color: var(--text);
+      cursor: pointer;
+      margin: 0 0 6px;
+    }}
+    .tm-settings-check input[type="checkbox"] {{ margin: 2px 0 0; }}
+    .tm-settings-seed-row {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
     .tm-settings-field small {{
       display: block;
       margin-top: 4px;
@@ -4382,6 +4397,17 @@ def _render_tm_old_frontend_html(
           <input id="settingsSerialSync" type="text" placeholder="AA 55 AA"/>
           <small>Sync header used to align incoming MCU frames. Applied to both class capture and preview device source.</small>
         </div>
+        <div class="tm-settings-field" id="settingsEmnistGroup" style="display:none">
+          <label>Developer: EMNIST template samples</label>
+          <label class="tm-settings-check">
+            <input id="settingsAutoSeedEmnist" type="checkbox"/>
+            <span>Auto-fill empty classes with EMNIST template samples</span>
+          </label>
+          <div class="tm-settings-seed-row">
+            <button type="button" class="tm-btn" id="settingsSeedEmnistBtn">Load EMNIST Template Samples (24 / class)</button>
+          </div>
+          <small id="settingsSeedEmnistHint">Draws 24 dark-ink-on-light EMNIST captures into every character class in this project, so the whole capture → preprocess → train → preview pipeline can be exercised before a camera is wired up. Real camera samples are kept.</small>
+        </div>
       </div>
     </div>
     <div class="tm-settings-foot">
@@ -4984,6 +5010,16 @@ let holdPollController = null;
 let holdSeq = 0;
 let holdNextToken = 0;
 let PREF_MAX_SAMPLES_DISPLAY = 12;
+// Developer/demo shortcut state (Settings -> Advanced).  Declared up here,
+// with the other boot-restored flags, because the top-level
+// restoreAutoSeedEmnist() call runs long before the helper block below.
+const AUTO_SEED_EMNIST_STORAGE_KEY = 'auto_seed_emnist_samples';
+let autoSeedEmnistSamples = false;
+let autoSeedEmnistInFlight = false;
+// Classes this project has already been offered to the auto-seeder.  Without
+// it, "Clear Samples" on an auto-filled class would silently repopulate, and
+// a failed request would retry on every render.
+let autoSeedEmnistAttempted = new Set();
 const CLASS_PREPROCESS_WINDOW = 15;
 const UPLOAD_CONCURRENCY = 3;
 const UPLOAD_MAX_MB = 25;
@@ -6266,6 +6302,7 @@ async function pickPreviewUploadFile() {{
 }}
 restorePreviewState();
 restorePreferences();
+restoreAutoSeedEmnist();
 if (window.__tmStageMark) window.__tmStageMark('preview-restored');
 function restoreExportDir() {{
   try {{
@@ -7166,6 +7203,16 @@ function openGlobalSettings() {{
     }}
     const sw = document.getElementById('settingsSerialSync');
     if (sw) sw.value = String(STATE.current_serial_sync ?? 'AA 55 AA');
+    // ── Advanced: EMNIST template samples (developer path) ──
+    const autoSeedBox = document.getElementById('settingsAutoSeedEmnist');
+    if (autoSeedBox) autoSeedBox.checked = !!autoSeedEmnistSamples;
+    const seedHint = document.getElementById('settingsSeedEmnistHint');
+    if (seedHint) {{
+      const chars = (Array.isArray(STATE.classes) ? STATE.classes : []).filter(isTemplateCharClass);
+      seedHint.textContent = chars.length
+        ? `Fills ${{chars.join(', ')}} with 24 dark-ink-on-light template captures each. Real camera samples are kept.`
+        : 'Type a character (A-Z, 0-9) in the target bar first — there are no character classes to fill yet.';
+    }}
     // ── Preview group: input source + OOD thresholds (reuse existing state vars) ──
     const srcSel = document.getElementById('settingsPreviewSource');
     if (srcSel) {{
@@ -7367,6 +7414,9 @@ function applyProjectState(state) {{
     exportEnabled: String(s.export_enabled || '0'),
   }});
   // #endregion
+  // A new/opened project gets a fresh auto-seed ledger: a character class
+  // that was already offered in the previous project must be eligible here.
+  autoSeedEmnistAttempted = new Set();
   stopHoldSyncLoop();
   stopPreviewPredictLoop();
   stopPreviewLoop();
@@ -8101,6 +8151,112 @@ async function syncClassState(className) {{
   }} catch (err) {{
     toast(String(err && err.message ? err.message : err));
   }}
+}}
+// ── EMNIST template samples (developer / demo path) ──────────────────────
+// The main workspace belongs to real camera captures; demo data must never
+// clutter it.  The seeder therefore lives in Settings -> Advanced and is
+// reachable two ways:
+//   * manual: the button fills every character class in the project now
+//   * auto:   a character class that arrives empty is filled on creation
+// Both POST /samples/seed_emnist, which renders DARK-INK-ON-LIGHT 96x96
+// frames — the polarity the capture pipeline expects (raw EMNIST is
+// bright-on-dark and would binarize inverted).  Seeded files carry an
+// `emnist_seed_` prefix, so re-seeding replaces only its own output.
+// (The state variables live up with PREF_MAX_SAMPLES_DISPLAY so the boot
+// restore can run before this block is evaluated.)
+
+function restoreAutoSeedEmnist() {{
+  try {{
+    autoSeedEmnistSamples = window.localStorage.getItem(AUTO_SEED_EMNIST_STORAGE_KEY) === '1';
+  }} catch (e) {{
+    autoSeedEmnistSamples = false;
+  }}
+}}
+function setAutoSeedEmnistEnabled(on) {{
+  autoSeedEmnistSamples = !!on;
+  try {{
+    window.localStorage.setItem(AUTO_SEED_EMNIST_STORAGE_KEY, autoSeedEmnistSamples ? '1' : '0');
+  }} catch (e) {{}}
+}}
+function isTemplateCharClass(name) {{
+  const ch = String(name == null ? '' : name).trim().toUpperCase();
+  return ch.length === 1 && 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.indexOf(ch) >= 0;
+}}
+// The one place the SPA asks the backend to draw template samples.  Returns
+// the class names the server actually seeded, or null when nothing ran.
+async function seedEmnistSamples(names, opts) {{
+  const options = opts || {{}};
+  const target = (Array.isArray(names) ? names : [])
+    .map((n) => String(n == null ? '' : n))
+    .filter((n, i, all) => n && all.indexOf(n) === i);
+  if (!target.length || !isOcrProject() || autoSeedEmnistInFlight) return null;
+  autoSeedEmnistInFlight = true;
+  try {{
+    const res = await fetch(`${{baseUrl}}/samples/seed_emnist`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{session: STATE.session, classes: target, count: 24}})
+    }});
+    const data = await res.json().catch(() => ({{ok:'0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to load template samples.');
+    const states = data.states && typeof data.states === 'object' ? data.states : {{}};
+    const processed = data.processed_previews && typeof data.processed_previews === 'object' ? data.processed_previews : {{}};
+    const seeded = (Array.isArray(data.classes) ? data.classes : target)
+      .map((n) => String(n))
+      .filter((n) => !!states[n]);
+    seeded.forEach((name) => {{
+      const state = states[name] || {{}};
+      STATE.counts[name] = Number(state.count || 0);
+      STATE.sample_previews[name] = normalizePreviewList(state.previews).slice(0, PREF_MAX_SAMPLES_DISPLAY);
+      if (Object.prototype.hasOwnProperty.call(processed, name)) {{
+        STATE.processed_previews[name] = normalizePreviewList(processed[name]);
+      }}
+    }});
+    recomputeTrainEnabled();
+    refreshTrainRec();
+    syncTrainUi();
+    if (seeded.length) {{
+      let rebuilt = false;
+      seeded.forEach((name) => {{
+        const openHost = document.getElementById(`samplesHost-${{cssSafe(name)}}`);
+        if (openHost) {{
+          updateOpenSamplesPanel(name);
+          rebuilt = true;
+        }}
+      }});
+      if (!rebuilt) render();
+    }}
+    if (!options.quiet) {{
+      const skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
+      toast(skipped
+        ? `Loaded 24 template samples per class (skipped ${{skipped}} non-character class${{skipped === 1 ? '' : 'es'}}).`
+        : `Loaded 24 template samples per class.`);
+    }}
+    return seeded;
+  }} catch (err) {{
+    if (!options.quiet) toast(String(err && err.message ? err.message : err));
+    return null;
+  }} finally {{
+    autoSeedEmnistInFlight = false;
+  }}
+}}
+// Auto path: called right after classes are created/synced.  Only classes
+// that are empty, are single sign characters, and have not already been
+// offered this project are seeded — a class with real captures is never
+// touched, and "Clear Samples" stays cleared.
+function autoSeedEmnistForNewClasses(names) {{
+  if (!isOcrProject() || !autoSeedEmnistSamples) return;
+  const fresh = (Array.isArray(names) ? names : []).filter((name) => {{
+    const key = String(name == null ? '' : name);
+    if (!key || autoSeedEmnistAttempted.has(key)) return false;
+    if (!isTemplateCharClass(key)) return false;
+    return Number((STATE.counts && STATE.counts[key]) || 0) === 0;
+  }});
+  if (!fresh.length) return;
+  // Marked before the request so a reload/resync cannot double-fire it; the
+  // server response then replaces the counts for the classes it seeded.
+  fresh.forEach((name) => autoSeedEmnistAttempted.add(String(name)));
+  seedEmnistSamples(fresh, {{quiet: true}});
 }}
 async function startHoldCapture() {{
   if (holdRecording || !openSourceClass || !openSourceKind || openSourceKind === 'upload') return;
@@ -10037,6 +10193,9 @@ async function addOcrCharacters(chars, fromDraft) {{
     recomputeTrainEnabled();
     refreshTrainRec();
     render();
+    // Newly added characters with no samples yet can be filled with template
+    // captures when the developer shortcut is on (Settings -> Advanced).
+    autoSeedEmnistForNewClasses(want);
     return true;
   }} catch (err) {{
     toast(String(err && err.message ? err.message : err));
@@ -10529,6 +10688,10 @@ async function syncSignClassesToSequence() {{
       applySignClassesState(next);
       render();
     }}
+    // A slot character that has just become a class starts empty.  When the
+    // developer shortcut is on, fill it with template captures now — quiet,
+    // because this rides on a background sync rather than a user action.
+    autoSeedEmnistForNewClasses(next);
   }} catch (e) {{
     // The local list already follows the slots, so the screen stays honest;
     // the next render retries because savedTarget was not advanced.
@@ -11253,6 +11416,10 @@ function isOcrProject() {{
 function syncOcrPanelVisibility() {{
   const cfg = STATE.train_cfg || {{}};
   const ocr = isOcrProject();
+  // Template-sample seeding only makes sense for a project whose classes are
+  // characters (basic OCR and road signs share the glyph pipeline).
+  const emnistGroup = document.getElementById('settingsEmnistGroup');
+  if (emnistGroup) emnistGroup.style.display = ocr ? 'block' : 'none';
   const ocrPanel = document.getElementById('advOcrPanel');
   if (ocrPanel) ocrPanel.style.display = ocr ? 'grid' : 'none';
   // Under transfer learning these three numbers are not built into the model
@@ -11973,6 +12140,34 @@ function render() {{
         const expanded = advToggle.getAttribute('aria-expanded') === 'true';
         advToggle.setAttribute('aria-expanded', String(!expanded));
         advBody.style.display = expanded ? 'none' : 'flex';
+      }};
+    }}
+    // Template-sample seeder (Settings -> Advanced, OCR projects only).
+    const autoSeedBox = document.getElementById('settingsAutoSeedEmnist');
+    if (autoSeedBox) {{
+      autoSeedBox.onchange = (e) => {{
+        if (e) e.stopPropagation();
+        setAutoSeedEmnistEnabled(!!autoSeedBox.checked);
+        toast(autoSeedBox.checked
+          ? 'Empty character classes will be filled with template samples.'
+          : 'Template auto-fill off.');
+      }};
+    }}
+    const seedBtn = document.getElementById('settingsSeedEmnistBtn');
+    if (seedBtn) {{
+      seedBtn.onclick = async (e) => {{
+        if (e) e.stopPropagation();
+        const names = (Array.isArray(STATE.classes) ? STATE.classes : []).filter(isTemplateCharClass);
+        if (!names.length) {{
+          toast('Nothing to fill — add a character class first.');
+          return;
+        }}
+        seedBtn.disabled = true;
+        try {{
+          await seedEmnistSamples(names);
+        }} finally {{
+          seedBtn.disabled = false;
+        }}
       }};
     }}
     // Preferences button + modal bindings

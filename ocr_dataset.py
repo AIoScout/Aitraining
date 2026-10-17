@@ -404,6 +404,329 @@ def resolve_class_map(
 
 
 # ════════════════════════════════════════════════════════════════════════
+# Template samples: EMNIST glyphs drawn as camera-style captures
+# ════════════════════════════════════════════════════════════════════════
+# The developer shortcut for trying the pipeline before a camera is wired
+# up: render EMNIST glyphs as 96x96 DARK-INK-ON-LIGHT frames and store them
+# where a capture would go.  The point is NOT to inject already-isolated
+# 28x28 glyphs (that is what training-time EMNIST mixing does, bypassing
+# segmentation) — it is to produce images the SAME front-end can binarise,
+# segment and crop, so Auto ROI, preprocess_glyph and the device C port all
+# take their ordinary paths.  Get the polarity backwards and every template
+# sample trains as background.
+TEMPLATE_SAMPLE_COUNT = 24
+TEMPLATE_SAMPLE_SIDE = 96
+TEMPLATE_SAMPLE_BG = 242       # light page, like a white car-sign plate
+TEMPLATE_SAMPLE_INK = 20       # dark print
+TEMPLATE_BANK_FILENAME = "emnist_byclass.npz"
+# Classes a road sign can print and this bank can serve.  Lower-case EMNIST
+# classes are deliberately NOT folded into upper case here: 'a' and 'A' are
+# different glyphs, and silently relabelling one as the other would teach
+# the model a shape its class never shows in the UI.
+TEMPLATE_SIGN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def emnist_bank_path() -> Path:
+    """The optional local glyph bank shipped with the app."""
+    return Path(__file__).resolve().parent / "models" / TEMPLATE_BANK_FILENAME
+
+
+def _bank_add(bank: Dict[str, List[np.ndarray]], char: Any, image: np.ndarray) -> None:
+    ch = str(char or "").strip().upper()
+    if len(ch) != 1 or ch not in TEMPLATE_SIGN_CHARS:
+        return
+    arr = np.asarray(image)
+    if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+        return
+    bank.setdefault(ch, []).append(np.ascontiguousarray(arr, dtype=np.uint8))
+
+
+def _bank_from_npz(path: Path) -> Dict[str, List[np.ndarray]]:
+    """Read the local bank.  Two layouts are accepted:
+
+        images [N,28,28] + chars [N]                 per-sample character
+        images [N,28,28] + labels [N] + label_chars  label LUT
+
+    The file is a cache, not a format: any future producer only has to say
+    which character each glyph is.
+    """
+    bank: Dict[str, List[np.ndarray]] = {}
+    with np.load(path, allow_pickle=False) as z:
+        if "images" not in z:
+            raise ValueError(f"{path} has no 'images' array")
+        images = np.asarray(z["images"])
+        if images.ndim == 3 and images.shape[1:] == (28, 28):
+            pass
+        elif images.ndim == 2 and images.shape[1] == 28 * 28:
+            images = images.reshape((-1, 28, 28))
+        else:
+            raise ValueError(f"{path}: unsupported image shape {images.shape}")
+        if "chars" in z:
+            chars = [str(c) for c in z["chars"]]
+        elif "labels" in z and "label_chars" in z:
+            lut = [str(c) for c in z["label_chars"]]
+            chars = [
+                lut[int(l)] if 0 <= int(l) < len(lut) else ""
+                for l in np.asarray(z["labels"]).ravel()
+            ]
+        else:
+            raise ValueError(f"{path} has neither 'chars' nor 'labels'/'label_chars'")
+    for image, ch in zip(images, chars):
+        _bank_add(bank, ch, image)
+    return bank
+
+
+def _bank_from_idx_cache(root: Path) -> Dict[str, List[np.ndarray]]:
+    """Fallback for a machine that has already downloaded EMNIST but no npz."""
+    bank: Dict[str, List[np.ndarray]] = {}
+    for split in (EMNIST_SPLIT_BALANCED, EMNIST_SPLIT_LETTERS, EMNIST_SPLIT_DIGITS):
+        try:
+            if not emnist_is_present(Path(root), split):
+                continue
+            data = load_emnist(Path(root), split, usages=("train",))
+        except Exception:
+            continue
+        for image, label in zip(data.images, data.labels):
+            i = int(label)
+            if 0 <= i < len(data.chars):
+                _bank_add(bank, data.chars[i], image)
+    return bank
+
+
+def _template_font(size: int):
+    from PIL import ImageFont
+
+    candidates: List[Path] = []
+    try:
+        import matplotlib
+
+        candidates.append(Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans-Bold.ttf")
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf"),
+            Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+            Path("/Library/Fonts/Arial Bold.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("C:/Windows/Fonts/arialbd.ttf"),
+            Path("C:/Windows/Fonts/arial.ttf"),
+        ]
+    )
+    for p in candidates:
+        try:
+            if p.exists():
+                return ImageFont.truetype(str(p), int(size))
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _synthetic_glyph_28(char: str) -> np.ndarray:
+    """Last-resort glyph when neither the bank nor an EMNIST cache exists.
+
+    Rendered at 4x and downsampled so it has the soft edges of a real
+    EMNIST stroke rather than the aliased stair-steps of a bitmap font.
+    """
+    from PIL import Image, ImageDraw
+
+    ch = str(char or "").strip().upper()[:1]
+    if not ch:
+        raise ValueError("empty character")
+    size = 112
+    font = _template_font(int(size * 0.74))
+    canvas = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(canvas)
+    try:
+        box = draw.textbbox((0, 0), ch, font=font)
+    except Exception:
+        box = (0, 0, size, size)
+    w = max(1, int(box[2] - box[0]))
+    h = max(1, int(box[3] - box[1]))
+    # Fit the ink into ~72 % of the 28 px canvas, the same natural margin
+    # EMNIST leaves; centre it by its real ink box, not its font metrics.
+    scale = min((size * 0.72) / w, (size * 0.72) / h, 1.0)
+    if scale < 1.0:
+        font = _template_font(max(6, int(int(size * 0.74) * scale)))
+        try:
+            box = draw.textbbox((0, 0), ch, font=font)
+        except Exception:
+            box = (0, 0, size, size)
+        w = max(1, int(box[2] - box[0]))
+        h = max(1, int(box[3] - box[1]))
+    draw.text(
+        (size / 2.0 - w / 2.0 - box[0], size / 2.0 - h / 2.0 - box[1]),
+        ch,
+        fill=255,
+        font=font,
+    )
+    return np.asarray(canvas.resize((28, 28), Image.LANCZOS), dtype=np.uint8)
+
+
+def load_emnist_template_bank(
+    npz_path: Optional[Path] = None,
+    cache_root: Optional[Path] = None,
+) -> Dict[str, List[np.ndarray]]:
+    """char -> upright 28x28 glyphs, best source first.
+
+    Local `models/emnist_byclass.npz`, then an existing EMNIST IDX cache,
+    then nothing — callers fall back to `_synthetic_glyph_28` per class.
+    Never raises and never downloads: seeding is an offline developer
+    convenience, so a missing cache must not turn a button click into a
+    network operation.
+    """
+    bank: Dict[str, List[np.ndarray]] = {}
+    path = Path(npz_path) if npz_path is not None else emnist_bank_path()
+    if path.exists():
+        try:
+            bank = _bank_from_npz(path)
+        except Exception:
+            bank = {}
+    if not bank and cache_root is not None:
+        bank = _bank_from_idx_cache(Path(cache_root))
+    return bank
+
+
+def template_capture_from_glyph(
+    glyph: np.ndarray,
+    rng: np.random.Generator,
+    side: int = TEMPLATE_SAMPLE_SIDE,
+) -> np.ndarray:
+    """One isolated glyph -> one 96x96 dark-ink-on-light camera-style frame.
+
+    The glyph is cropped to its own ink box, scaled to a sign-sized height
+    (38-52 px in a 96 px frame), jittered, rotated a few degrees and
+    composited onto a ~242-level page with ~20-level ink, then softened and
+    noised.  Every one of those choices exists to keep the result inside
+    the distribution the capture front-end was built for: Otsu finds a
+    real bimodal split, the projection sees one ink run, and the model
+    sees the same gentle anti-aliasing a printed sign has.
+    """
+    from PIL import Image, ImageFilter
+
+    g = np.asarray(glyph, dtype=np.float32) / 255.0
+    if g.ndim != 2 or g.size == 0:
+        raise ValueError("glyph must be a non-empty 2-D array")
+    ys, xs = np.where(g > 0.08)
+    if ys.size:
+        g = g[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1]
+    side = max(32, int(side))
+    target_h = int(rng.integers(38, 53))
+    gh, gw = g.shape
+    target_w = max(2, int(round(gw * (target_h / float(max(1, gh))))))
+    up = Image.fromarray(np.clip(np.rint(g * 255.0), 0, 255).astype(np.uint8), mode="L")
+    up = up.resize((target_w, target_h), Image.BICUBIC)
+    layer = Image.new("L", (side, side), 0)
+    x = (side - target_w) // 2 + int(rng.integers(-5, 6))
+    y = (side - target_h) // 2 + int(rng.integers(-5, 6))
+    layer.paste(up, (max(0, x), max(0, y)))
+    angle = float(rng.uniform(-7.0, 7.0))
+    if abs(angle) > 0.5:
+        layer = layer.rotate(angle, resample=Image.BICUBIC, center=(side / 2.0, side / 2.0), fillcolor=0)
+    layer = layer.filter(ImageFilter.GaussianBlur(float(rng.uniform(0.2, 0.7))))
+    alpha = np.asarray(layer, dtype=np.float32) / 255.0
+    bg = np.float32(TEMPLATE_SAMPLE_BG) + rng.normal(0.0, 2.0, (side, side)).astype(np.float32)
+    ink = np.float32(TEMPLATE_SAMPLE_INK) + rng.normal(0.0, 2.0, (side, side)).astype(np.float32)
+    out = bg * (1.0 - alpha) + ink * alpha
+    return np.clip(np.rint(out), 0.0, 255.0).astype(np.uint8)
+
+
+def build_template_capture_samples(
+    char: str,
+    count: int = TEMPLATE_SAMPLE_COUNT,
+    *,
+    bank: Optional[Dict[str, List[np.ndarray]]] = None,
+    seed: Optional[int] = None,
+) -> List[np.ndarray]:
+    """`count` camera-style 96x96 samples for one character class.
+
+    Deterministic for a given (char, count): the same click always writes
+    the same template set, so a template project is reproducible and two
+    runs of the test suite compare against the same pixels.
+    """
+    ch = str(char or "").strip().upper()[:1]
+    if len(ch) != 1 or ch not in TEMPLATE_SIGN_CHARS:
+        raise ValueError(f"'{char}' is not a sign character (0-9, A-Z)")
+    n = max(1, int(count))
+    glyphs = list((bank or {}).get(ch) or [])
+    key = int(seed) if seed is not None else int(ch.encode("ascii")[0]) * 97 + len(ch)
+    rng = np.random.default_rng(key)
+    order = rng.permutation(len(glyphs)) if glyphs else np.zeros(0, dtype=np.int64)
+    synthetic = None
+    out: List[np.ndarray] = []
+    for i in range(n):
+        if glyphs:
+            g = glyphs[int(order[i % len(order)])]
+        else:
+            if synthetic is None:
+                synthetic = _synthetic_glyph_28(ch)
+            g = synthetic
+        out.append(template_capture_from_glyph(g, rng))
+    return out
+
+
+def render_template_sign_frame(
+    chars: Sequence[str],
+    *,
+    side: int = TEMPLATE_SAMPLE_SIDE,
+    bank: Optional[Dict[str, List[np.ndarray]]] = None,
+    seed: int = 0,
+) -> np.ndarray:
+    """A whole multi-character sign, left-to-right, in one camera-style frame.
+
+    Used to build the demo `A 1 2` / `A 1 7` images.  Glyphs are laid out
+    with real gaps so `split_sign_glyph_boxes` finds exactly one run per
+    character — the same physical assumption a printed sign satisfies.
+    """
+    from PIL import Image, ImageFilter
+
+    order = [str(c).strip().upper()[:1] for c in chars if str(c).strip()]
+    if not order:
+        raise ValueError("no characters")
+    side = max(48, int(side))
+    rng = np.random.default_rng(int(seed))
+    target_h = int(rng.integers(33, 39))
+    layers: List[Any] = []
+    for ch in order:
+        glyphs = list((bank or {}).get(ch) or [])
+        g = np.asarray(glyphs[int(rng.integers(0, len(glyphs)))] if glyphs else _synthetic_glyph_28(ch),
+                       dtype=np.float32) / 255.0
+        ys, xs = np.where(g > 0.08)
+        if ys.size:
+            g = g[int(ys.min()) : int(ys.max()) + 1, int(xs.min()) : int(xs.max()) + 1]
+        h = max(8, target_h + int(rng.integers(-2, 3)))
+        w = max(2, int(round(g.shape[1] * (h / float(max(1, g.shape[0]))))))
+        layer = Image.fromarray(np.clip(np.rint(g * 255.0), 0, 255).astype(np.uint8), mode="L")
+        layers.append(layer.resize((w, h), Image.BICUBIC))
+    gap = max(4, int(round(side * 0.075)))
+    total = sum(layer.width for layer in layers) + gap * (len(layers) - 1)
+    if total > side - 6:
+        scale = (side - 6) / float(total)
+        layers = [
+            layer.resize((max(2, int(round(layer.width * scale))), max(2, int(round(layer.height * scale)))),
+                         Image.BICUBIC)
+            for layer in layers
+        ]
+        total = sum(layer.width for layer in layers) + gap * (len(layers) - 1)
+    canvas = Image.new("L", (side, side), 0)
+    x = max(0, (side - total) // 2)
+    for layer in layers:
+        y = (side - layer.height) // 2 + int(rng.integers(-2, 3))
+        canvas.paste(layer, (x, max(0, y)))
+        x += layer.width + gap
+    angle = float(rng.uniform(-1.5, 1.5))
+    if abs(angle) > 0.3:
+        canvas = canvas.rotate(angle, resample=Image.BICUBIC, center=(side / 2.0, side / 2.0), fillcolor=0)
+    canvas = canvas.filter(ImageFilter.GaussianBlur(float(rng.uniform(0.25, 0.6))))
+    alpha = np.asarray(canvas, dtype=np.float32) / 255.0
+    bg = np.float32(TEMPLATE_SAMPLE_BG) + rng.normal(0.0, 2.0, (side, side)).astype(np.float32)
+    ink = np.float32(TEMPLATE_SAMPLE_INK) + rng.normal(0.0, 2.0, (side, side)).astype(np.float32)
+    out = bg * (1.0 - alpha) + ink * alpha
+    return np.clip(np.rint(out), 0.0, 255.0).astype(np.uint8)
+
+
+# ════════════════════════════════════════════════════════════════════════
 # The N+1 background class
 # ════════════════════════════════════════════════════════════════════════
 def _erase_ink(gray: np.ndarray, rng: np.random.Generator) -> np.ndarray:

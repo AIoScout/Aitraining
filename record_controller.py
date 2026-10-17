@@ -72,6 +72,7 @@ from dataset_io import (
     PROJECT_TYPE_IMAGE,
     PROJECT_TYPE_OCR,
     PROJECT_TYPE_SIGN_OCR,
+    app_data_dir,
     is_glyph_project,
     default_img_size,
     project_header,
@@ -114,6 +115,12 @@ from ocr_preprocess import (
 # than duplicated in the frontend.
 SIGN_MATCH_TEXT = "🟢 YES — MATCH"
 SIGN_NOMATCH_TEXT = "🔴 NO — NOT MATCH"
+
+# Template (EMNIST) sample seeding writes files whose names start with this,
+# which is how a re-seed can replace its own previous output without ever
+# touching a real camera capture in the same class folder.
+TEMPLATE_SAMPLE_PREFIX = "emnist_seed_"
+TEMPLATE_SAMPLE_DEFAULT_COUNT = 24
 
 # The sign_ocr keys a preview response carries ON TOP of the ordinary
 # predict payload.  Listed once so /preview/predict and
@@ -1336,6 +1343,7 @@ class RecordController:
             "/classes/delete",
             "/samples/delete",
             "/samples/clear",
+            "/samples/seed_emnist",
             "/preprocess/preview",
             "/preview/predict_upload",
             "/classes/save_config",
@@ -1808,6 +1816,23 @@ class RecordController:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
             _send_json(req, {"ok": "1", "state": state}, cors=True)
+            return
+        if path == "/samples/seed_emnist":
+            session_id = str(payload.get("session") or "").strip()
+            names = payload.get("classes")
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            try:
+                result = self._samples_seed_emnist(
+                    session_id=session_id,
+                    classes=names if isinstance(names, list) else None,
+                    count=payload.get("count", TEMPLATE_SAMPLE_DEFAULT_COUNT),
+                )
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {"ok": "1", **result}, cors=True)
             return
         if path == "/classes/delete":
             session_id = str(payload.get("session") or "").strip()
@@ -3245,6 +3270,129 @@ class RecordController:
                 sample_preprocess=sample_preprocess,
             )
         return self._class_state_payload(cfg.dataset_root, class_name)
+
+    def _samples_seed_emnist(
+        self,
+        session_id: str,
+        classes: Optional[List[Any]] = None,
+        count: Any = TEMPLATE_SAMPLE_DEFAULT_COUNT,
+    ) -> Dict[str, Any]:
+        """Fill character classes with camera-realistic EMNIST template samples.
+
+        The developer shortcut for trying the sign pipeline before a camera
+        is wired up.  Each glyph is rendered as a 96x96 DARK-INK-ON-LIGHT
+        frame (see `ocr_dataset.template_capture_from_glyph`) so the exact
+        same `preprocess_glyph` path Otsu-binarizes and crops it as a real
+        capture — raw EMNIST is bright-on-dark and would binarize inverted.
+
+        Seeded files are named `emnist_seed_NN.png`; a re-seed replaces only
+        those, never a camera capture in the same class folder.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        project_type = str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE)
+        if not is_glyph_project(project_type):
+            raise ValueError("template samples are only available for OCR projects")
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            n = TEMPLATE_SAMPLE_DEFAULT_COUNT
+        n = max(1, min(500, n))
+
+        from ocr_dataset import (
+            TEMPLATE_SIGN_CHARS,
+            build_template_capture_samples,
+            emnist_cache_dir,
+            load_emnist_template_bank,
+            map_class_to_char,
+        )
+
+        dataset_root = cfg.dataset_root
+        available = self._classes_load(dataset_root)
+        # Match requested names case-insensitively but seed under the class
+        # name the project actually stores (the folder is the class name).
+        by_fold = {name.strip().upper(): name for name in available if name.strip()}
+        requested: List[str] = []
+        if classes:
+            for raw in classes:
+                name = by_fold.get(str(raw or "").strip().upper())
+                if name and name not in requested:
+                    requested.append(name)
+        else:
+            requested = list(available)
+
+        targets: List[str] = []
+        skipped: List[str] = []
+        for name in requested:
+            ch = map_class_to_char(name)
+            ch = ch.upper() if ch else ""
+            if len(ch) == 1 and ch in TEMPLATE_SIGN_CHARS:
+                targets.append(name)
+            else:
+                skipped.append(name)
+        if not targets:
+            raise ValueError("no character classes to seed")
+
+        bank = load_emnist_template_bank(cache_root=emnist_cache_dir(app_data_dir()))
+        sample_preprocess = self._sample_preprocess_load(dataset_root)
+        preprocess_changed = False
+        for name in targets:
+            char = map_class_to_char(name).upper()
+            class_dir = dataset_root / sanitize_class_name(name)
+            class_dir.mkdir(parents=True, exist_ok=True)
+            processed_dir = self._processed_cache_dir(dataset_root) / sanitize_class_name(name)
+            # Replace this seeder's own previous output only.
+            for folder in (class_dir, processed_dir):
+                if not folder.exists():
+                    continue
+                for p in list(folder.iterdir()):
+                    if (
+                        p.is_file()
+                        and p.name.startswith(TEMPLATE_SAMPLE_PREFIX)
+                        and p.suffix.lower() in IMAGE_EXTS
+                    ):
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+            class_map = sample_preprocess.get(name)
+            if isinstance(class_map, dict):
+                for fname in [k for k in list(class_map) if str(k).startswith(TEMPLATE_SAMPLE_PREFIX)]:
+                    class_map.pop(fname, None)
+                    preprocess_changed = True
+                if not class_map:
+                    sample_preprocess.pop(name, None)
+            for i, arr in enumerate(build_template_capture_samples(char, count=n, bank=bank)):
+                sample_path = class_dir / f"{TEMPLATE_SAMPLE_PREFIX}{i:02d}.png"
+                sample_path.write_bytes(
+                    _to_png_bytes(Image.fromarray(np.asarray(arr, dtype=np.uint8), mode="L"))
+                )
+                self._cache_one_sample(
+                    dataset_root,
+                    name,
+                    sample_path,
+                    img_size=int(cfg.img_size),
+                    project_type=project_type,
+                )
+        if preprocess_changed:
+            self._classes_save(
+                dataset_root,
+                available,
+                class_preprocess=self._class_preprocess_load(dataset_root),
+                sample_preprocess=sample_preprocess,
+            )
+
+        return {
+            "classes": targets,
+            "skipped": skipped,
+            "count": str(n),
+            "states": {
+                name: self._class_state_payload(dataset_root, name) for name in targets
+            },
+            "processed_previews": self._processed_previews_payload(dataset_root, targets),
+        }
 
     def _processed_preview_item_payload(self, path: Path) -> Dict[str, str]:
         return _preview_item_payload(path)

@@ -18,6 +18,9 @@ Covered:
   wiring          the predict request carries sign_seq + reading; the Edit
                   menu's character editor is OCR-only; a settings reset keeps
                   the target
+  template data   the EMNIST sample seeder lives in Settings -> Advanced,
+                  is OCR-only, fills every class from the backend response,
+                  and auto-fills a newly created empty class exactly once
 
 Requires Playwright with a system Chrome:
     .venv/bin/python tests/test_sign_ocr_spa.py
@@ -481,6 +484,163 @@ def assert_settings_reset_keeps_the_target(page):
     assert kept == ["A", "1", "A"], kept
 
 
+# ── EMNIST template samples (Settings -> Advanced) ────────────────────────
+# A tiny valid PNG: the SPA only renders `src`, so the bytes do not matter.
+_TINY_PNG = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+_SEED_RESPONSE = {
+    "ok": "1",
+    "classes": ["A", "1"],
+    "skipped": [],
+    "count": "24",
+    "states": {
+        "A": {
+            "ok": "1", "class": "A", "count": "27",
+            "previews": [{"src": _TINY_PNG, "filename": "emnist_seed_00.png"}],
+        },
+        "1": {
+            "ok": "1", "class": "1", "count": "26",
+            "previews": [{"src": _TINY_PNG, "filename": "emnist_seed_00.png"}],
+        },
+    },
+    "processed_previews": {
+        "A": [{"src": _TINY_PNG, "filename": "emnist_seed_00.png"}],
+        "1": [{"src": _TINY_PNG, "filename": "emnist_seed_00.png"}],
+    },
+}
+
+
+def _stub_seed_endpoint(page, payload=None):
+    """Record seed requests and answer them (an echo by default)."""
+    page.evaluate(
+        """(payload) => {
+          window.__seedBodies = [];
+          const real = window.fetch;
+          window.fetch = async (url, opts) => {
+            if (String(url).includes('/samples/seed_emnist')) {
+              const body = JSON.parse(opts.body);
+              window.__seedBodies.push(body);
+              if (payload) {
+                return new Response(JSON.stringify(payload), {
+                  status: 200, headers: {'Content-Type': 'application/json'}
+                });
+              }
+              const states = {};
+              body.classes.forEach((name) => {
+                states[name] = {ok: '1', class: name, count: '24', previews: []};
+              });
+              return new Response(JSON.stringify({
+                ok: '1', classes: body.classes, skipped: [], count: '24',
+                states, processed_previews: {}
+              }), {status: 200, headers: {'Content-Type': 'application/json'}});
+            }
+            return real(url, opts);
+          };
+        }""",
+        payload,
+    )
+
+
+def assert_seeder_lives_in_advanced_settings(page):
+    """The developer shortcut is in Settings -> Advanced and OCR-only."""
+    page.evaluate("openGlobalSettings()")
+    assert page.evaluate("document.getElementById('settingsEmnistGroup').style.display") == "block"
+    btn = page.evaluate("document.getElementById('settingsSeedEmnistBtn').textContent").strip()
+    assert btn == "Load EMNIST Template Samples (24 / class)", btn
+    assert page.evaluate(
+        "document.getElementById('settingsAutoSeedEmnist').checked"
+    ) is False
+    page.evaluate("closeGlobalSettings()")
+    # Image projects have no character classes to fill: the whole group hides.
+    page.evaluate(
+        "STATE.project_type = 'image'; syncOcrPanelVisibility()"
+    )
+    assert page.evaluate("document.getElementById('settingsEmnistGroup').style.display") == "none"
+    page.evaluate(
+        "STATE.project_type = 'sign_ocr'; syncOcrPanelVisibility()"
+    )
+    assert page.evaluate("document.getElementById('settingsEmnistGroup').style.display") == "block"
+
+
+def assert_seeder_button_fills_every_class(page):
+    _reset_sign_state(page)
+    page.evaluate("autoSeedEmnistAttempted = new Set()")
+    _stub_seed_endpoint(page, _SEED_RESPONSE)
+
+    page.evaluate("openGlobalSettings()")
+    page.evaluate("document.getElementById('settingsSeedEmnistBtn').click()")
+    page.wait_for_function("window.__seedBodies.length > 0")
+
+    bodies = page.evaluate("window.__seedBodies")
+    assert bodies[0]["classes"] == ["A", "1"], bodies[0]
+    assert bodies[0]["session"], bodies[0]
+    assert int(bodies[0]["count"]) == 24, bodies[0]
+
+    counts = page.evaluate("STATE.counts")
+    assert counts == {"A": 27, "1": 26}, counts
+    # The cards show the refreshed counts and processed previews immediately.
+    assert page.evaluate(
+        "document.getElementById('summaryTitle-A').textContent"
+    ) == "27 Image Samples"
+    assert page.evaluate(
+        "document.getElementById('summaryTitle-1').textContent"
+    ) == "26 Image Samples"
+    assert page.evaluate("STATE.processed_previews.A.length") == 1
+    assert page.evaluate("STATE.processed_previews['1'].length") == 1
+    assert "24 template samples" in page.evaluate(
+        "document.getElementById('toast').textContent"
+    )
+    # No class warnings appear anywhere in the workspace.
+    text = page.evaluate("document.getElementById('classes').textContent")
+    assert "No class" not in text, text
+    assert "No class yet" not in text, text
+    page.evaluate("closeGlobalSettings()")
+
+
+def assert_auto_seed_fills_a_new_empty_class(page):
+    _reset_sign_state(page)
+    page.evaluate("autoSeedEmnistAttempted = new Set()")
+    _stub_seed_endpoint(page)
+
+    # Turning the checkbox on persists the choice, not just the checkbox.
+    page.evaluate("openGlobalSettings()")
+    page.evaluate("document.getElementById('settingsAutoSeedEmnist').click()")
+    assert page.evaluate("autoSeedEmnistSamples") is True
+    assert page.evaluate(
+        "window.localStorage.getItem('auto_seed_emnist_samples')"
+    ) == "1"
+    page.evaluate("closeGlobalSettings()")
+
+    # Typing a new character creates a class with zero samples; the auto
+    # path must fill it without a second click.
+    page.evaluate("window.__seedBodies = []")
+    page.locator("#signSeqSlot-1").click()
+    page.keyboard.type("7")
+    _wait_sync(page)
+    page.wait_for_function("window.__seedBodies.length > 0")
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["A","7"]'
+    assert page.evaluate("window.__seedBodies[0].classes") == ["7"]
+    assert page.evaluate("STATE.counts['7']") == 24
+
+    # Only once per class: an explicit Clear Samples stays cleared.
+    before = page.evaluate("window.__seedBodies.length")
+    page.evaluate("autoSeedEmnistForNewClasses(['7'])")
+    page.wait_for_timeout(150)
+    assert page.evaluate("window.__seedBodies.length") == before
+
+    # Back to a quiet default for the tests that follow.
+    page.evaluate(
+        """() => {
+          autoSeedEmnistSamples = false;
+          autoSeedEmnistAttempted = new Set();
+          try { window.localStorage.removeItem('auto_seed_emnist_samples'); } catch (e) {}
+        }"""
+    )
+
+
 def main() -> int:
     base_cfg = boot_payload()["train_cfg"]
     html = build_spa_html(boot_payload())
@@ -567,6 +727,9 @@ def main() -> int:
             run("predict request carries the target", assert_predict_request_carries_the_target, page)
             run("menu item and bar follow the type", assert_menu_item_and_bar_follow_the_project_type, page)
             run("settings reset keeps the target", assert_settings_reset_keeps_the_target, page)
+            run("seeder is in Advanced settings", assert_seeder_lives_in_advanced_settings, page)
+            run("seeder fills every class", assert_seeder_button_fills_every_class, page)
+            run("auto-seed fills new empty class", assert_auto_seed_fills_a_new_empty_class, page)
 
             browser.close()
 
