@@ -1,0 +1,265 @@
+"""Headless-Chrome checks for the Preview ROI rectangle.
+
+The ROI checkbox owns the green/blue crop rectangle: toggling it ON draws
+the box on the scene, toggling it OFF hides it.  The box is normalized to
+the ORIGINAL frame, so while ROI is the only active layer the pane must
+keep a full-frame image (the raw scene) — showing the cropped tensor there
+would put the rectangle in the wrong place.  Orig still selects the full
+masked frame, and ROI + Orig still shows the processed crop, where a
+full-frame box cannot be drawn.
+
+Requires Playwright with a system Chrome:
+    .venv/bin/python tests/test_preview_roi_spa.py
+"""
+from __future__ import annotations
+
+import base64
+import io
+import sys
+import traceback
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+for p in (ROOT, Path(__file__).resolve().parent):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from spa_harness import STUB_FETCH, boot_payload, build_spa_html, serve
+
+from PIL import Image
+from playwright.sync_api import sync_playwright
+
+
+def _png_b64(size, color) -> str:
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+# Four visually distinct frames: the test can tell which payload field the
+# pane chose without trusting any state besides the <img> src.
+RAW = _png_b64((40, 30), (200, 40, 40))
+FULL = _png_b64((40, 30), (220, 210, 60))
+CROP = _png_b64((20, 20), (40, 60, 220))
+PROCESSED = _png_b64((20, 20), (40, 180, 60))
+
+CROP_RECT = [0.2, 0.25, 0.8, 0.75]
+
+
+def _url(b64: str) -> str:
+    return "data:image/png;base64," + b64
+
+
+_PAYLOAD = {
+    "ok": "1",
+    "labels": ["A", "B"],
+    "probs": [0.9, 0.1],
+    "top_label": "A",
+    "top_prob": 0.9,
+    "ood": False,
+    "image_b64": RAW,
+    "processed_image_b64": PROCESSED,
+    "crop_image_b64": CROP,
+    "full_image_b64": FULL,
+    "processed_variant": "masked",
+    "crop": CROP_RECT,
+}
+
+
+def _apply(page, payload=_PAYLOAD):
+    page.evaluate(
+        """(payload) => {
+          window.__payload = payload;
+          previewLastPredictData = payload;
+          applyPreviewSrcToPane(payload);
+        }""",
+        payload,
+    )
+
+
+def _state(page):
+    return page.evaluate(
+        """() => {
+          const ov = document.getElementById('previewRoiOverlay');
+          const img = document.getElementById('previewImage');
+          return {
+            display: ov ? ov.style.display : 'missing',
+            src: img ? img.src : '',
+            box: ov ? {
+              left: parseFloat(ov.style.left || 'NaN'),
+              top: parseFloat(ov.style.top || 'NaN'),
+              width: parseFloat(ov.style.width || 'NaN'),
+              height: parseFloat(ov.style.height || 'NaN'),
+            } : null,
+          };
+        }"""
+    )
+
+
+def _set_toggle(page, toggle_id: str, checked: bool):
+    page.evaluate(
+        """({id, checked}) => {
+          const el = document.getElementById(id);
+          if (el.checked !== checked) el.click();
+        }""",
+        {"id": toggle_id, "checked": checked},
+    )
+    # onViewToggleChanged defers persist + renderPreviewCard to a 0 ms
+    # timeout; let that run so the assertions see the settled DOM.
+    page.wait_for_timeout(80)
+
+
+def assert_roi_off_hides_the_box(page):
+    _set_toggle(page, "previewRoiToggle", False)
+    _set_toggle(page, "previewRawToggle", False)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "none", state
+    assert state["src"] == _url(RAW), state
+
+
+def assert_roi_on_draws_the_box_on_the_scene(page):
+    _set_toggle(page, "previewRoiToggle", True)
+    _apply(page)
+    # Wait for the PNG to decode: the overlay geometry comes from the
+    # image's natural size, not the stage size.
+    page.wait_for_function(
+        "(() => { const i = document.getElementById('previewImage');"
+        " return i && i.complete && i.naturalWidth > 0; })()",
+        timeout=5000,
+    )
+    _apply(page)  # re-run now that naturalWidth is known
+    state = _state(page)
+    assert state["display"] == "block", state
+    # ROI must NOT swap the pane to the cropped tensor: the box is in
+    # original-frame coordinates and would land in the wrong place.
+    assert state["src"] == _url(RAW), state
+
+    expected = page.evaluate(
+        """() => {
+          const img = document.getElementById('previewImage');
+          const stage = document.querySelector('#previewPane .preview-stage');
+          const r = stage.getBoundingClientRect();
+          const scale = Math.min(r.width / img.naturalWidth,
+                                 r.height / img.naturalHeight);
+          const w = img.naturalWidth * scale;
+          const h = img.naturalHeight * scale;
+          const ox = (r.width - w) * 0.5;
+          const oy = (r.height - h) * 0.5;
+          const c = window.__payload.crop;
+          return {
+            left: ox + c[0] * w,
+            top: oy + c[1] * h,
+            width: (c[2] - c[0]) * w,
+            height: (c[3] - c[1]) * h,
+          };
+        }"""
+    )
+    for key in ("left", "top", "width", "height"):
+        assert abs(state["box"][key] - expected[key]) < 0.75, (key, state["box"], expected)
+
+
+def assert_roi_off_again_hides_the_box(page):
+    _set_toggle(page, "previewRoiToggle", False)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "none", state
+    assert state["src"] == _url(RAW), state
+
+
+def assert_orig_shows_the_masked_frame_without_a_box(page):
+    _set_toggle(page, "previewRoiToggle", False)
+    _set_toggle(page, "previewRawToggle", True)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "none", state
+    assert state["src"] == _url(FULL), state
+
+
+def assert_both_toggles_show_the_processed_crop(page):
+    # ROI + Orig = cropped AND filtered.  That image is not the original
+    # frame, so the full-frame box must stay hidden even though ROI is on.
+    _set_toggle(page, "previewRoiToggle", True)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "none", state
+    assert state["src"] == _url(PROCESSED), state
+
+
+def assert_input_off_keeps_the_box_visible(page):
+    # With Input OFF no prediction arrives to redraw the overlay; the
+    # deferred render must re-apply the cached one instead of hiding it.
+    _set_toggle(page, "previewRawToggle", False)
+    _set_toggle(page, "previewRoiToggle", True)
+    _apply(page)
+    page.evaluate("renderPreviewCard()")
+    page.wait_for_timeout(80)
+    state = _state(page)
+    assert state["display"] == "block", state
+    assert state["src"] == _url(RAW), state
+
+
+def main() -> int:
+    html = build_spa_html(boot_payload())
+    results = []
+
+    def run(name, fn, page):
+        try:
+            fn(page)
+        except Exception as exc:  # noqa: BLE001 - a test runner reports everything
+            results.append((name, False))
+            print(f"FAIL {name}: {exc}")
+            traceback.print_exc()
+        else:
+            results.append((name, True))
+            print(f"ok   {name}")
+
+    with serve(html) as url:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(channel="chrome", headless=True)
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.add_init_script(STUB_FETCH)
+            page.goto(url)
+            page.wait_for_function("typeof renderPreviewCard === 'function'")
+            page.wait_for_timeout(300)
+
+            # Start from a clean, deterministic preview state: no persisted
+            # ROI/Orig choices and no live loop.
+            page.evaluate(
+                """() => {
+                  try { localStorage.clear(); } catch (e) {}
+                  previewInputOn = false;
+                  previewSource = 'upload';
+                  STATE.preview_source = 'upload';
+                  previewUploadImageSrc = '';
+                  previewLastStaticImageSrc = '';
+                  previewShowRoi = false;
+                  previewShowRaw = false;
+                  renderPreviewCard();
+                  applyPreviewSrcToPane(window.__payload || null);
+                }"""
+            )
+            page.evaluate("window.__payload = null")
+
+            run("ROI OFF hides the box", assert_roi_off_hides_the_box, page)
+            run("ROI ON draws the box on the scene", assert_roi_on_draws_the_box_on_the_scene, page)
+            run("ROI OFF hides the box again", assert_roi_off_again_hides_the_box, page)
+            run("Orig shows the masked frame without a box", assert_orig_shows_the_masked_frame_without_a_box, page)
+            run("ROI + Orig shows the processed crop", assert_both_toggles_show_the_processed_crop, page)
+            run("Input OFF keeps the box visible", assert_input_off_keeps_the_box_visible, page)
+
+            browser.close()
+
+    if errors:
+        print("\npage errors:")
+        for e in errors:
+            print("  " + e)
+    passed = sum(1 for _, ok in results if ok)
+    print(f"\n{passed}/{len(results)} passed")
+    return 0 if passed == len(results) and not errors else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -9903,16 +9903,16 @@ function getPreviewImageContentRect() {{
   const offsetY = (stageRect.height - height) * 0.5;
   return {{ offsetX, offsetY, width, height }};
 }}
-function updatePreviewRoiOverlay(crop, isManual) {{
+function updatePreviewRoiOverlay(crop, isManual, frameMatches = true) {{
   const overlay = document.getElementById('previewRoiOverlay');
   if (!overlay) return;
   const valid = Array.isArray(crop) && crop.length === 4;
-  // Green/blue box shows whenever the ROI toggle is OFF — on the default
-  // frame AND on the Orig view (the Orig image keeps the full frame's
-  // aspect ratio, so the normalized box maps onto it exactly).  ROI ON
-  // alone displays the jumping CROP image itself (the search box effect)
-  // and the overlay is hidden there.
-  const show = valid && !previewShowRoi;
+  // The ROI toggle owns the box: ON draws it, OFF hides it.  `crop` is
+  // normalized to the ORIGINAL frame, so it only maps onto a view that
+  // keeps that frame (the raw scene, or the full masked frame from Orig).
+  // The processed crop / sign-split composite has its own coordinates and
+  // passes frameMatches = false.
+  const show = valid && previewShowRoi && frameMatches;
   if (!show) {{
     overlay.style.display = 'none';
     return;
@@ -10736,7 +10736,10 @@ function renderPreviewCard() {{
     if (img && !img.getAttribute('src')) {{
       if (staticSrc) img.src = staticSrc;
     }}
-    updatePreviewRoiOverlay(null, false);
+    // No new prediction is coming, so re-apply the cached one: the ROI
+    // toggle must still show/hide its box on the held frame.
+    if (previewLastPredictData) applyPreviewSrcToPane(previewLastPredictData);
+    else updatePreviewRoiOverlay(null, false);
   }}
   bindLayoutImageObservers(pane);
   scheduleLayoutResync();
@@ -10768,17 +10771,24 @@ function applyPreviewSrcToPane(data) {{
   const hasData = !!data;
   const rawFromData = hasData && data.image_b64 ? `data:image/png;base64,${{data.image_b64}}` : '';
   const roiFromData = hasData && data.processed_image_b64 ? `data:image/png;base64,${{data.processed_image_b64}}` : '';
-  const cropFromData = hasData && data.crop_image_b64 ? `data:image/png;base64,${{data.crop_image_b64}}` : '';
   const fullFromData = hasData && data.full_image_b64 ? `data:image/png;base64,${{data.full_image_b64}}` : '';
   const uploadedSrc = previewSource === 'upload' ? previewUploadImageSrc : '';
   const rawSrc = rawFromData || uploadedSrc || previewLastStaticImageSrc || '';
   const roiSrc = roiFromData || fullFromData || rawSrc;
-  const cropSrc = cropFromData || rawSrc;
   const fullSrc = fullFromData || rawSrc;
   let src = rawSrc;
-  if (previewShowRaw && previewShowRoi) src = roiSrc;
+  let fullFrame = true;  // does `src` share the original frame's coordinates?
+  if (previewShowRaw && previewShowRoi) {{
+    // Cropped AND filtered: the processed tensor (or the sign split
+    // composite).  Its pixels are not the original frame, so the ROI box
+    // cannot be placed on it.
+    src = roiSrc;
+    fullFrame = !roiFromData;
+  }}
   else if (previewShowRaw) src = fullSrc;
-  else if (previewShowRoi) src = cropSrc;
+  // ROI alone keeps the full scene on screen — that is the only view the
+  // normalized search box maps onto; the box itself is drawn below.
+  else if (previewShowRoi) src = rawSrc;
   // `ready` is set even when the pane shows the Input-off empty state, so
   // the FIRST prediction (including a synth plate clicked before any image
   // was selected) must be able to replace that placeholder with a stage.
@@ -10792,7 +10802,7 @@ function applyPreviewSrcToPane(data) {{
     previewLastStaticImageSrc = src;
   }}
   const cropRect = hasData && Array.isArray(data.crop) && data.crop.length === 4 ? data.crop : null;
-  updatePreviewRoiOverlay(cropRect, previewPreprocessMode === 'manual_roi');
+  updatePreviewRoiOverlay(cropRect, previewPreprocessMode === 'manual_roi', fullFrame);
   return src;
 }}
 function rerenderPreviewPaneFromCache() {{
@@ -13908,7 +13918,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       placement: 'left',
       body: '<ul>' +
         '<li>Toggle <b>Input</b> ON to stream live frames from the Webcam or the ESP32-P4 Device through the quantized TFLite model.</li>' +
-        '<li>Switch between <b>ROI</b> (the cropped tensor handed to the model) and <b>Orig</b> (the full masked frame) to see exactly what was classified.</li>' +
+        '<li>Toggle <b>ROI</b> to draw the crop rectangle over the scene, and <b>Orig</b> to see the full masked frame. With both on, the pane shows the processed crop (for a sign, the split with each glyph).</li>' +
         '<li>Fine-tune the live <b>Dark</b> / <b>Lum</b> sliders under the image — they should match the thresholds you used in the worktable.</li>' +
         '<li>Read the confidence bars at the bottom; an OOD verdict of <code>No Sign</code> appears above them.</li>' +
         '</ul>' +
@@ -14135,7 +14145,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       onEnter: closeSettingsModal,
       body: '<ul>' +
         '<li>Toggle <b>Input</b> ON to push live frames through the quantized model.</li>' +
-        '<li>Switch between <b>ROI</b> (the 28×28 binarized tensor) and <b>Orig</b> (the full frame) to confirm the crop is landing on the glyph.</li>' +
+        '<li>Toggle <b>ROI</b> to draw the crop rectangle over the frame and <b>Orig</b> to see the full masked frame; with both on you get the cropped, masked tensor handed to the model.</li>' +
         '<li>The confidence bars below the image are the top-<i>k</i> characters; a rejected frame reads <code>No Sign</code> instead.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>Preview runs the <b>same int8</b> graph on the host CPU the MCU will run, so what you score here is what the device scores.</span></div>'
