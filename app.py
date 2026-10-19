@@ -14268,12 +14268,13 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.tm-action-toolbar',
       fallback: ['.class-card'],
       placement: 'right',
-      body: '<p>Capture the <b>sign as a whole</b> — the slots are cut out for you later. You do not need to frame a single character.</p>' +
+      body: '<p>Each class card trains <b>one character</b>. Capture or upload a frame where that character is the glyph the model should learn.</p>' +
         '<ul>' +
-        '<li><b>Webcam</b> / <b>Device</b> — hold the sign up and burst-capture with <kbd>Space</kbd>.</li>' +
-        '<li><b>Upload</b> — import photos of the sign taken earlier.</li>' +
+        '<li><b>Webcam</b> / <b>Device</b> — hold the character in view and burst-capture with <kbd>Space</kbd>.</li>' +
+        '<li><b>Upload</b> — import character crops taken earlier.</li>' +
+        '<li>No camera? <b>⚙ Settings → Advanced Settings → Auto-fill 24 EMNIST samples</b> fills every empty class with a glyph of that character.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Samples are stored per <b>character class</b>, not per sign: every capture feeds all three slots it contains. Vary distance, tilt and light.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>The three-slot split happens at <b>Preview/device inference</b>, not during training. A whole 3-character sign filed under “A” trains A on the whole sign — crop the character (Manual ROI) or use Auto-Fill.</span></div>'
     }},
     {{
       chapter: 2,
@@ -14300,8 +14301,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
       onLeave: closeWorktable,
       advanceAlso: ['#classPreprocessSave', '#classPreprocessCancel'],
       body: '<ul>' +
-        '<li>The worktable shows <b>this slot&rsquo;s</b> crop, not the whole sign — that is the tensor the glyph model receives.</li>' +
-        '<li><b>Manual ROI</b> pins the sign plate; the pipeline then splits it into the three slots and hands each one to the binarizer.</li>' +
+        '<li>The <b>Processed Preview</b> is the 28×28 glyph this class&rsquo;s sample becomes — the tensor the glyph model receives.</li>' +
+        '<li><b>Manual ROI</b> pins the character for this class so the glyph is isolated. The Preview&rsquo;s three-slot split is a separate inference step, not part of training.</li>' +
         '<li>Check the <b>Processed Preview</b>: the glyph should be centred, black, and fill most of the frame with a clean margin.</li>' +
         '</ul>' +
         '<p>Click <b>Save Sample</b> (or Close <b>&times;</b>) to return to the workspace.</p>' +
@@ -14349,7 +14350,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<li><b>Layer 2 · Top probability</b> rejects a slot whose winning character is not confident enough.</li>' +
         '<li><b>Layer 3 · Normalized entropy</b> rejects a slot whose probabilities are spread too evenly, i.e. the model is guessing.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎛️</span><span>Any single failed layer makes the frame <b>NOT MATCH</b>. Start permissive, then tighten until a blank frame reliably reads red.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎛️</span><span>On the sign path, Layer 1 is structurally inert and Layers 2/3 are opened; each slot&rsquo;s own <b>_background</b> class and the per-slot confidence floor do the rejecting. Start permissive, then tighten until a blank frame reliably reads red.</span></div>'
     }},
     {{
       chapter: 5,
@@ -14360,8 +14361,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
       onEnter: closeSettingsModal,
       body: '<ul>' +
         '<li>Toggle <b>Input</b> ON and point the camera at the sign: the preview splits the frame into the three slots and reads each one.</li>' +
-        '<li>A <b>🟢 YES (MATCH)</b> banner means all three slots agreed with the target and every OOD layer passed.</li>' +
-        '<li>A <b>🔴 NO (NOT MATCH)</b> banner names which slot disagreed, or which layer rejected the frame.</li>' +
+        '<li>A <b>🟢 YES (MATCH)</b> banner means all three slots agreed with the target, each cleared the 0.60 confidence floor, and none came back as <code>_background</code>.</li>' +
+        '<li>A <b>🔴 NO (NOT MATCH)</b> banner names which slot disagreed and why: wrong character, <code>_background</code>, no glyph, or below the confidence floor.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>The banner is computed from the <b>same int8</b> graph the MCU runs, so a green verdict here predicts a green verdict on the device.</span></div>'
     }},
