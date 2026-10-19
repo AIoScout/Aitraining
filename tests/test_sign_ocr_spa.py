@@ -21,6 +21,10 @@ Covered:
   template data   the EMNIST sample seeder lives in Settings -> Advanced,
                   is OCR-only, fills every class from the backend response,
                   and auto-fills a newly created empty class exactly once
+  sequence sync   /classes/sync_ocr carries the target + auto-fill flag and
+                  its response replaces classes/counts/previews/train_enabled
+                  atomically; a skipped in-flight seed is retried, and a
+                  removed character is eligible again if re-added
 
 Requires Playwright with a system Chrome:
     .venv/bin/python tests/test_sign_ocr_spa.py
@@ -679,6 +683,113 @@ def assert_auto_seed_fills_a_new_empty_class(page):
     )
 
 
+def assert_sync_ocr_carries_autofill_state(page):
+    """The slot edit must send sign_sequence + the checkbox flag, and apply
+    the backend's filled counts atomically (the post-training A12 -> A1B
+    bug)."""
+    _reset_sign_state(page)
+    page.evaluate(
+        """() => {
+          previewInputOn = false;
+          autoSeedEmnistAttempted = new Set();
+          autoSeedEmnistSamples = true;
+          STATE.export_enabled = true;
+          // A model trained earlier in this page session: the dataset
+          // fingerprint is the baseline the Stale badge compares against.
+          STATE._trained_fingerprint = datasetFingerprint();
+          window.__syncPayloads = [];
+          const real = window.fetch;
+          window.fetch = async (url, opts) => {
+            if (String(url).includes('/classes/sync_ocr') && opts && opts.body) {
+              const body = JSON.parse(opts.body);
+              window.__syncPayloads.push(body);
+              // The backend fills B in the SAME response and returns the
+              // whole runtime state the cards render from.
+              return new Response(JSON.stringify({
+                ok: '1',
+                classes: ['A', '1', 'B'],
+                sign_sequence: ['A', '1', 'B'],
+                counts: {A: 3, 1: 2, B: 24},
+                sample_previews: {
+                  A: [], 1: [],
+                  B: [{src: '%s', filename: 'emnist_seed_00.png'}],
+                },
+                processed_previews: {},
+                train_enabled: true,
+                train_rec: {},
+                seeded: ['B'],
+                seed_error: '',
+              }), {status: 200, headers: {'Content-Type': 'application/json'}});
+            }
+            return real(url, opts);
+          };
+        }"""
+        % _TINY_PNG
+    )
+
+    # The post-training edit under test: slot 3 A -> B.
+    page.evaluate("setSignSequence(['A', '1', 'B'])")
+    _wait_sync(page)
+
+    bodies = page.evaluate("window.__syncPayloads")
+    assert bodies, "no /classes/sync_ocr request was sent"
+    body = bodies[-1]
+    # The sequence and the checkbox state travel WITH the names.  Without
+    # these the backend only had the persisted flag, which can disagree.
+    assert body["names"] == ["A", "1", "B"], body
+    assert body["sign_sequence"] == "A1B", body
+    assert body["reading_order"] == "ltr", body
+    assert body["auto_seed_emnist_samples"] is True, body
+
+    # The response's classes/counts/previews/train_enabled landed together.
+    assert page.evaluate("JSON.stringify(STATE.classes)") == '["A","1","B"]'
+    assert page.evaluate("STATE.counts.B") == 24
+    assert page.evaluate(
+        "document.getElementById('summaryTitle-B').textContent"
+    ) == "24 Image Samples"
+    assert page.evaluate("STATE.train_enabled") is True
+    assert page.evaluate("document.getElementById('trainBtn').disabled") is False
+    # The model predates B, so the dataset fingerprint differs and Train is
+    # ready for a re-run against the new class.
+    assert "Stale" in page.evaluate(
+        "document.getElementById('trainStatus').textContent"
+    )
+
+    # A seed skipped because another seed was in flight must NOT be marked
+    # attempted; the retry runs once the first request settles.
+    _stub_seed_endpoint(page)
+    page.evaluate(
+        """() => {
+          autoSeedEmnistInFlight = true;
+          window.__racedMarked = false;
+          autoSeedEmnistForNewClasses(['7']);
+          window.__racedMarked = autoSeedEmnistAttempted.has('7');
+          autoSeedEmnistInFlight = false;
+        }"""
+    )
+    assert page.evaluate("window.__racedMarked") is False
+    page.wait_for_function("window.__seedBodies.length > 0", timeout=5000)
+    assert page.evaluate("window.__seedBodies[0].classes") == ["7"]
+
+    # A character that leaves the class list is eligible again if a slot
+    # later re-adds it (A1B -> A12 -> A1B must still seed B).
+    page.evaluate(
+        """() => {
+          autoSeedEmnistAttempted.add('B');
+          applySignClassesState(['A', '1']);
+        }"""
+    )
+    assert page.evaluate("autoSeedEmnistAttempted.has('B')") is False
+
+    page.evaluate(
+        """() => {
+          autoSeedEmnistSamples = false;
+          autoSeedEmnistAttempted = new Set();
+          try { window.localStorage.removeItem('auto_seed_emnist_samples'); } catch (e) {}
+        }"""
+    )
+
+
 def main() -> int:
     base_cfg = boot_payload()["train_cfg"]
     html = build_spa_html(boot_payload())
@@ -768,6 +879,7 @@ def main() -> int:
             run("seeder is in Advanced settings", assert_seeder_lives_in_advanced_settings, page)
             run("seeder fills empty classes", assert_seeder_button_fills_empty_classes, page)
             run("auto-seed fills new empty class", assert_auto_seed_fills_a_new_empty_class, page)
+            run("sync_ocr carries auto-fill state", assert_sync_ocr_carries_autofill_state, page)
 
             browser.close()
 

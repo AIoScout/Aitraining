@@ -8944,7 +8944,13 @@ async function seedEmnistSamples(names, opts) {{
 // offered this project are seeded — a class with real captures is never
 // touched, and "Clear Samples" stays cleared.
 function autoSeedEmnistForNewClasses(names) {{
-  if (!isOcrProject() || !autoSeedEmnistSamples) return;
+  if (!isOcrProject()) return;
+  // Same OR the backend applies: the browser-local checkbox and the
+  // project's persisted TrainConfig flag are independent, and either being
+  // on means auto-fill is on for this project.
+  const autoSeedOn = !!(autoSeedEmnistSamples
+    || (STATE.train_cfg && STATE.train_cfg.auto_seed_emnist_samples));
+  if (!autoSeedOn) return;
   const fresh = (Array.isArray(names) ? names : []).filter((name) => {{
     const key = String(name == null ? '' : name);
     if (!key || autoSeedEmnistAttempted.has(key)) return false;
@@ -8952,10 +8958,23 @@ function autoSeedEmnistForNewClasses(names) {{
     return Number((STATE.counts && STATE.counts[key]) || 0) === 0;
   }});
   if (!fresh.length) return;
+  if (autoSeedEmnistInFlight) {{
+    // seedEmnistSamples would return without starting, so marking these
+    // names now would make the skip permanent.  Wait for the running
+    // request to settle, then re-ask with the same names.
+    window.setTimeout(() => autoSeedEmnistForNewClasses(names), 250);
+    return;
+  }}
   // Marked before the request so a reload/resync cannot double-fire it; the
   // server response then replaces the counts for the classes it seeded.
   fresh.forEach((name) => autoSeedEmnistAttempted.add(String(name)));
-  seedEmnistSamples(fresh, {{quiet: true}});
+  seedEmnistSamples(fresh, {{quiet: true}}).then((seeded) => {{
+    // null = the request did not run/failed.  Un-mark so a later class
+    // write retries instead of leaving the class at 0 for the session.
+    if (!seeded) fresh.forEach((name) => autoSeedEmnistAttempted.delete(String(name)));
+  }}).catch(() => {{
+    fresh.forEach((name) => autoSeedEmnistAttempted.delete(String(name)));
+  }});
 }}
 // Apply the full runtime state every class-write response carries.  This is
 // deliberately a REPLACE and not a merge: the server's class list, counts and
@@ -11624,6 +11643,13 @@ function applySignClassesState(target) {{
     }}
   }});
   STATE.classes = target.slice();
+  // A class that leaves is no longer "already offered": if a slot names it
+  // again later it is a NEW empty class and must be eligible for auto-fill.
+  // Without this, A12 -> A1B -> A12 -> A1B leaves B at 0 (the ledger still
+  // remembers the first B) whenever the server-side fill did not run.
+  for (const name of Array.from(autoSeedEmnistAttempted)) {{
+    if (target.indexOf(name) === -1) autoSeedEmnistAttempted.delete(name);
+  }}
   STATE.counts = nextCounts;
   STATE.sample_previews = nextPreviews;
   STATE.processed_previews = nextProcessed;
@@ -11666,11 +11692,25 @@ async function syncSignClassesToSequence() {{
   if (key === signSyncSavedTarget && signClassesMatch(target)) return;
   if (signSyncInFlight) {{ signSyncQueued = true; return; }}
   signSyncInFlight = true;
+  // Send the target itself, not just the names derived from it, and send
+  // the checkbox state with it.  The flag is browser-local storage on this
+  // side but project state on the server; either can be on while the other
+  // is not (a project switch, a reopened archive, a cleared profile), so
+  // the route ORs the two and heals the persisted copy.  Without this, a
+  // new slot character could stay at 0 whenever the server's copy was off.
+  const autoSeedOn = !!(autoSeedEmnistSamples
+    || (STATE.train_cfg && STATE.train_cfg.auto_seed_emnist_samples));
   try {{
     const res = await fetch(`${{baseUrl}}/classes/sync_ocr`, {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{session: STATE.session, names: target}})
+      body: JSON.stringify({{
+        session: STATE.session,
+        names: target,
+        sign_sequence: signSequence().join(''),
+        reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+        auto_seed_emnist_samples: autoSeedOn,
+      }})
     }});
     const data = await res.json().catch(() => ({{ok: '0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to sync sign classes.');
@@ -11681,6 +11721,11 @@ async function syncSignClassesToSequence() {{
       signSyncQueued = true;
       return;
     }}
+    if (data.seed_error) {{
+      // The class sync succeeded but the auto-fill did not.  Say so instead
+      // of leaving the card silently at 0 so the user can retry.
+      toast('Auto-fill failed: ' + String(data.seed_error));
+    }}
     const next = Array.isArray(data.classes) && data.classes.length ? data.classes : target;
     signSyncSavedTarget = key;
     if (!signClassesMatch(next)) {{
@@ -11690,13 +11735,15 @@ async function syncSignClassesToSequence() {{
     // AFTER applySignClassesState (which rebuilds counts from the local
     // snapshot) is what makes a newly added slot character show its 24
     // template samples immediately, without waiting for a second request.
+    // One synchronous block: classes, counts, previews and train_enabled
+    // are replaced together, so the cards never render a half-applied mix.
     if (data.counts || data.sample_previews || typeof data.train_enabled === 'boolean') {{
       applyRuntimeState(data);
     }}
     render();
-    // A slot character that has just become a class starts empty.  When the
-    // developer shortcut is on, fill it with template captures now — quiet,
-    // because this rides on a background sync rather than a user action.
+    // On a healthy backend the seed above already ran inside this request,
+    // so the counts are 24 and this is a no-op.  It remains as the fallback
+    // for an older server that answers without counts.
     autoSeedEmnistForNewClasses(next);
   }} catch (e) {{
     // The local list already follows the slots, so the screen stays honest;

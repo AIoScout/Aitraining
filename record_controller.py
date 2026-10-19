@@ -2172,25 +2172,97 @@ class RecordController:
             # routes so the client can hand it straight to applyClassesState().
             session_id = str(payload.get("session") or "").strip()
             names = payload.get("names")
+            seq_raw = payload.get("sign_sequence")
+            order_raw = payload.get("reading_order")
+            auto_seed_raw = payload.get("auto_seed_emnist_samples")
+            if auto_seed_raw is None:
+                auto_seed_raw = payload.get("auto_seed_emnist")
             if not session_id:
                 _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
                 return
+            # The sequence, when the caller sends it, IS the class list.  The
+            # SPA derives `names` from the same slots and keeps sending it for
+            # older servers, but taking the sequence here means a client can
+            # never sync a class list that disagrees with the target it just
+            # committed to the train config.
+            sequence: Optional[List[str]] = None
+            if seq_raw not in (None, ""):
+                sequence = normalize_sign_sequence(seq_raw)
+                derived: List[str] = []
+                for ch in sequence:
+                    if ch != SIGN_SEQUENCE_PAD and ch not in derived:
+                        derived.append(ch)
+                if derived:
+                    names = derived
             if not isinstance(names, list) or not names:
                 _send_json(req, {"ok": "0", "error": "missing names"}, status=400, cors=True)
                 return
             try:
+                with self._lock:
+                    sess_cfg = self._configs.get(session_id)
+                if sess_cfg is None:
+                    raise RuntimeError("missing config")
+                # Persist the target BEFORE the class sync / backfill: the
+                # synthetic preview drawn by the seeder, a later reopen and
+                # the export all read it from the project's train config.
+                patch: Dict[str, Any] = {}
+                if sequence is not None and any(
+                    ch != SIGN_SEQUENCE_PAD for ch in sequence
+                ):
+                    patch["sign_sequence"] = sequence
+                if order_raw not in (None, ""):
+                    order = str(order_raw).strip().lower()
+                    if order in ("ltr", "rtl"):
+                        patch["reading_order"] = order
+                if patch:
+                    self._save_train_cfg(session_id, patch)
+
                 classes = self._classes_sync_ocr(session_id=session_id, names=names)
                 # A slot character that just became a class starts empty.
-                # When the developer auto-fill is on, the class exists with
-                # its 24 template captures by the time this response lands —
-                # the SPA can render "24 Image Samples" without a second
-                # round trip (and without a reload).
-                seeded = self._seed_empty_char_classes(session_id)
+                # Backfill when EITHER the caller's current checkbox state or
+                # the project's persisted TrainConfig says auto-fill is on.
+                # The two can disagree — the checkbox is browser-local and
+                # survives a project switch, while the persisted flag follows
+                # the project — and OR-ing them is what makes "on" mean on
+                # regardless of which side last wrote it.
+                persisted_seed = self._auto_seed_emnist_enabled(sess_cfg.dataset_root)
+                incoming_seed = auto_seed_raw is not None and _is_truthy(auto_seed_raw)
+                if incoming_seed and not persisted_seed:
+                    # Heal the divergence: the next class-write endpoint (and
+                    # a later training run) must see what this request said.
+                    self._save_train_cfg(session_id, {"auto_seed_emnist_samples": True})
+                    persisted_seed = True
+                seeded: List[str] = []
+                seed_error = ""
+                if incoming_seed or persisted_seed:
+                    try:
+                        seeded = self._seed_empty_char_classes(
+                            session_id,
+                            sign_sequence=sequence if sequence is not None else seq_raw,
+                            reading_order=order_raw,
+                            strict=True,
+                        )
+                    except Exception as exc:
+                        # The classes were synced and persisted; report the
+                        # seeding failure without turning the whole edit into
+                        # a 400 (the SPA can retry with the error visible).
+                        seed_error = str(exc)
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            response = {"ok": "1", "classes": classes, "seeded": seeded}
+            response = {
+                "ok": "1",
+                "classes": classes,
+                "seeded": seeded,
+                "seed_error": seed_error,
+            }
+            if sequence is not None:
+                response["sign_sequence"] = sequence
             try:
+                # Runtime state is rebuilt AFTER seeding, so counts,
+                # sample_previews and train_enabled describe the files that
+                # are actually on disk when this response lands.  It also
+                # overrides `classes` with the persisted order.
                 response.update(self._runtime_state_payload(session_id))
             except Exception:
                 pass
@@ -3934,6 +4006,7 @@ class RecordController:
         session_id: str,
         sign_sequence: Any = None,
         reading_order: Any = None,
+        strict: bool = False,
     ) -> List[str]:
         """Auto-fill every EMPTY character class, when the shortcut is on.
 
@@ -3941,8 +4014,11 @@ class RecordController:
         `/classes/sync_ocr`, ...) and after `/train/config` saves the toggle,
         so a class created before the flag flipped is filled by the very next
         write instead of waiting for the next page load.  Returns the names
-        actually seeded; failures are swallowed on purpose — a seeder problem
-        must never turn "add a class" into an error.
+        actually seeded.  Failures are swallowed by default — a seeder
+        problem must never turn "add a class" into an error — but a caller
+        that promises the fill in its own response (`/classes/sync_ocr`
+        passes strict=True) needs the failure surfaced instead of silently
+        leaving the class at zero.
 
         `sign_sequence`/`reading_order` are the SPA's current target, when
         the caller has it.  They are forwarded to the seeder so a sign
@@ -3980,6 +4056,8 @@ class RecordController:
             )
             return list(result.get("seeded") or [])
         except Exception:
+            if strict:
+                raise
             return []
 
     def _runtime_state_payload(
@@ -5527,6 +5605,18 @@ class RecordController:
             if raw_sample_preprocess is None or (isinstance(raw_sample_preprocess, dict) and not raw_sample_preprocess):
                 raw_sample_preprocess = project_sample_preprocess
 
+            # The auto-fill flag is project state, not a hyperparameter, but
+            # it rides in TrainConfig and the trainer writes that config into
+            # the run.  An older client (or a page whose train_cfg was
+            # restored without it) must not silently flip it off in the run
+            # it produces: an explicit payload value wins, otherwise the
+            # project's persisted choice does.
+            auto_seed_samples = (
+                _is_truthy(cfg_dict.get("auto_seed_emnist_samples"))
+                if cfg_dict.get("auto_seed_emnist_samples") is not None
+                else self._auto_seed_emnist_enabled(sess_cfg.dataset_root)
+            )
+
             cfg = TrainConfig(
                 img_size=int(cfg_dict.get("img_size") or 96),
                 color_mode="grayscale",
@@ -5578,6 +5668,7 @@ class RecordController:
                     if cfg_dict.get("sign_sequence") is not None else None
                 ),
                 reading_order=str(cfg_dict.get("reading_order") or "ltr"),
+                auto_seed_emnist_samples=bool(auto_seed_samples),
             )
 
             workspace_root = sess_cfg.dataset_root.parent
@@ -5683,6 +5774,7 @@ class RecordController:
                         {
                             "sign_sequence": cfg.sign_sequence,
                             "reading_order": cfg.reading_order,
+                            "auto_seed_emnist_samples": bool(cfg.auto_seed_emnist_samples),
                         },
                     )
                 except Exception:
