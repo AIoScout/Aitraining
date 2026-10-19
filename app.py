@@ -14268,13 +14268,13 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.tm-action-toolbar',
       fallback: ['.class-card'],
       placement: 'right',
-      body: '<p>Each class card trains <b>one character</b>. Capture or upload a frame where that character is the glyph the model should learn.</p>' +
+      body: '<p>Each character card collects <b>single-character glyph samples</b>. Capture, upload or generate a frame where that character is the glyph the model should learn.</p>' +
         '<ul>' +
-        '<li><b>Webcam</b> / <b>Device</b> — hold the character in view and burst-capture with <kbd>Space</kbd>.</li>' +
-        '<li><b>Upload</b> — import character crops taken earlier.</li>' +
-        '<li>No camera? <b>⚙ Settings → Advanced Settings → Auto-fill 24 EMNIST samples</b> fills every empty class with a glyph of that character.</li>' +
+        '<li><b>Zero hardware:</b> <b>⚙ Settings → Advanced Settings → Auto-fill 24 EMNIST samples</b> fills every empty character class with 24 glyphs.</li>' +
+        '<li><b>Camera / upload:</b> isolate one character per class with <b>Auto / Manual ROI</b> in the Sample Worktable.</li>' +
+        '<li>Use <b>Webcam</b>, <b>Upload</b> or <b>Device</b>; <kbd>Space</kbd> taps or holds a burst capture.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>The three-slot split happens at <b>Preview/device inference</b>, not during training. A whole 3-character sign filed under “A” trains A on the whole sign — crop the character (Manual ROI) or use Auto-Fill.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>The full 3-character sign is automatically split into <b>3 slots during Preview/device inference</b>, never during training. A whole sign filed under “A” trains A on the whole sign — crop the character or use Auto-Fill.</span></div>'
     }},
     {{
       chapter: 2,
@@ -14284,7 +14284,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       placement: 'right',
       body: '<p>Click <b>Edit</b> on a character card to open the <b>Sample Worktable</b> for that character.</p>' +
         '<ul>' +
-        '<li>A road sign is a <b>fixed target</b>, so a <b>Manual ROI</b> that always covers the sign plate is usually more reliable than auto-search.</li>' +
+        '<li>A road sign is a <b>fixed target</b>, so pinning this character&rsquo;s glyph with <b>Manual ROI</b> is often more reliable than auto-search.</li>' +
         '<li><b>Dark Thr</b> / <b>Lum Thr</b> isolate the dark glyphs from the plate and the background.</li>' +
         '</ul>' +
         '<p>Press <b>Next →</b> and the tour will open the worktable for you.</p>'
