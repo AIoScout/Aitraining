@@ -9,33 +9,43 @@ the check needs no test-only dependency (no Playwright, no Node).
 What it covers:
 
   curricula     the guide selected for a project type is that project's own
-                curriculum: 12 steps for `image`, 10 for `ocr`, 10 for
+                curriculum: 20 steps for `image`, 16 for `ocr`, 16 for
                 `sign_ocr`, with three distinct step lists
   directional marks
                 every targeted step paints `#tmTourArrow` aimed between the
                 card and the ring, and every step that is WAITING for a
                 press also paints the `#tmTourBeacon` on that very control;
                 steps with no target carry neither
+  checkpoint cue
+                every step that waits for a press shows a `#tmTourCue`
+                banner naming the exact action, the press flashes
+                `Checkpoint Passed!` in that same banner before the card
+                changes, and the press itself is what moves the tour on —
+                `Next →` is only a fallback
   trigger phase
                 a step that documents a screen which is shut — the Advanced
-                panel, the ⚙ Settings modal — spotlights the control that
+                panel, the ⚙ Settings modal, the Edit ▾ menu, the camera
+                drawer, the Sample Worktable — spotlights the control that
                 OPENS it first, and pressing that control re-seats the same
                 step inside instead of teleporting the user there
   click-to-advance
                 every step's cue is derived from the DOM target exactly the
                 way `armTargetAdvance` derives it (off / click / input /
                 disabled / phase), and using the spotlighted control really
-                does advance `tmTour.current()` — a button (`#navSettings`),
-                a chip (`.class-preprocess-chip`), a select inside a spotlit
-                row, and the sequence-bar input a sign project starts on
+                does advance `tmTour.current()` — the ⚙ Settings button, the
+                Webcam tile, the drawer's Capture and ▴ Close, the Edit chip,
+                the worktable's ×, a select inside a spotlit row, and the
+                sequence-bar input a sign project starts on
+  open/inner/close
+                every screen is entered through its own Open checkpoint and
+                left through its own Close / Cancel checkpoint, so no step
+                teleports across a modal or a drawer and none is left open
+                behind the tour
   disabled guard
                 a button that cannot be used yet (`#trainBtn` with no
                 samples, `#exportBtn` with no model) reports "disabled"
                 instead of trapping the user, does not advance when clicked,
                 and says in the card what to do instead
-  state-aware hooks
-                no step leaves the global Settings modal open behind the
-                tour, even on the steps whose own click opens it
   start page    the three project cards all render before any of them acts,
                 and cancelling the Open Project picker is a silent no-op
 
@@ -64,19 +74,39 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # The curriculum each project type must load.  Hard-coded on purpose: the
 # number of steps is the thing a user notices, so it is the thing the test
 # states, rather than something read back out of the source it checks.
-EXPECTED_STEPS = {"image": 12, "ocr": 10, "sign_ocr": 10}
+EXPECTED_STEPS = {"image": 20, "ocr": 16, "sign_ocr": 16}
 
-# Steps whose real interaction the test performs.  Deliberately short: these
-# are the spec's own examples plus the two field kinds the tour treats
-# differently.  Everything else is asserted on its cue alone, so a failure
-# points at one control instead of at the whole walk.
-REAL_CLICK = ("#navSettings", ".class-preprocess-chip", ".class-preprocess-mode-row")
-REAL_CHANGE = ("#classPreprocessDark", "#signSeqBar")
+# Steps whose real interaction the test performs, keyed by the TARGET
+# selector — that is the string the driver records for a step, not the
+# `advanceTarget` inside it.
+#
+# The walk's whole point is the Open ➔ Inner ➔ Close shape, so each screen's
+# own door, its inner controls and its Close / Cancel button are all pressed
+# for real: ⚙ Settings and its Cancel, the Webcam tile, the drawer's Capture
+# and ▴ Close, the Edit chip, the worktable's × (and the select / slider
+# inside it).  `#settingsCancel` is pressed but not asserted on its own,
+# because the image curriculum closes Settings twice; that the modal is never
+# left open behind the tour is what `check_curriculum` states instead.
+REAL_CLICK = (
+    "#navSettings",
+    "#settingsCancel",
+    ".tm-action-toolbar",
+    '[id^="sourceCapture-"]',
+    '[id^="sourceClose-"]',
+    ".class-preprocess-chip",
+    "#classPreprocessCloseTop",
+)
+REAL_CHANGE = (
+    "#classPreprocessDark",
+    ".class-preprocess-mode-row",
+    "#signSeqBar",
+    "#advReadingOrderRow",
+    "#advInkPolarityRow",
+)
 
-# `#trainBtn` and `.tm-action-toolbar` are not clicked: the first would begin
-# a real training run through the stubbed endpoint and the second opens a
-# camera / device stream, neither of which a head-less browser has.  Both
-# still assert their cue, which is what click-to-advance arms.
+# `#trainBtn` and `#exportBtn` are never clicked: the stub would answer and
+# the tour would walk the user through a training run or an export that never
+# happened.  Both still assert their cue, which is what click-to-advance arms.
 DRIVER = r"""
 <script>
 (function () {
@@ -140,13 +170,33 @@ DRIVER = r"""
     return (typeof trainAdvancedOpen !== 'undefined') && !!trainAdvancedOpen;
   }
 
-  /* The screen a step documents is SHUT when its trigger is still needed:
-     the ⚙ Settings modal closed, or the Advanced panel collapsed.  This is
-     the `phaseIf` each curricula step declares, restated. */
+  function editMenuOpen() {
+    var d = document.getElementById('menuEditDropdown');
+    return !!(d && d.classList.contains('open'));
+  }
+
+  /* `openSourceClass` and `classPreprocessOpen` are top-level bindings of the
+     workspace script, shared with this one: the very values the tour's own
+     `drawerOpen()` / `worktableOpen()` read. */
+  function drawerOpen() {
+    return (typeof openSourceClass !== 'undefined') && !!openSourceClass;
+  }
+
+  function worktableOpen() {
+    return (typeof classPreprocessOpen !== 'undefined') && !!classPreprocessOpen;
+  }
+
+  /* The screen a step documents is SHUT when its trigger is still needed.
+     This is the `phaseIf` each curricula step declares, restated — the door
+     the step names is the key — so the walk and the app agree on when the
+     screen behind that door has to be opened before the step can land. */
   function screenShut(step) {
     if (!step.phaseTarget) return false;
     if (step.phaseTarget === '#advBtn') return !advancedOpen();
     if (step.phaseTarget === '#navSettings') return !settingsOpen();
+    if (step.phaseTarget === '#menuEditBtn') return !editMenuOpen();
+    if (step.phaseTarget === '.class-preprocess-chip') return !worktableOpen();
+    if (step.phaseTarget === '.tm-action-toolbar button.sample') return !drawerOpen();
     return false;
   }
 
@@ -257,6 +307,9 @@ DRIVER = r"""
         rec.indexAfter = window.tmTour.current();
         rec.settingsAfter = settingsOpen();
         rec.advancedAfter = advancedOpen();
+        rec.editMenuAfter = editMenuOpen();
+        rec.worktableAfter = worktableOpen();
+        rec.drawerAfter = drawerOpen();
         /* Where the re-seated spotlight landed: the step's OWN target, if
            the door really opened the screen it documents. */
         var after = resolveTargets(step);
@@ -466,6 +519,17 @@ def check_curriculum(payload: dict, want_type: str) -> dict:
     return {"total": total, "records": records}
 
 
+# Which screen each door opens, and the driver-record key that reports it.
+# A step in its trigger phase must leave exactly that screen open behind it.
+_DOOR_SCREENS = {
+    "#advBtn": "advanced",
+    "#navSettings": "settings",
+    "#menuEditBtn": "editMenu",
+    ".class-preprocess-chip": "worktable",
+    ".tm-action-toolbar button.sample": "drawer",
+}
+
+
 def _check_trigger_step(want_type: str, r: dict) -> None:
     """A step whose screen is shut must ask for the door, then follow the user in.
 
@@ -473,12 +537,12 @@ def _check_trigger_step(want_type: str, r: dict) -> None:
     control that opens the screen, and pressing it re-seats the step inside
     rather than skipping over the screen it documents.
     """
-    assert r["sel"] in ("#advBtn", "#navSettings"), (
+    assert r["sel"] in _DOOR_SCREENS, (
         f"{want_type} step {r['i']} ({r['title']}): the trigger phase spotlights "
-        f"{r['sel']!r}, want the Advanced toggle or the ⚙ Settings button"
+        f"{r['sel']!r}, which is not one of the screens this walk knows how to open"
     )
     assert r["cue"] == "phase", r
-    # While the door is spotlit the screen behind it is still shut — that is
+    # While the door is spotlit the Settings modal is still shut — that is
     # the whole point of the phase.
     assert r["settingsExpected"] is False, r
     assert r["settingsOpen"] is False, r
@@ -500,13 +564,13 @@ def _check_trigger_step(want_type: str, r: dict) -> None:
         f"landed on {r['selAfter']!r}, want the step's own {r['target']!r}"
     )
     assert r["marksAfter"] and r["marksAfter"]["arrow"] is True, r
-    if r["sel"] == "#navSettings":
-        # The ⚙ door opens Settings and nothing else.  The Advanced training
-        # panel keeps whatever state an earlier step left it in.
-        assert r["settingsAfter"] is True, r
-    else:
-        # The Advanced door must not open Settings.
-        assert r["advancedAfter"] is True, r
+    screen = _DOOR_SCREENS[r["sel"]]
+    assert r[screen + "After"] is True, (
+        f"{want_type} step {r['i']} ({r['title']}): pressing {r['sel']} left "
+        f"{screen} shut behind it"
+    )
+    if screen != "settings":
+        # Every other door opens its own screen and nothing else.
         assert r["settingsAfter"] is False, r
 
 
@@ -544,14 +608,15 @@ def check_disabled_guard(payload: dict) -> None:
         )
         assert "Collect samples first" in step["cueText"], step["cueText"]
     locked = [r["sel"] for r in records if r["expected"] == "disabled"]
+    assert "#trainBtn" in locked, locked
     assert "#exportBtn" in locked, locked
     # The training card is reached through its trigger: pressing Advanced
-    # lands inside the panel, where Train itself is locked — the same
-    # "nothing trained yet" answer, one screen further in.
-    train = [r for r in records if r["phase"] and r["sel"] == "#advBtn"]
-    assert len(train) == 1, train
-    assert train[0]["cueAfter"] == "disabled", train[0]
-    assert train[0]["indexAfter"] == train[0]["i"], train[0]
+    # lands inside the panel, whose rows are ordinary settings, so the lock
+    # sits on Train — the step after it, one screen further in.
+    door = [r for r in records if r["phase"] and r["sel"] == "#advBtn"]
+    assert len(door) == 1, door
+    assert door[0]["cueAfter"] == "click", door[0]
+    assert door[0]["indexAfter"] == door[0]["i"], door[0]
 
 
 # ── the start page (Streamlit, so checked at the source) ─────────────────
@@ -698,12 +763,26 @@ def main() -> int:
 
     def click_to_advance():
         assert len(checked) == 3, "a curriculum check failed; not compared"
+        # image · every screen's Open ➔ Inner ➔ Close, pressed for real
         interacted(checked["image"], "#navSettings", "click")
+        interacted(checked["image"], ".tm-action-toolbar", "click")
+        interacted(checked["image"], '[id^="sourceCapture-"]', "click")
+        interacted(checked["image"], '[id^="sourceClose-"]', "click")
         interacted(checked["image"], ".class-preprocess-chip", "click")
-        interacted(checked["image"], ".class-preprocess-mode-row", "click")
+        interacted(checked["image"], ".class-preprocess-mode-row", "change")
         interacted(checked["image"], "#classPreprocessDark", "change")
+        interacted(checked["image"], "#classPreprocessCloseTop", "click")
+        # ocr · the same drawer / worktable shape, plus Settings' own Cancel
+        # and the Advanced panel's Ink Polarity row
+        interacted(checked["ocr"], ".tm-action-toolbar", "click")
         interacted(checked["ocr"], ".class-preprocess-chip", "click")
+        interacted(checked["ocr"], "#classPreprocessCloseTop", "click")
+        interacted(checked["ocr"], "#advInkPolarityRow", "change")
+        interacted(checked["ocr"], "#settingsCancel", "click")
+        # sign_ocr · the sequence bar it opens on, and the reading-order select
         interacted(checked["sign_ocr"], "#signSeqBar", "change")
+        interacted(checked["sign_ocr"], "#advReadingOrderRow", "change")
+        interacted(checked["sign_ocr"], ".class-preprocess-chip", "click")
 
     run("using the highlighted control advances", click_to_advance)
     run("a locked control does not trap the user", lambda: check_disabled_guard(locked))

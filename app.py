@@ -4635,6 +4635,15 @@ def _render_tm_old_frontend_html(
       background: color-mix(in srgb, var(--blue) 16%, transparent);
       font-weight: 700;
     }}
+    /* The checkpoint was satisfied.  Shown in the beat between the user's
+       own press and the next step's card, so the tour answers the click it
+       just received instead of silently swapping the slide underneath it. */
+    .tm-tour-cue.pass {{
+      border-style: solid;
+      border-color: color-mix(in srgb, #16a34a 60%, transparent);
+      background: color-mix(in srgb, #16a34a 16%, transparent);
+      font-weight: 700;
+    }}
     .tm-tour-actions {{ display: flex; align-items: center; gap: 8px; }}
     .tm-tour-spacer {{ flex: 1 1 auto; }}
     .tm-tour-btn {{
@@ -4819,7 +4828,7 @@ def _render_tm_old_frontend_html(
       </div>
     </div>
     <div class="tm-settings-grid">
-      <div class="tm-settings-group">
+      <div class="tm-settings-group" id="settingsCameraGroup">
         <div class="tm-settings-group-head">
           <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"></rect><path d="M22 8l-6 4 6 4V8z"></path></svg></span>
           <h4>Webcam Settings</h4>
@@ -4833,7 +4842,7 @@ def _render_tm_old_frontend_html(
           <input id="settingsFps" type="number" min="1" max="60" step="0.5"/>
         </div>
       </div>
-      <div class="tm-settings-group">
+      <div class="tm-settings-group" id="settingsMcuGroup">
         <div class="tm-settings-group-head">
           <span class="tm-settings-group-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg></span>
           <h4>MCU Device Settings</h4>
@@ -13774,6 +13783,70 @@ mountReflowTimers.push(window.setTimeout(() => {{
     try {{ closeGlobalSettings(); }} catch (err) {{ console.warn('[tour] close settings failed', err); }}
   }}
 
+  /* Idempotent, and only ever used as a FALLBACK: the curriculum's own Open
+     checkpoint is the user pressing ⚙ Settings.  This is what puts the
+     modal back when the guide is entered from somewhere else — a chapter
+     pill, `Skip step →`, or a step resumed out of order — so the inner
+     checkpoints still have a visible screen to land on. */
+  function openSettingsModal() {{
+    var modal = byId('globalSettingsModal');
+    if (modal && modal.classList.contains('open')) return;
+    if (typeof openGlobalSettings !== 'function') return;
+    try {{ openGlobalSettings(); }} catch (err) {{ console.warn('[tour] open settings failed', err); }}
+  }}
+
+  /* Same idea for the EMNIST group: it lives behind the modal's Advanced
+     disclosure, so entering its checkpoint from a chapter pill would
+     otherwise spotlight a `display:none` row. */
+  function openSettingsEmnistGroup() {{
+    openSettingsModal();
+    unfoldSettingsAdvanced();
+  }}
+
+  /* Folding the sampling drawer away.  The drawer's own ▴ Close is the
+     checkpoint; this only guarantees the workspace is drawer-free when a
+     later step is reached by skipping past that checkpoint. */
+  function closeSourceDrawer() {{
+    if (typeof openSourceClass === 'undefined' || !openSourceClass) return;
+    if (typeof closeSourcePanel !== 'function') return;
+    try {{
+      var pending = closeSourcePanel();
+      if (pending && typeof pending.catch === 'function') pending.catch(function () {{}});
+    }} catch (err) {{ console.warn('[tour] close drawer failed', err); }}
+  }}
+
+  /* ---- which screen is on screen right now? --------------------------
+     Every Open / Inner / Close checkpoint asks one of these.  A step
+     whose screen is shut falls back to the button that OPENS it rather
+     than spotlighting a control the modal is covering, which is what
+     keeps a chapter jump or a `Skip step →` from stranding the user on a
+     slide with nothing to click. */
+  function settingsOpen() {{
+    var modal = byId('globalSettingsModal');
+    return !!(modal && modal.classList.contains('open'));
+  }}
+
+  function drawerOpen() {{
+    return typeof openSourceClass !== 'undefined' && !!openSourceClass;
+  }}
+
+  function worktableOpen() {{
+    return typeof classPreprocessOpen !== 'undefined' && !!classPreprocessOpen;
+  }}
+
+  function advancedOpen() {{
+    return typeof trainAdvancedOpen !== 'undefined' && !!trainAdvancedOpen;
+  }}
+
+  function charModalOpen() {{
+    return typeof ocrCharModalOpen !== 'undefined' && !!ocrCharModalOpen;
+  }}
+
+  function editMenuOpen() {{
+    var d = byId('menuEditDropdown');
+    return !!(d && d.classList.contains('open'));
+  }}
+
   /* EMNIST mixing lives inside the Settings modal's *collapsed* Advanced
      disclosure, so opening the modal alone still leaves that group at
      `display:none`.  A step that documents it resumes onto the group, so
@@ -13788,7 +13861,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     body.style.display = 'flex';
   }}
 
-  /* ═══ Curriculum 1 · Image Project (12 steps) ═══════════════════════
+  /* ═══ Curriculum 1 · Image Project (20 steps) ═══════════════════════
      The original comprehensive walkthrough: the three-column workspace,
      the capture sources, ROI + brightness thresholds, the 9 CNN
      hyperparameters, live preview and the 3-layer OOD gate, then the
@@ -13815,28 +13888,68 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 1,
-      title: 'Save the Project &amp; Configure Camera / MCU Serial',
+      title: 'Save the Project, then Open Input Settings',
       target: '#navSettings',
       fallback: ['.topnav'],
       placement: 'bottom',
-      /* Clicking ⚙ Settings is how this step advances, so the modal is
-         open by the time the tour leaves — put it back, or every later
-         step spotlights a control hidden behind it. */
-      onLeave: closeSettingsModal,
+      advanceTarget: '#navSettings',
+      checkpoint: 'Click "⚙ Settings" in the top bar to open Input Settings',
       body: '<ul>' +
         '<li><b>File ▾ → Save</b> writes a <code>.tmproj</code> file holding your labels, samples and settings. Save often, or press <kbd>⌘S</kbd> / <kbd>Ctrl+S</kbd>.</li>' +
-        '<li><b>⚙ Settings</b> is the single source of truth for the webcam, the serial link and the capture frame.</li>' +
+        '<li><b>⚙ Settings</b> is the single source of truth for the webcam, the serial link and the capture frame — applied to every class card at once.</li>' +
         '<li>MCU defaults: frame <b>96×96</b>, <b>Grayscale</b>, baud <b>115200</b> (or <b>921600</b>), sync header <b>AA 55 AA</b>.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Close the Arduino IDE <b>Serial Monitor</b> before connecting — only one program can own the ESP32-P4 serial port.</span></div>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Close the Arduino IDE <b>Serial Monitor</b> before connecting — only one program can own the ESP32-P4 serial port.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Camera &amp; MCU Serial Fields',
+      target: '#settingsCameraGroup',
+      fallback: ['#settingsMcuGroup', '#settingsWebcam', '#globalSettingsModal'],
+      placement: 'left',
+      /* Inside the modal now.  The guard is only for the ways in that skip
+         the Open checkpoint — a chapter pill, or `Skip step →` — where the
+         modal may still be shut; there the step re-doors onto ⚙ instead of
+         spotlighting a group the modal is covering. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      checkpoint: 'Click the highlighted ⚙ Settings button to open Input Settings',
+      body: '<ul>' +
+        '<li><b>Webcam</b> — the capture device; <b>Capture FPS</b> throttles the live preview stream.</li>' +
+        '<li><b>Serial Device (port)</b> — the ESP32-P4 USB device. Re-scan after plugging it in.</li>' +
+        '<li><b>Frame side</b> / <b>Channels</b> must match the firmware — <b>96×96</b> and <b>Grayscale</b> by default.</li>' +
+        '<li><b>Baud rate</b>: <b>115200</b> for reliability, <b>921600</b> for faster frame streaming.</li>' +
+        '</ul>' +
         '<details class="tm-tour-details"><summary>Deep dive · what each serial field does</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table"><tr><th>Field</th><th>Meaning</th></tr>' +
         '<tr><td><code>Port</code></td><td>USB serial device of the ESP32-P4 (re-scan after plugging in).</td></tr>' +
         '<tr><td><code>Frame side</code></td><td>Square frame the device streams; must match its firmware.</td></tr>' +
         '<tr><td><code>Channels</code></td><td><b>1</b> = grayscale (default), <b>3</b> = RGB colour.</td></tr>' +
         '<tr><td><code>Baud</code></td><td>115200 for reliability, 921600 for faster frame streaming.</td></tr>' +
-        '<tr><td><code>Sync header</code></td><td>Byte pattern marking the start of a frame (AA 55 AA).</td></tr>' +
+        '<tr><td><code>Sync header</code></td><td>Byte pattern marking the start of a frame (AA 55 AA) — under <b>▸ Advanced Settings</b>.</td></tr>' +
         '</table></div></details>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Leave Input Settings',
+      target: '#settingsCancel',
+      fallback: ['#settingsSave', '.tm-settings-card'],
+      placement: 'left',
+      /* Inside the modal.  If the guide is entered from a chapter pill or
+         `Skip step →` the modal may be shut, so the step re-doors onto ⚙
+         rather than spotlighting a Close button nobody can see. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsCancel',
+      /* Save applies the edits too, so it finishes this step just as
+         legitimately as Cancel — both used to be one unbound button. */
+      advanceAlso: ['#settingsSave'],
+      onLeave: closeSettingsModal,
+      checkpoint: 'Click "Cancel" (or "Save changes") to exit Settings and return to the workspace',
+      body: '<p><b>Cancel</b> closes the modal without applying the edits on screen; <b>Save changes</b> applies them to every class card at once.</p>' +
+        '<p class="tm-tour-muted">The modal can also be dismissed with <kbd>Esc</kbd>, but the tour follows you out either way.</p>'
     }},
     {{
       chapter: 2,
@@ -13853,30 +13966,71 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 2,
-      title: 'Capture Labeled Image Samples',
+      title: 'Pick a Sample Source',
       target: '.tm-action-toolbar',
       fallback: ['.class-card'],
       placement: 'right',
-      body: '<ul>' +
-        '<li><b>Webcam</b> — capture from the laptop or an external USB camera.</li>' +
+      advanceTarget: '.tm-action-toolbar button.sample',
+      checkpoint: 'Click "Webcam" to open the camera drawer',
+      body: '<p>Three sources feed a class. Pick the one that matches your hardware:</p>' +
+        '<ul>' +
+        '<li><b>Webcam</b> — the laptop or an external USB camera.</li>' +
         '<li><b>Upload</b> — batch-import existing <code>.png</code> / <code>.jpg</code> images from disk.</li>' +
         '<li><b>Device</b> — stream live frames from the ESP32-P4 camera over USB serial.</li>' +
         '</ul>' +
-        '<p>Click <b>Capture</b> for a single frame, or press &amp; hold <b>Hold to Capture</b> (or hold <kbd>Space</kbd>) to burst-capture while you move the sign around.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">👆</span><span>Clicking the tile you are already on folds the drawer back up — these are <b>toggles</b>, not one-way doors.</span></div>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Capture Labeled Image Samples',
+      target: '[id^="sourceCapture-"]',
+      fallback: ['.source-actions', '.source-panel'],
+      placement: 'right',
+      /* The capture controls only exist while the drawer is open.  Coming
+         in from the Open checkpoint they are already there; coming in from
+         a chapter pill the step re-doors onto the tile that opens them. */
+      phaseIf: function () {{ return !drawerOpen(); }},
+      phaseTarget: '.tm-action-toolbar button.sample',
+      phaseName: 'the camera drawer',
+      advanceTarget: '[id^="sourceCapture-"]',
+      checkpoint: 'Click "Capture" for one frame, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
+      body: '<p>The drawer opens under the class card. Its preview is <b>live</b> for Webcam and Device, and empty for Upload.</p>' +
+        '<ul>' +
+        '<li><b>Capture</b> grabs a single frame and files it under this class.</li>' +
+        '<li><b>Hold to Capture</b> — hold the button (or hold <kbd>Space</kbd>) to <b>burst-capture</b> while you move the sign around.</li>' +
+        '<li><b>Upload</b> instead offers <b>Choose images from your files</b>.</li>' +
+        '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Aim for <b>50–100+ samples per class</b>, varying distance, angle and lighting — the model only learns what it sees.</span></div>'
     }},
     {{
+      chapter: 2,
+      title: 'Collapse the Camera Drawer',
+      target: '[id^="sourceClose-"]',
+      fallback: ['.source-close-pill', '.source-panel'],
+      placement: 'right',
+      phaseIf: function () {{ return !drawerOpen(); }},
+      phaseTarget: '.tm-action-toolbar button.sample',
+      phaseName: 'the camera drawer',
+      advanceTarget: '[id^="sourceClose-"]',
+      onLeave: closeSourceDrawer,
+      checkpoint: 'Click "Close" (▴) to collapse the camera drawer',
+      body: '<p>The <b>▴ Close</b> pill folds the drawer back into the class card; the tile stays highlighted until you collapse it, so you always know which class you were shooting.</p>' +
+        '<p class="tm-tour-muted">Press <kbd>Esc</kbd> to collapse the drawer too — the keyboard router gives an open drawer priority over closing the tour.</p>'
+    }},
+    {{
       chapter: 3,
-      title: 'Filter Environmental Noise (Edit &amp; ROI)',
+      title: 'Open the Sample Worktable',
       target: '.class-preprocess-chip',
       fallback: ['.class-card'],
       placement: 'right',
+      advanceTarget: '.class-preprocess-chip',
+      checkpoint: 'Click "Edit" to open the Sample Worktable',
       body: '<p>Real backgrounds carry <b>extraneous variables</b> — shadows, hands, floor tiles. Feeding those to the CNN teaches it to recognise the room instead of the sign.</p>' +
         '<ul>' +
-        '<li>Click <b>Edit</b> on a class to open the <b>Sample Worktable</b>.</li>' +
+        '<li><b>Edit</b> on a class card opens the <b>Sample Worktable</b> — the per-sample inspector.</li>' +
         '<li>There you crop the <b>Region of Interest (ROI)</b> and mask the background with brightness thresholds.</li>' +
         '</ul>' +
-        '<p>Press <b>Next →</b> and the tour will open the worktable for you.</p>'
+        '<p>The next three checkpoints walk the worktable and then close it again.</p>'
     }},
     {{
       chapter: 3,
@@ -13884,7 +14038,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
+      /* Inside the worktable now.  The guard only covers the ways in that
+         skip the Open checkpoint — a chapter pill, or `Skip step →`. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
       onEnter: openWorktable,
+      advanceTarget: '#classPreprocessMode',
+      checkpoint: 'Keep "Auto (find sign)", or pick "Manual ROI" and drag the crop box',
       body: '<ul>' +
         '<li><b>Original Sample (left)</b> — the raw frame with the green / blue <b>ROI</b> crop box drawn over it.</li>' +
         '<li><b>Processed Preview (right)</b> — the exact filtered and resized <code>Image Size × Image Size</code> tensor the network will be handed.</li>' +
@@ -13902,11 +14063,16 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '#classPreprocessDark',
       fallback: ['.class-preprocess-right', '#classPreprocessModal'],
       placement: 'left',
-      onLeave: closeWorktable,
-      /* Save and Close both return to the workspace, and neither is a
-         descendant of the slider this step spotlights — so each gets its
-         own binding, and saving really does complete the step. */
-      advanceAlso: ['#classPreprocessSave', '#classPreprocessCancel'],
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      onEnter: openWorktable,
+      advanceTarget: '#classPreprocessDark',
+      /* Save Sample finishes this step too, and it is not a descendant of
+         the slider being spotlit, so it needs its own binding.  Closing the
+         worktable is now a checkpoint of its own, right after this one. */
+      advanceAlso: ['#classPreprocessSave'],
+      checkpoint: 'Drag "Dark Thr" / "Lum Thr" until the preview is clean, then click "Save Sample"',
       body: '<ul>' +
         '<li><b>Dark Thr</b> — pixels darker than the threshold become <b>white (255)</b>, i.e. shadow.</li>' +
         '<li><b>Lum Thr</b> — pixels brighter than the threshold become <b>white (255)</b>, i.e. bright background.</li>' +
@@ -13925,19 +14091,66 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Always click <b>Save Sample</b> (or press <kbd>S</kbd>) after tuning — otherwise your thresholds are discarded when the worktable closes.</span></div>'
     }},
     {{
+      chapter: 3,
+      title: 'Close the Sample Worktable',
+      target: '#classPreprocessCloseTop',
+      fallback: ['#classPreprocessCancel', '.class-preprocess-actions'],
+      placement: 'left',
+      /* Still inside the worktable: Save Sample finishes the previous step
+         but leaves the worktable open, so the exit is its own checkpoint
+         rather than something the tour does behind the user's back. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      advanceTarget: '#classPreprocessCloseTop',
+      /* The footer's Close leaves the worktable too, and it is not a
+         descendant of the ✕ in the worktable's head. */
+      advanceAlso: ['#classPreprocessCancel'],
+      onLeave: closeWorktable,
+      checkpoint: 'Click "Close" (×) to exit the Sample Worktable',
+      body: '<p><b>Close</b> (<b>×</b> in the worktable head, or the <b>Close</b> button in the footer) returns to the three-column workspace. Everything you saved stays on its class card.</p>' +
+        '<ul>' +
+        '<li><b>Save Sample</b> writes the crop and the brightness thresholds onto that one sample.</li>' +
+        '<li><b>Close</b> is safe to press at any time — it only discards edits you have not saved.</li>' +
+        '<li><kbd>Esc</kbd> closes it too, and so does clicking the dimmed backdrop.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">➡️</span><span>With every class filtered, the middle column is next: train the embedded model.</span></div>'
+    }},
+    {{
       chapter: 4,
-      title: 'Configure Hyperparameters &amp; Train',
+      title: 'Reveal the Advanced Training Options',
       target: '.train-card',
       fallback: ['.col-train'],
       placement: 'left',
       /* The Advanced panel starts collapsed on a fresh workspace.  Rather
-         than swinging it open behind the user's back, the step first asks
-         them to press Advanced — the same button they will use — and only
-         then lands on the training card with the rows in view. */
-      phaseIf: function () {{ return !(typeof trainAdvancedOpen !== 'undefined' && trainAdvancedOpen); }},
+         than swinging it open behind the user's back, the step asks them to
+         press Advanced — the same button they will use — and only then
+         lands on the rows inside it. */
+      phaseIf: function () {{ return !advancedOpen(); }},
       phaseTarget: '#advBtn',
       phaseName: 'the <b>Advanced</b> training options',
-      advanceTarget: '#trainBtn',
+      advanceTarget: '#advBtn',
+      checkpoint: 'Click "Advanced" to unfold the hyperparameters',
+      body: '<p>The middle column owns the training run. Two controls matter here:</p>' +
+        '<ul>' +
+        '<li><b>Advanced</b> unfolds the hyperparameters. It starts collapsed because the defaults are already tuned for a small embedded model.</li>' +
+        '<li><b>Train Embedded Model</b> starts the run, and stays disabled until every class has samples.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧠</span><span>Training happens on this machine and streams per-epoch progress into the card, so you can watch accuracy climb.</span></div>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Configure Hyperparameters',
+      target: '#trainAdvPanel',
+      fallback: ['.train-card', '.col-train'],
+      placement: 'left',
+      /* The rows only exist while the panel is unfolded.  Coming in from
+         the Open checkpoint they are already there; coming in from a
+         chapter pill the step re-doors onto Advanced first. */
+      phaseIf: function () {{ return !advancedOpen(); }},
+      phaseTarget: '#advBtn',
+      phaseName: 'the <b>Advanced</b> training options',
+      checkpoint: 'Tune the rows, or click "💡 Use recommended" to fill them in',
       body: '<ul>' +
         '<li>Click <b>💡 Use recommended</b> to auto-calculate <code>Epochs</code> and <code>Batch Size</code> for roughly <b>800 gradient updates</b>.</li>' +
         '<li><b>Speed vs. accuracy:</b> larger <code>Image Size</code> (96 / 160 / 384), <code>Conv1/Conv2 Filters</code> and <code>Dense Units</code> raise capacity but <b>slow on-device inference</b> and grow the flash footprint.</li>' +
@@ -13954,8 +14167,18 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<tr><td><code>Conv1 Filters</code></td><td>Feature detectors in the first convolution layer.</td></tr>' +
         '<tr><td><code>Conv2 Filters</code></td><td>Feature detectors in the second convolution layer.</td></tr>' +
         '<tr><td><code>Dense Units</code></td><td>Width of the final classifier head.</td></tr>' +
-        '</table></div></details>' +
-        '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>). When it finishes, click the green <b>Model Trained · tap for accuracy</b> pill to inspect per-class accuracy.</p>'
+        '</table></div></details>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Train the Embedded Model',
+      target: '#trainBtn',
+      fallback: ['.train-card', '.col-train'],
+      placement: 'left',
+      advanceTarget: '#trainBtn',
+      checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
+      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>). When it finishes, click the green <b>Model Trained · tap for accuracy</b> pill to inspect the per-class score.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>If one class lags far behind the others, it usually needs more samples or a tighter ROI — go back to <b>Edit</b> before re-training.</span></div>'
     }},
     {{
       chapter: 5,
@@ -13983,6 +14206,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
          moves inside onto the OOD gates. */
       phaseTarget: '#navSettings',
       phaseName: 'the <b>OOD</b> gate settings',
+      checkpoint: 'Click the highlighted ⚙ Settings button to reach the OOD gates',
       body: '<p>A SoftMax classifier always names a class — even when you point the camera at an empty wall. To answer <b>“is there actually a sign?”</b> the host and the MCU run <b>3 rejection layers</b>:</p>' +
         '<ul>' +
         '<li><b>Layer 1 · Sign-pixel ratio</b> (<code>OOD sign min %</code> / <code>max %</code>) — frames are rejected <b>before inference</b> when dark target pixels fall below the min (empty scene) or above the max (camera covered).</li>' +
@@ -13997,12 +14221,31 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<p class="tm-tour-muted">Defaults: sign <b>0.3 % – 70 %</b>, max prob <b>≥ 0.60</b>, entropy <b>≤ 0.70</b>.</p>'
     }},
     {{
+      chapter: 5,
+      title: 'Close Input Settings',
+      target: '#settingsCancel',
+      fallback: ['#settingsSave', '.tm-settings-card'],
+      placement: 'left',
+      /* The OOD checkpoint left Settings open on purpose, so the exit is
+         the user's own press rather than a modal vanishing under them. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsCancel',
+      advanceAlso: ['#settingsSave'],
+      onLeave: closeSettingsModal,
+      checkpoint: 'Click "Save changes" (or "Cancel") to close Settings',
+      body: '<p>Leaving the modal is the last step of the Settings flow: <b>Save changes</b> applies the new OOD gates to the host preview and to the exported firmware constants; <b>Cancel</b> keeps the previous values.</p>' +
+        '<p class="tm-tour-muted">Both close the modal — the same <kbd>Esc</kbd> you used to get here also works.</p>'
+    }},
+    {{
       chapter: 6,
       title: 'Export the Quantized INT8 Model for the ESP32-P4',
       target: '#exportBtn',
       fallback: ['.preview-card'],
       placement: 'bottom',
-      onEnter: closeSettingsModal,
+      advanceTarget: '#exportBtn',
+      checkpoint: 'Click "Export Model" to build the 5-file deployment package',
       body: '<p>Click <b>Export Model</b> to generate the deployment package, then copy the <b>5 files</b> into the folder holding your <code>TFLite.ino</code> sketch:</p>' +
         '<ul>' +
         '<li><code>tm_model_data.cpp</code> · <code>tm_model_data.h</code> — the quantized weights as a C array.</li>' +
@@ -14056,7 +14299,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     if (typeof closeOcrGlyphModal === 'function') {{ try {{ closeOcrGlyphModal(); }} catch (err) {{}} }}
   }}
 
-  /* ═══ Curriculum 2 · Character OCR (10 steps) ════════════════════════
+  /* ═══ Curriculum 2 · Character OCR (16 steps) ════════════════════════
      One glyph per crop: choose the character set, collect samples,
      binarize with the integer Otsu the MCU runs, transfer-learn from
      EMNIST, preview a single glyph, then export the OCR firmware. */
@@ -14078,15 +14321,22 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 1,
-      title: 'Pick the Characters to Train',
+      title: 'Open the Edit Menu to Pick Characters',
       target: '#navEditCharacters',
-      fallback: ['#ocrEmptyCta', '#menuEditBtn', '.col-classes'],
+      fallback: ['#menuEditBtn', '#ocrEmptyCta', '.col-classes'],
       placement: 'bottom',
-      onEnter: openEditMenu,
+      /* The menu item lives inside the Edit ▾ dropdown, which is shut until
+         the user opens it.  Rather than popping the menu open for them, the
+         step spotlights the Edit button and follows their press in. */
+      phaseIf: function () {{ return !editMenuOpen(); }},
+      phaseTarget: '#menuEditBtn',
+      phaseName: 'the <b>Edit</b> menu',
+      advanceTarget: '#navEditCharacters',
       onLeave: closeMenus,
+      checkpoint: 'Click "Edit ▾", then "Edit characters"',
       body: '<p>Every character you select becomes a <b>normal class card</b> you can capture samples for — nothing else changes in the workflow.</p>' +
         '<ul>' +
-        '<li>The tour just opened the <b>Edit ▾</b> menu for you: <b>Edit characters</b> is its first item.</li>' +
+        '<li><b>Edit ▾</b> in the top bar holds <b>Edit characters</b>.</li>' +
         '<li>In a brand-new project you can also click <b>Select Characters to Train</b> in the empty column.</li>' +
         '<li>Pick only what the device really has to read. A tighter set trains faster and scores higher.</li>' +
         '</ul>' +
@@ -14094,32 +14344,75 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 2,
-      title: 'Collect Character Samples',
+      title: 'Pick a Sample Source',
       target: '.tm-action-toolbar',
       fallback: ['.class-card'],
       placement: 'right',
+      /* Entering this chapter from a chapter pill would otherwise leave the
+         Edit ▾ dropdown or a character picker covering the class column. */
       onEnter: closeCharOverlays,
-      body: '<ul>' +
+      advanceTarget: '.tm-action-toolbar button.sample',
+      checkpoint: 'Click "Webcam" to open the camera drawer',
+      body: '<p>Three sources feed a character card:</p>' +
+        '<ul>' +
         '<li><b>Webcam</b> — hold a printed or hand-written character up to the camera.</li>' +
         '<li><b>Upload</b> — import an existing folder of <code>.png</code> / <code>.jpg</code> glyphs.</li>' +
         '<li><b>Device</b> — stream frames from the ESP32-P4 camera over USB serial.</li>' +
         '</ul>' +
-        '<p>Capture <b>one character per class</b>. Vary the size, the stroke thickness and the lighting a little, but keep the character centred.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">👆</span><span>Clicking the tile you are already on folds the drawer back up — these are <b>toggles</b>, not one-way doors.</span></div>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Capture Character Samples',
+      target: '[id^="sourceCapture-"]',
+      fallback: ['.source-actions', '.source-panel'],
+      placement: 'right',
+      /* The capture controls only exist while the drawer is open: coming in
+         from the Open checkpoint they are already there, coming in from a
+         chapter pill the step re-doors onto the tile that opens them. */
+      phaseIf: function () {{ return !drawerOpen(); }},
+      phaseTarget: '.tm-action-toolbar button.sample',
+      phaseName: 'the camera drawer',
+      advanceTarget: '[id^="sourceCapture-"]',
+      checkpoint: 'Click "Capture" for one glyph, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
+      body: '<p>Capture <b>one character per class</b>. Vary the size, the stroke thickness and the lighting a little, but keep the character centred.</p>' +
+        '<ul>' +
+        '<li><b>Capture</b> files the current frame under this character.</li>' +
+        '<li><b>Hold to Capture</b> — hold the button or <kbd>Space</kbd> for a burst while you move the sheet.</li>' +
+        '<li><b>Upload</b> instead offers <b>Choose images from your files</b>.</li>' +
+        '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Aim for <b>60–100+ samples per character</b>. Crops are auto-tightened later, so loose framing is fine here.</span></div>'
     }},
     {{
       chapter: 2,
-      title: 'Inspect &amp; Crop a Single Glyph',
+      title: 'Collapse the Camera Drawer',
+      target: '[id^="sourceClose-"]',
+      fallback: ['.source-close-pill', '.source-panel'],
+      placement: 'right',
+      phaseIf: function () {{ return !drawerOpen(); }},
+      phaseTarget: '.tm-action-toolbar button.sample',
+      phaseName: 'the camera drawer',
+      advanceTarget: '[id^="sourceClose-"]',
+      onLeave: closeSourceDrawer,
+      checkpoint: 'Click "Close" (▴) to collapse the camera drawer',
+      body: '<p>The <b>▴ Close</b> pill folds the drawer back into the class card, leaving the captured thumbnails in the summary strip.</p>' +
+        '<p class="tm-tour-muted">Press <kbd>Esc</kbd> to collapse the drawer too — an open drawer outranks closing the tour.</p>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Open the Sample Worktable',
       target: '.class-preprocess-chip',
       fallback: ['.class-card'],
       placement: 'right',
+      advanceTarget: '.class-preprocess-chip',
+      checkpoint: 'Click "Edit" to open the Sample Worktable',
       body: '<p>Click <b>Edit</b> on a character card to open the <b>Sample Worktable</b> — the per-sample inspector.</p>' +
         '<ul>' +
         '<li>The left pane shows the raw frame with the crop box over it.</li>' +
         '<li>The right pane shows the exact binarized <b>28×28</b> tensor the network will receive.</li>' +
         '<li>Use it to throw out a bad capture (<kbd>D</kbd>) or to nudge the crop (<kbd>Shift</kbd> + arrows).</li>' +
         '</ul>' +
-        '<p>Press <b>Next →</b> and the tour will open the worktable for you.</p>'
+        '<p>The next two checkpoints walk the worktable and then close it again.</p>'
     }},
     {{
       chapter: 3,
@@ -14127,11 +14420,13 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
-      onEnter: openWorktable,
-      /* Save and Close are the two ways back to the workspace, and neither
-         sits inside the row this step spotlights. */
-      onLeave: closeWorktable,
-      advanceAlso: ['#classPreprocessSave', '#classPreprocessCancel'],
+      /* Inside the worktable now.  The guard only covers the ways in that
+         skip the Open checkpoint — a chapter pill, or `Skip step →`. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      advanceTarget: '#classPreprocessMode',
+      checkpoint: 'Keep "Auto (glyph)", or pick "Manual ROI" and pin the crop box',
       body: '<ul>' +
         '<li><b>Auto (glyph)</b> — recomputes <b>Otsu&rsquo;s threshold</b> per sample with integer arithmetic, then centres the ink by <b>vertical projection</b>.</li>' +
         '<li><b>Manual ROI</b> — drag a fixed crop box when every capture frames the character the same way.</li>' +
@@ -14144,24 +14439,68 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Press <kbd>S</kbd> (or <b>Save Sample</b>) after tuning — unsaved thresholds are discarded when the worktable closes.</span></div>'
     }},
     {{
+      chapter: 3,
+      title: 'Close the Sample Worktable',
+      target: '#classPreprocessCloseTop',
+      fallback: ['#classPreprocessCancel', '.class-preprocess-actions'],
+      placement: 'left',
+      /* Save Sample finishes the previous step but leaves the worktable
+         open, so the exit is a checkpoint of its own. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      advanceTarget: '#classPreprocessCloseTop',
+      advanceAlso: ['#classPreprocessCancel'],
+      onLeave: closeWorktable,
+      checkpoint: 'Click "Close" (×) to exit the Sample Worktable',
+      body: '<p><b>Close</b> (<b>×</b> in the worktable head, or the footer button) returns to the class column. Saved crops and thresholds stay on the sample.</p>' +
+        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it too, and so does clicking the dimmed backdrop.</p>'
+    }},
+    {{
       chapter: 4,
-      title: 'Transfer Learning &amp; Global Ink Polarity',
+      title: 'Reveal the Advanced Training Options',
       target: '.train-card',
       fallback: ['.col-train'],
       placement: 'left',
-      /* Ink polarity lives with the other Advanced rows, so the step asks
-         the user to press Advanced first instead of unfolding the panel
-         for them. */
-      phaseIf: function () {{ return !(typeof trainAdvancedOpen !== 'undefined' && trainAdvancedOpen); }},
+      /* The Advanced panel is collapsed on a fresh workspace, and the ink
+         polarity the next checkpoint talks about lives in it — so the step
+         asks the user to press Advanced rather than unfolding it for them. */
+      phaseIf: function () {{ return !advancedOpen(); }},
       phaseTarget: '#advBtn',
       phaseName: 'the <b>Advanced</b> training options',
-      advanceTarget: '#trainBtn',
+      advanceTarget: '#advBtn',
+      checkpoint: 'Click "Advanced" to unfold the training options',
+      body: '<p>The middle column trains the glyph classifier. <b>Advanced</b> unfolds the hyperparameters, and <b>Train Embedded Model</b> starts the run.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧠</span><span>One crop in, one character out — the card reports per-character accuracy when the run ends.</span></div>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Transfer Learning &amp; Global Ink Polarity',
+      target: '#advInkPolarityRow',
+      fallback: ['#trainAdvPanel', '.train-card'],
+      placement: 'left',
+      /* The row only exists while the panel is unfolded. */
+      phaseIf: function () {{ return !advancedOpen(); }},
+      phaseTarget: '#advBtn',
+      phaseName: 'the <b>Advanced</b> training options',
+      advanceTarget: '#advInkPolarity',
+      checkpoint: 'Set "Ink Polarity" to match how your glyphs are drawn',
       body: '<ul>' +
         '<li><b>Transfer learning</b> (on by default) keeps an EMNIST-pretrained backbone and attaches a fresh head for <i>your</i> character set — the fastest route to a high score on a few hundred crops.</li>' +
         '<li><b>Ink Polarity</b> says which way the ink sits: <code>dark on light</code> for camera captures, <code>light on dark</code> for MNIST/EMNIST-style images. Get it wrong and the model learns the inverse of your data.</li>' +
         '<li>The architecture rows are hidden while transfer learning is on: those numbers belong to the frozen backbone, not to your head.</li>' +
-        '</ul>' +
-        '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>), then open the green accuracy pill for the per-character breakdown.</p>'
+        '</ul>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Train the Embedded Model',
+      target: '#trainBtn',
+      fallback: ['.train-card', '.col-train'],
+      placement: 'left',
+      advanceTarget: '#trainBtn',
+      checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
+      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>), then open the green accuracy pill for the per-character breakdown.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A character that lags behind the rest usually needs more samples — go back to <b>Edit</b> and re-train.</span></div>'
     }},
     {{
       chapter: 4,
@@ -14176,6 +14515,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseTarget: '#navSettings',
       phaseName: 'the <b>EMNIST</b> mixing settings',
       onResume: unfoldSettingsAdvanced,
+      checkpoint: 'Click the highlighted ⚙ Settings button to reach the EMNIST mix',
       body: '<ul>' +
         '<li><b>Synthesise from EMNIST</b> mixes the public handwriting corpus into your training set, so a character you captured 60 times is backed by thousands more.</li>' +
         '<li><b>Split ratio</b> decides how much of each epoch is synthetic. 50 % is a good starting point; lower it if your real captures look nothing like EMNIST.</li>' +
@@ -14184,12 +14524,29 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Mixing only helps when the fonts agree. Hand-written characters next to a clean printed font can pull accuracy down — watch the per-class score.</span></div>'
     }},
     {{
+      chapter: 4,
+      title: 'Close Input Settings',
+      target: '#settingsCancel',
+      fallback: ['#settingsSave', '.tm-settings-card'],
+      placement: 'left',
+      /* The EMNIST checkpoint left the modal open on purpose, so the exit is
+         the user's own press rather than the modal vanishing under them. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsCancel',
+      advanceAlso: ['#settingsSave'],
+      onLeave: closeSettingsModal,
+      checkpoint: 'Click "Save changes" (or "Cancel") to close Settings',
+      body: '<p><b>Save changes</b> keeps the EMNIST mix for the next training run; <b>Cancel</b> leaves the previous values in place. Either closes the modal.</p>' +
+        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it as well — the tour follows you back out to the workspace.</p>'
+    }},
+    {{
       chapter: 5,
       title: 'Live Single-Glyph Preview',
       target: '.preview-card',
       fallback: ['.col-preview'],
       placement: 'left',
-      onEnter: closeSettingsModal,
       body: '<ul>' +
         '<li>Toggle <b>Input</b> ON to push live frames through the quantized model.</li>' +
         '<li>Toggle <b>ROI</b> to draw the crop rectangle over the frame and <b>Orig</b> to see the full masked frame; with both on you get the cropped, masked tensor handed to the model.</li>' +
@@ -14203,6 +14560,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '#exportBtn',
       fallback: ['.preview-card'],
       placement: 'bottom',
+      advanceTarget: '#exportBtn',
+      checkpoint: 'Click "Export Model" to build the 5-file deployment package',
       body: '<p>Click <b>Export Model</b>, then drop the <b>5 files</b> next to your <code>TFLite_OCR.ino</code> sketch:</p>' +
         '<ul>' +
         '<li><code>tm_model_data.cpp</code> · <code>tm_model_data.h</code> — the quantized weights.</li>' +
@@ -14227,7 +14586,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }}
   ];
 
-  /* ═══ Curriculum 3 · Road Sign, 3 characters (10 steps) ══════════════
+  /* ═══ Curriculum 3 · Road Sign, 3 characters (16 steps) ══════════════
      A labelled SEQUENCE: find the sign, split it into three slots, read
      each slot as a glyph, then verify the whole reading. */
   var SIGN_OCR_STEPS = [
@@ -14254,6 +14613,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.col-classes', '.signseq-bar'],
       placement: 'right',
       advanceTarget: '#signSeqSlot-0',
+      checkpoint: 'Type each character into the three slots, left to right',
       body: '<ul>' +
         '<li>Type the sign&rsquo;s characters into the <b>three slots</b>, left to right, exactly as they are printed.</li>' +
         '<li>Each slot becomes the <b>class</b> the model must learn — a repeated character is trained once.</li>' +
@@ -14264,30 +14624,67 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 2,
-      title: 'Collect Samples for Every Unique Character',
+      title: 'Pick a Sample Source',
       target: '.tm-action-toolbar',
       fallback: ['.class-card'],
       placement: 'right',
+      advanceTarget: '.tm-action-toolbar button.sample',
+      checkpoint: 'Click "Webcam" to open the camera drawer',
       body: '<p>Each character card collects <b>single-character glyph samples</b>. Capture, upload or generate a frame where that character is the glyph the model should learn.</p>' +
         '<ul>' +
-        '<li><b>Zero hardware:</b> <b>⚙ Settings → Advanced Settings → Auto-fill 24 EMNIST samples</b> fills every empty character class with 24 glyphs.</li>' +
-        '<li><b>Camera / upload:</b> isolate one character per class with <b>Auto / Manual ROI</b> in the Sample Worktable.</li>' +
-        '<li>Use <b>Webcam</b>, <b>Upload</b> or <b>Device</b>; <kbd>Space</kbd> taps or holds a burst capture.</li>' +
+        '<li><b>Webcam</b> — the laptop or an external USB camera.</li>' +
+        '<li><b>Upload</b> — batch-import existing <code>.png</code> / <code>.jpg</code> glyphs.</li>' +
+        '<li><b>Device</b> — stream live frames from the ESP32-P4 camera over USB serial.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>The full 3-character sign is automatically split into <b>3 slots during Preview/device inference</b>, never during training. A whole sign filed under “A” trains A on the whole sign — crop the character or use Auto-Fill.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">👆</span><span>Clicking the tile you are already on folds the drawer back up — these are <b>toggles</b>, not one-way doors.</span></div>'
     }},
     {{
       chapter: 2,
-      title: 'Manual ROI &amp; Thresholding for the Sign',
+      title: 'Capture Samples for the Character',
+      target: '[id^="sourceCapture-"]',
+      fallback: ['.source-actions', '.source-panel'],
+      placement: 'right',
+      phaseIf: function () {{ return !drawerOpen(); }},
+      phaseTarget: '.tm-action-toolbar button.sample',
+      phaseName: 'the camera drawer',
+      advanceTarget: '[id^="sourceCapture-"]',
+      checkpoint: 'Click "Capture" for one frame, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
+      body: '<ul>' +
+        '<li><b>Capture</b> files the current frame under this character.</li>' +
+        '<li><b>Hold to Capture</b> — hold the button (or <kbd>Space</kbd>) for a burst while you move the sign.</li>' +
+        '<li><b>Zero hardware:</b> <b>⚙ Settings → Advanced Settings → Auto-fill 24 EMNIST samples</b> fills every empty character class with 24 glyphs.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>The full 3-character sign is split into <b>3 slots during Preview/device inference</b>, never during training. A whole sign filed under “A” trains A on the whole sign — crop the character or use Auto-Fill.</span></div>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Collapse the Camera Drawer',
+      target: '[id^="sourceClose-"]',
+      fallback: ['.source-close-pill', '.source-panel'],
+      placement: 'right',
+      phaseIf: function () {{ return !drawerOpen(); }},
+      phaseTarget: '.tm-action-toolbar button.sample',
+      phaseName: 'the camera drawer',
+      advanceTarget: '[id^="sourceClose-"]',
+      onLeave: closeSourceDrawer,
+      checkpoint: 'Click "Close" (▴) to collapse the camera drawer',
+      body: '<p>The <b>▴ Close</b> pill folds the drawer back into the class card, keeping the captured thumbnails in the summary strip.</p>' +
+        '<p class="tm-tour-muted">Press <kbd>Esc</kbd> to collapse the drawer instead of leaving the tour.</p>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Open the Sample Worktable',
       target: '.class-preprocess-chip',
       fallback: ['.class-card'],
       placement: 'right',
+      advanceTarget: '.class-preprocess-chip',
+      checkpoint: 'Click "Edit" to open the Sample Worktable',
       body: '<p>Click <b>Edit</b> on a character card to open the <b>Sample Worktable</b> for that character.</p>' +
         '<ul>' +
         '<li>A road sign is a <b>fixed target</b>, so pinning this character&rsquo;s glyph with <b>Manual ROI</b> is often more reliable than auto-search.</li>' +
         '<li><b>Dark Thr</b> / <b>Lum Thr</b> isolate the dark glyphs from the plate and the background.</li>' +
         '</ul>' +
-        '<p>Press <b>Next →</b> and the tour will open the worktable for you.</p>'
+        '<p>The next two checkpoints walk the worktable and then close it again.</p>'
     }},
     {{
       chapter: 3,
@@ -14295,17 +14692,17 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
-      onEnter: openWorktable,
-      /* Save and Close are the two ways back to the workspace, and neither
-         sits inside the row this step spotlights. */
-      onLeave: closeWorktable,
-      advanceAlso: ['#classPreprocessSave', '#classPreprocessCancel'],
+      /* Inside the worktable now. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      advanceTarget: '#classPreprocessMode',
+      checkpoint: 'Pick "Manual ROI" to pin the glyph, or keep "Auto" and drag the box',
       body: '<ul>' +
         '<li>The <b>Processed Preview</b> is the 28×28 glyph this class&rsquo;s sample becomes — the tensor the glyph model receives.</li>' +
         '<li><b>Manual ROI</b> pins the character for this class so the glyph is isolated. The Preview&rsquo;s three-slot split is a separate inference step, not part of training.</li>' +
         '<li>Check the <b>Processed Preview</b>: the glyph should be centred, black, and fill most of the frame with a clean margin.</li>' +
         '</ul>' +
-        '<p>Click <b>Save Sample</b> (or Close <b>&times;</b>) to return to the workspace.</p>' +
         '<details class="tm-tour-details"><summary>Deep dive · worktable shortcuts</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table">' +
         '<tr><td><kbd>F1</kbd> / <kbd>F2</kbd></td><td>Auto ROI / Manual ROI</td></tr>' +
@@ -14315,24 +14712,68 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '</table></div></details>'
     }},
     {{
+      chapter: 3,
+      title: 'Close the Sample Worktable',
+      target: '#classPreprocessCloseTop',
+      fallback: ['#classPreprocessCancel', '.class-preprocess-actions'],
+      placement: 'left',
+      /* Save Sample finishes the previous checkpoint but leaves the
+         worktable open, so the exit is a checkpoint of its own. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      advanceTarget: '#classPreprocessCloseTop',
+      advanceAlso: ['#classPreprocessCancel'],
+      onLeave: closeWorktable,
+      checkpoint: 'Click "Close" (×) to exit the Sample Worktable',
+      body: '<p><b>Close</b> (<b>×</b> in the worktable head, or the footer button) returns to the class column; the saved ROI stays on the sample.</p>' +
+        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it too, and so does clicking the dimmed backdrop.</p>'
+    }},
+    {{
       chapter: 4,
-      title: 'Reading Direction L➔R vs R➔L, then Train',
+      title: 'Reveal the Advanced Training Options',
+      target: '.train-card',
+      fallback: ['.col-train'],
+      placement: 'left',
+      /* Reading order lives in the collapsed Advanced panel, so the step
+         asks the user to press Advanced rather than unfolding it for them. */
+      phaseIf: function () {{ return !advancedOpen(); }},
+      phaseTarget: '#advBtn',
+      phaseName: 'the <b>Advanced</b> training options',
+      advanceTarget: '#advBtn',
+      checkpoint: 'Click "Advanced" to unfold the training options',
+      body: '<p>The middle column trains the tiny glyph classifier the verification loop uses. <b>Advanced</b> unfolds the reading order, and <b>Train Embedded Model</b> starts the run.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧠</span><span>The sign itself is never the training input — each slot is read as a single character.</span></div>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Reading Direction L➔R vs R➔L',
       target: '#advReadingOrderRow',
       fallback: ['#trainAdvPanel', '.train-card'],
       placement: 'left',
       /* Reading order is an Advanced row, and the panel is collapsed by
-         default — so the step opens on the Advanced button and lands on the
-         row once the user has pressed it. */
-      phaseIf: function () {{ return !(typeof trainAdvancedOpen !== 'undefined' && trainAdvancedOpen); }},
+         default — so the step re-doors onto Advanced if it is shut. */
+      phaseIf: function () {{ return !advancedOpen(); }},
       phaseTarget: '#advBtn',
       phaseName: 'the <b>Advanced</b> reading-order options',
-      advanceTarget: '#trainBtn',
+      advanceTarget: '#advReadingOrder',
+      checkpoint: 'Set "Reading order" to match the way the sign is printed',
       body: '<ul>' +
         '<li><b>Reading order</b> tells the verification which end of the sign is slot 1. <code>ltr</code> reads left to right, <code>rtl</code> right to left.</li>' +
         '<li>Set it to match the way the sign is printed — it decides the order of the three slots <i>and</i> the direction the preview reports.</li>' +
         '<li><b>Ink polarity</b> (just above) selects dark-on-light or light-on-dark ink for the binarizer.</li>' +
-        '</ul>' +
-        '<p>Then press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd>) and check the per-character accuracy pill.</p>'
+        '</ul>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Train the Embedded Model',
+      target: '#trainBtn',
+      fallback: ['.train-card', '.col-train'],
+      placement: 'left',
+      advanceTarget: '#trainBtn',
+      checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
+      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd>) and check the per-character accuracy pill when the run ends.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A slot that keeps coming back <code>_background</code> needs more of that character, or a tighter ROI.</span></div>'
     }},
     {{
       chapter: 4,
@@ -14344,6 +14785,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
          first, then follow the user into the modal they opened. */
       phaseTarget: '#navSettings',
       phaseName: 'the <b>OOD</b> gate settings',
+      checkpoint: 'Click the highlighted ⚙ Settings button to reach the OOD gates',
       body: '<p>Verification has two failure modes to guard against: <b>no sign present</b>, and <b>wrong sign present</b>.</p>' +
         '<ul>' +
         '<li><b>Layer 1 · Sign-pixel ratio</b> rejects a frame before inference when there is too little (or too much) dark target area — an empty street or a covered lens.</li>' +
@@ -14353,12 +14795,29 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎛️</span><span>On the sign path, Layer 1 is structurally inert and Layers 2/3 are opened; each slot&rsquo;s own <b>_background</b> class and the per-slot confidence floor do the rejecting. Start permissive, then tighten until a blank frame reliably reads red.</span></div>'
     }},
     {{
+      chapter: 4,
+      title: 'Close Input Settings',
+      target: '#settingsCancel',
+      fallback: ['#settingsSave', '.tm-settings-card'],
+      placement: 'left',
+      /* The OOD checkpoint left the modal open on purpose, so the exit is
+         the user's own press rather than the modal vanishing under them. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsCancel',
+      advanceAlso: ['#settingsSave'],
+      onLeave: closeSettingsModal,
+      checkpoint: 'Click "Save changes" (or "Cancel") to close Settings',
+      body: '<p><b>Save changes</b> writes the new gates into the host preview and the exported <code>model_settings</code> constants; <b>Cancel</b> keeps the previous values. Either closes the modal.</p>' +
+        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it as well — the tour follows you back out to the workspace.</p>'
+    }},
+    {{
       chapter: 5,
       title: '3-Slot Split Preview &amp; the YES / NO Verdict',
       target: '.preview-card',
       fallback: ['.col-preview'],
       placement: 'left',
-      onEnter: closeSettingsModal,
       body: '<ul>' +
         '<li>Toggle <b>Input</b> ON and point the camera at the sign: the preview splits the frame into the three slots and reads each one.</li>' +
         '<li>A <b>🟢 YES (MATCH)</b> banner means all three slots agreed with the target, each cleared the 0.60 confidence floor, and none came back as <code>_background</code>.</li>' +
@@ -14372,6 +14831,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '#exportBtn',
       fallback: ['.preview-card'],
       placement: 'bottom',
+      advanceTarget: '#exportBtn',
+      checkpoint: 'Click "Export Model" to build the 5-file deployment package',
       body: '<p>Click <b>Export Model</b>, then copy the <b>5 files</b> next to your <code>TFLite_Sign.ino</code> sketch:</p>' +
         '<ul>' +
         '<li><code>tm_model_data.cpp</code> · <code>tm_model_data.h</code> — the quantized weights.</li>' +
@@ -14547,6 +15008,10 @@ mountReflowTimers.push(window.setTimeout(() => {{
 
   function advanceLater(delay) {{
     if (advTimer) window.clearTimeout(advTimer);
+    /* Acknowledge the press before the card changes: the user did exactly
+       what the checkpoint asked, and the tour should say so rather than
+       silently swapping the slide out from under their cursor. */
+    flashCheckpointPassed();
     advTimer = window.setTimeout(function () {{
       advTimer = null;
       if (!tourOpen) return;
@@ -14770,16 +15235,36 @@ mountReflowTimers.push(window.setTimeout(() => {{
       box.style.display = 'none';
       return;
     }}
+    var step = STEPS[tourIndex] || {{}};
     if (advState === 'disabled') {{
       box.className = 'tm-tour-cue hint';
       box.innerHTML = '<span class="tm-tour-cue-ico">💡</span><span>Collect samples first to enable this button, or click <b>Next &rarr;</b> to continue the tour</span>';
     }} else if (advState === 'phase') {{
+      /* The screen this step documents is still shut, so the door is the
+         checkpoint: name the thing that opens, and what to press. */
       box.className = 'tm-tour-cue phase';
-      box.innerHTML = '<span class="tm-tour-cue-ico">👆</span><span>Click the highlighted control to open <b>' + (STEPS[tourIndex] && STEPS[tourIndex].phaseName ? STEPS[tourIndex].phaseName : 'the next panel') + '</b> — the tour follows you in</span>';
+      box.innerHTML = '<span class="tm-tour-cue-ico">🎯</span><span><b>Checkpoint:</b> ' +
+        (step.checkpoint || ('click the highlighted control to open <b>' + (step.phaseName || 'the next panel') + '</b>')) +
+        '</span>';
     }} else {{
       box.className = 'tm-tour-cue';
-      box.innerHTML = '<span class="tm-tour-cue-ico">👆</span><span>Click the highlighted control (or press <b>Next &rarr;</b>) to continue</span>';
+      box.innerHTML = '<span class="tm-tour-cue-ico">🎯</span><span><b>Checkpoint:</b> ' +
+        (step.checkpoint || 'click the highlighted control, or press <b>Next &rarr;</b> to continue') +
+        '</span>';
     }}
+    box.style.display = 'flex';
+  }}
+
+  /* The checkpoint the user was just asked to satisfy has been satisfied.
+     Shown in the settle beat between their own press and the next card, so
+     the tour visibly answers the click it received instead of silently
+     swapping the slide underneath it.  Guarded against the debounced
+     `input` path, which would otherwise re-flash on every keystroke. */
+  function flashCheckpointPassed() {{
+    var box = byId('tmTourCue');
+    if (!box || box.classList.contains('pass')) return;
+    box.className = 'tm-tour-cue pass';
+    box.innerHTML = '<span class="tm-tour-cue-ico">✅</span><span><b>Checkpoint Passed!</b> Moving on&hellip;</span>';
     box.style.display = 'flex';
   }}
 
@@ -14895,7 +15380,12 @@ mountReflowTimers.push(window.setTimeout(() => {{
     var closeBtn = byId('tmTourClose');
     if (closeBtn) closeBtn.onclick = function () {{ endTour('dismiss'); }};
     var skipBtn = byId('tmTourSkip');
-    if (skipBtn) skipBtn.onclick = function () {{ endTour('skip'); }};
+    /* Secondary escape hatch, not the exit: `Skip step →` steps over the one
+       checkpoint the user cannot or does not want to perform and leaves the
+       guide running.  Dropping out entirely is the × in the card's head, or
+       Esc.  Either way the step's onEnter/onLeave hooks put the workspace
+       back in the state the next slide expects. */
+    if (skipBtn) skipBtn.onclick = function () {{ goStep(tourIndex + 1); }};
     var backBtn = byId('tmTourBack');
     if (backBtn) backBtn.onclick = function () {{ goStep(tourIndex - 1); }};
     var nextBtn = byId('tmTourNext');
@@ -14957,7 +15447,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     html += '<div class="tm-tour-chapters">' + chips + '</div>';
     html += '<label class="tm-tour-autoskip"><input type="checkbox" id="tmTourAutoskip"' + (autoskipOn() ? ' checked' : '') + '/><span>Don&rsquo;t show automatically on startup</span></label>';
     html += '<div class="tm-tour-actions">';
-    html += '<button type="button" class="tm-tour-btn ghost" id="tmTourSkip">Skip Tour</button>';
+    html += '<button type="button" class="tm-tour-btn ghost" id="tmTourSkip"' + (last ? ' disabled' : '') + '>Skip step &rarr;</button>';
     html += '<span class="tm-tour-spacer"></span>';
     html += '<button type="button" class="tm-tour-btn" id="tmTourBack"' + (tourIndex === 0 ? ' disabled' : '') + '>&larr; Back</button>';
     html += '<button type="button" class="tm-tour-btn primary" id="tmTourNext">' + (last ? 'Finish &#127881;' : 'Next &rarr;') + '</button>';
