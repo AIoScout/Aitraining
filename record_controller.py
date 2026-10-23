@@ -4309,11 +4309,24 @@ class RecordController:
 
         # Previews mirror the image branch's contract so the same UI code
         # renders both projects:
-        #   processed_png -> the decision mask (what the threshold chose)
+        #   processed_png -> the decision mask, cropped to the ROI and shown
+        #                    BLACK INK ON PURE WHITE (not the raw 0/255 mask
+        #                    the model consumes)
         #   crop_png      -> the pre-decision region (what the camera saw)
+        box = result.get("box")
         ink = result.get("ink")
         if ink is not None:
-            mp_png = _to_png_bytes(Image.fromarray((np.asarray(ink).astype(np.uint8) * 255), mode="L"))
+            ink_arr = np.asarray(ink, dtype=bool)
+            # Manual ROI: the user's crop IS the view.  Auto: show the
+            # segmented glyph box, never the whole frame.
+            view = ink_arr
+            if mode != PREPROCESS_MODE_MANUAL_ROI and box is not None:
+                ix1, iy1, ix2, iy2 = (int(v) for v in box)
+                cropped = ink_arr[iy1:iy2, ix1:ix2]
+                if cropped.size:
+                    view = cropped
+            display = np.where(view, 0, 255).astype(np.uint8)
+            mp_png = _to_png_bytes(Image.fromarray(display, mode="L"))
         else:
             mp_png = png_bytes
         # result["box"] is in the coordinates of the frame preprocess_glyph
@@ -4321,7 +4334,6 @@ class RecordController:
         # FULL-frame coordinates so the UI's rectangle lands on the pixels it
         # actually describes.
         ox, oy = roi_origin
-        box = result.get("box")
         crop_norm = [0.0, 0.0, 1.0, 1.0]
         cp_png = png_bytes
         if box is not None:
@@ -5263,7 +5275,12 @@ class RecordController:
             manual_roi = config.get("manual_roi")
         if manual_roi is None and str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
             manual_roi = model.get("manual_roi")
-        roi_info = find_sign_roi(gray, manual_roi=manual_roi)
+        roi_info = find_sign_roi(
+            gray,
+            manual_roi=manual_roi,
+            dark_thr=floor if thresholds_adjusted else None,
+            lum_thr=pinned if thresholds_adjusted else None,
+        )
         rx1, ry1, rx2, ry2 = (int(v) for v in roi_info["box"])
         rx1 = max(0, min(full_w - 1, rx1))
         ry1 = max(0, min(full_h - 1, ry1))
@@ -5360,7 +5377,8 @@ class RecordController:
                     "roi_box_norm": slot.get("box_norm"),
                 }
             )
-            slot_pngs.append(_to_png_bytes(Image.fromarray(glyph, mode="L")))
+            display = np.asarray(slot.get("display", glyph), dtype=np.uint8)
+            slot_pngs.append(_to_png_bytes(Image.fromarray(display, mode="L")))
 
         if not labels:
             # No trained model yet: the reading is still worth showing (the
@@ -5374,10 +5392,6 @@ class RecordController:
         slot_labels = [f"{s['char']} → {s['label'] or '—'}" for s in slots]
         slot_probs = [float(s["prob"]) for s in slots]
 
-        # The composite the preview pane shows: the sign crop, with each
-        # slot's own glyph laid out beneath it.  Built here rather than in
-        # the SPA so both the live preview and an uploaded test image get
-        # the same picture with no second implementation.
         sign_box = _to_full_box(reading.get("sign_box"))
         # The ROI overlay and the class-edit preview both read `crop` as
         # FULL-frame fractions.  The sign board ROI is the meaningful box
@@ -5398,12 +5412,24 @@ class RecordController:
             float(ry2) / float(full_h) if full_h > 0 else 1.0,
         ]
         ink = reading.get("ink")
+        ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
         sign_pct = (
-            float(np.asarray(ink, dtype=np.uint8).mean() * 100.0)
-            if ink is not None and np.asarray(ink).size
+            float(ink_arr.mean() * 100.0)
+            if ink_arr is not None and ink_arr.size
             else 0.0
         )
-        composite_png = self._sign_ocr_composite(roi_gray, reading, 0, 0)
+        # User-facing threshold view: inside the Dark..Lum window is BLACK
+        # ink; everything else is PURE WHITE.  This is what Orig / both
+        # toggles show (with the ROI box on top); the model tensor is built
+        # separately and keeps its own polarity.
+        inside_full = (gray >= bg_dark) & (gray <= bg_lum)
+        full_display = np.where(inside_full, 0, 255).astype(np.uint8)
+        if ink_arr is not None and ink_arr.size:
+            processed_display = np.where(ink_arr, 0, 255).astype(np.uint8)
+        else:
+            processed_display = full_display[ry1:ry2, rx1:rx2].copy()
+        full_png = _to_png_bytes(Image.fromarray(full_display, mode="L"))
+        processed_png = _to_png_bytes(Image.fromarray(processed_display, mode="L"))
 
         return {
             "labels": slot_labels,
@@ -5415,10 +5441,10 @@ class RecordController:
             "roi_box_norm": roi_box_norm,
             "roi_method": str(roi_info.get("method") or ""),
             "model_source": str(model.get("model_source") or "latest"),
-            "processed_image_b64": base64.b64encode(composite_png).decode("ascii"),
+            "processed_image_b64": base64.b64encode(processed_png).decode("ascii"),
             "crop_image_b64": "",
-            "full_image_b64": "",
-            "processed_variant": "sign-sequence",
+            "full_image_b64": base64.b64encode(full_png).decode("ascii"),
+            "processed_variant": "sign-threshold",
             "ood": False,
             "ood_reason": "",
             "sign_pct": float(sign_pct),

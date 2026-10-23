@@ -3585,8 +3585,8 @@ def _render_tm_old_frontend_html(
     }}
     #classPreprocessModal {{
       z-index: 2400;
-      align-items: stretch;
-      justify-content: stretch;
+      align-items: center;
+      justify-content: center;
       padding: 18px;
     }}
     .class-preprocess-shell {{
@@ -3622,9 +3622,9 @@ def _render_tm_old_frontend_html(
       flex: 1;
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(0, 1.18fr) minmax(260px, 0.82fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
-      align-items: stretch;
+      align-items: start;
     }}
     .class-preprocess-visual-pane {{
       display: flex;
@@ -3647,7 +3647,9 @@ def _render_tm_old_frontend_html(
       font-weight: 700;
     }}
     .class-preprocess-stage {{
-      flex: 1;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      height: auto;
       min-height: 0;
       border-radius: 16px;
       background: var(--surface-frost);
@@ -3664,6 +3666,7 @@ def _render_tm_old_frontend_html(
       height: 100%;
       object-fit: contain;
       display: block;
+      image-rendering: pixelated;
       user-select: none;
       -webkit-user-drag: none;
     }}
@@ -3802,10 +3805,12 @@ def _render_tm_old_frontend_html(
       min-width: 0;
     }}
     .class-preprocess-result {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      height: auto;
+      min-height: 0;
       border-radius: 14px;
       background: var(--surface-soft);
-      min-height: 0;
-      flex: 1;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -3848,6 +3853,7 @@ def _render_tm_old_frontend_html(
       height: 100%;
       object-fit: contain;
       display: block;
+      image-rendering: pixelated;
     }}
     .class-preprocess-actions {{
       display: flex;
@@ -10814,10 +10820,18 @@ function applyPreviewSrcToPane(data) {{
   const fullSrc = fullFromData || rawSrc;
   let src = rawSrc;
   let fullFrame = true;  // does `src` share the original frame's coordinates?
-  if (previewShowRaw && previewShowRoi) {{
-    // Cropped AND filtered: the processed tensor (or the sign split
-    // composite).  Its pixels are not the original frame, so the ROI box
-    // cannot be placed on it.
+  if (hasData && data.sign_ocr) {{
+    // Sign projects: Orig is the threshold view (Dark/Lum window: ink black,
+    // everything else pure white).  ROI only adds the box on top; without
+    // Orig the scene stays raw.  The old composite/slot strip is
+    // intentionally NOT shown here — .signmatch-slots below carries the
+    // three glyphs.
+    src = previewShowRaw ? fullSrc : rawSrc;
+    fullFrame = true;
+  }}
+  else if (previewShowRaw && previewShowRoi) {{
+    // Cropped AND filtered: the processed tensor.  Its pixels are not the
+    // original frame, so the ROI box cannot be placed on it.
     src = roiSrc;
     fullFrame = !roiFromData;
   }}

@@ -904,10 +904,137 @@ def _cv2_module():
         return None
 
 
+def _ink_cluster_roi(
+    gray: np.ndarray,
+    dark_thr: int,
+    lum_thr: int,
+) -> Optional[Dict[str, Any]]:
+    """Find the three interior character blobs at the user's Dark/Lum window.
+
+    This is the hardware path: the user tunes Dark/Lum until the sign's ink
+    stands alone, then the frame still contains fingers, the plastic frame,
+    and background clutter.  We take the threshold window they chose, drop
+    components touching the outer frame / too large to be a glyph / too
+    small to be ink, and look for a horizontal row of three similarly sized
+    interior blobs.  The union of that row is the ROI; the 3-way split then
+    runs only inside it.
+    """
+    cv2 = _cv2_module()
+    if cv2 is None:
+        return None
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    dark = max(0, min(255, int(dark_thr)))
+    lum = max(0, min(255, int(lum_thr)))
+    if lum < dark:
+        dark, lum = lum, dark
+    ink = ((gray >= dark) & (gray <= lum)).astype(np.uint8)
+    try:
+        n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, 8)
+    except Exception:
+        return None
+    margin = max(1, int(round(min(h, w) * 0.02)))
+    min_area = max(8, int(round(h * w * 0.0015)))
+    candidates: List[Dict[str, float]] = []
+    for i in range(1, n):
+        x, y, cw, ch, area = (int(v) for v in stats[i])
+        if area < min_area or cw < 3 or ch < 3:
+            continue
+        if x <= margin or y <= margin or x + cw >= w - margin or y + ch >= h - margin:
+            continue
+        if cw > 0.65 * w or ch > 0.65 * h:
+            continue
+        aspect = float(cw) / float(max(1, ch))
+        if aspect < 0.15 or aspect > 6.0:
+            continue
+        fill = float(area) / float(max(1, cw * ch))
+        if fill < 0.08:
+            continue
+        candidates.append({
+            "x": x, "y": y, "w": cw, "h": ch, "area": area,
+            "cx": x + cw / 2.0, "cy": y + ch / 2.0,
+        })
+    if not candidates:
+        return None
+    # Keep the most substantial blobs; clutter tends to be small.
+    candidates.sort(key=lambda c: -c["area"])
+    candidates = candidates[:12]
+    candidates.sort(key=lambda c: c["cx"])
+
+    best = None
+    for i in range(len(candidates) - 2):
+        for j in range(i + 1, len(candidates) - 1):
+            for k in range(j + 1, len(candidates)):
+                trio = (candidates[i], candidates[j], candidates[k])
+                gaps = [
+                    trio[1]["x"] - (trio[0]["x"] + trio[0]["w"]),
+                    trio[2]["x"] - (trio[1]["x"] + trio[1]["w"]),
+                ]
+                if min(gaps) < 0:
+                    continue
+                heights = sorted(c["h"] for c in trio)
+                med_h = heights[1]
+                if max(c["cy"] for c in trio) - min(c["cy"] for c in trio) > max(7, 0.55 * med_h):
+                    continue
+                if heights[2] > 2.2 * max(1, heights[0]):
+                    continue
+                widths = [c["w"] for c in trio]
+                if max(widths) > 3.5 * max(1, min(widths)):
+                    continue
+                if max(gaps) > 2.5 * max(1, max(widths)):
+                    continue
+                x1 = min(c["x"] for c in trio)
+                y1 = min(c["y"] for c in trio)
+                x2 = max(c["x"] + c["w"] for c in trio)
+                y2 = max(c["y"] + c["h"] for c in trio)
+                if (x2 - x1) < 0.22 * w or (y2 - y1) < 0.12 * h:
+                    continue
+                if (x2 - x1) > 0.92 * w:
+                    continue
+                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                dist = float(np.hypot(cx - w / 2.0, cy - h / 2.0))
+                center = max(0.0, 1.0 - 0.5 * dist / max(1.0, 0.5 * np.hypot(w, h)))
+                score = float(sum(c["area"] for c in trio)) * center
+                if best is None or score > best["score"]:
+                    best = {
+                        "score": score,
+                        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                        "med_h": float(med_h),
+                    }
+    if best is None:
+        return None
+    # A character can break into two blobs (e.g. a detached stroke).  Include
+    # every qualified blob whose centre sits in the same horizontal band as
+    # the selected row; the projection inside the ROI will still split it
+    # into exactly three glyphs.
+    band_top = best["y1"] - 0.8 * best["med_h"]
+    band_bottom = best["y2"] + 0.8 * best["med_h"]
+    x1, y1, x2, y2 = best["x1"], best["y1"], best["x2"], best["y2"]
+    for c in candidates:
+        if band_top <= c["cy"] <= band_bottom and x1 - 2 * best["med_h"] <= c["cx"] <= x2 + 2 * best["med_h"]:
+            x1 = min(x1, int(c["x"]))
+            y1 = min(y1, int(c["y"]))
+            x2 = max(x2, int(c["x"] + c["w"]))
+            y2 = max(y2, int(c["y"] + c["h"]))
+    pad = max(4, int(round(0.18 * best["med_h"])))
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(w, x2 + pad)
+    y2 = min(h, y2 + pad)
+    return {
+        "box": [int(x1), int(y1), int(x2), int(y2)],
+        "method": "ink_cluster",
+        "score": float(best["score"]),
+        "threshold": int(lum),
+        "area_frac": float((x2 - x1) * (y2 - y1)) / float(max(1, h * w)),
+    }
+
+
 def find_sign_roi(
     src: np.ndarray,
     manual_roi: Any = None,
     *,
+    dark_thr: Optional[int] = None,
+    lum_thr: Optional[int] = None,
     min_area_frac: float = 0.015,
 ) -> Dict[str, Any]:
     """Locate the bright road-sign plate inside a clutter frame.
@@ -920,7 +1047,7 @@ def find_sign_roi(
 
     Returns a dict with:
       box        [x1, y1, x2, y2] in source pixels (exclusive end)
-      method     "manual" | "bright_plate" | "center_fallback"
+      method     "manual" | "ink_cluster" | "bright_plate" | "center_fallback"
       score      candidate score (0 for manual/fallback)
       threshold  bright-mask threshold used (unused for manual)
       area_frac  plate area / frame area for a detected plate
@@ -936,6 +1063,14 @@ def find_sign_roi(
         if box is not None:
             return {"box": [int(v) for v in box], "method": "manual", "score": 1.0,
                     "threshold": 0, "area_frac": float((box[2] - box[0]) * (box[3] - box[1])) / float(max(1, h * w))}
+
+    # Hardware path: when the user has tuned Dark/Lum, those two sliders are
+    # the best description of "ink".  Find the three interior character blobs
+    # at that window before falling back to the bright-plate heuristic.
+    if dark_thr is not None and lum_thr is not None:
+        ink_roi = _ink_cluster_roi(gray, int(dark_thr), int(lum_thr))
+        if ink_roi is not None:
+            return ink_roi
 
     cv2 = _cv2_module()
     if cv2 is not None:
@@ -1197,10 +1332,21 @@ def preprocess_sign_sequence(
                 )
             glyph = np.asarray(res["glyph"], dtype=np.uint8)
             out["glyphs"][idx] = glyph
+            # User-facing thumbnail: BLACK ink on a PURE WHITE 28x28 canvas.
+            # The model input (`glyph`) keeps its training polarity/padding;
+            # this display variant is only what the Preview slot chip shows.
+            slot_ink = res.get("ink")
+            if slot_ink is not None and np.asarray(slot_ink).size:
+                mask = (np.asarray(slot_ink, dtype=np.uint8) * 255)
+                display_mask = normalise_glyph(mask, out_size=int(out_size), convention=convention)
+                display = (255 - display_mask).astype(np.uint8)
+            else:
+                display = np.full((int(out_size), int(out_size)), 255, dtype=np.uint8)
             out["slots"].append(
                 {
                     "char": str(seq[idx]),
                     "glyph": glyph,
+                    "display": display,
                     "ink": res.get("ink"),
                     "box": [int(x1), int(y1), int(x2), int(y2)],
                     "box_norm": [

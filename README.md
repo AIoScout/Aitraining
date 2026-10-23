@@ -108,8 +108,11 @@ filed under `A` trains `A` on the whole sign, not on `A`.
 Click **Edit** on a class card to open the modal:
 
 - **Original Sample** (left) with the green/blue ROI box, and **Processed
-  Preview** (right) — for glyph projects this is the `28×28` Otsu canvas the
-  model receives.
+  Preview** (right) — for glyph projects this is the `28×28` thresholded
+  glyph, shown **black ink on pure white and cropped to the ROI** (manual
+  ROI = the user box, auto = the segmented glyph box).  The model tensor
+  keeps its own polarity; only the user-facing preview is inverted.
+  The modal is centred and both image stages are clean 1:1 squares.
 - `Preprocess Mode`: **Auto (find sign)** or **Manual ROI**.
 - `Dark Thr` (0–100, default 0) and `Lum Thr` (50–255, default 100).
 - Manual ROI fields `ROI X1/Y1/X2/Y2` (0–1); drag on the original image.
@@ -203,8 +206,14 @@ The `ROI` and `Orig` checkboxes are view toggles:
 |---|---|---|---|
 | off | off | raw frame | hidden |
 | on | off | raw frame | drawn (green = auto, blue = manual) |
-| off | on | full masked frame | hidden |
-| on | on | processed crop / sign split | hidden |
+| off | on | thresholded black-on-white frame | hidden |
+| on | on | thresholded black-on-white frame | drawn |
+
+`Orig` shows the **Dark/Lum threshold view**: pixels outside the window
+become pure white `255`, while ink stays dark, so the sliders visibly change
+the image.  `ROI` only adds the rectangle on top; without `Orig` the scene
+is the raw frame.  The `.signmatch-slots` below already shows the three
+glyph crops, so the stage never repeats them as a strip.
 
 The **Preview stage is a 1:1 square** sized to the card's inner width.  A
 96×96 or 160×160 device frame fills it without the wide side padding the
@@ -228,14 +237,18 @@ and a finished training run also store a synthetic plate, so Preview has a
 ready frame with zero files on disk.
 
 Before splitting, the host sign preview locates the sign board on the
-**native frame** (`find_sign_roi`): the pinned Manual ROI when one is set,
-otherwise the enclosed bright inner plate, with a centred 70 % fallback.  It
-crops that plate first, removes frame-line/noise ink touching the ROI edge,
-and only then runs the three-glyph projection.  The response carries
-`roi_box` (source pixels), `roi_box_norm` / `crop` (full-frame fractions) and
-a real `sign_pct`; the green ROI rectangle therefore wraps the sign plate on
-the original 160×160 scene instead of the whole frame.  Training and the
-exported device front-end still consume one glyph per class as before.
+**native frame** (`find_sign_roi`): the pinned Manual ROI when one is set;
+when Dark/Lum have been tuned, an **ink-cluster** pass filters out
+border-touching, oversized and tiny components and takes the horizontal row
+of three character blobs; otherwise the enclosed bright inner plate is used,
+with a centred 70 % fallback.  It crops that ROI first, removes frame-line/
+noise ink touching its edge, and only then runs the three-glyph projection.
+The response carries `roi_box` (source pixels), `roi_box_norm` / `crop`
+(full-frame fractions), a real `sign_pct`, a thresholded full-frame
+`full_image_b64` and a cropped `processed_image_b64` — both rendered
+**black ink on pure white**.  Each `.signmatch-slot` thumbnail is likewise a
+black-on-white 28×28 display glyph.  Training and the exported device
+front-end still consume one glyph per class as before.
 
 The output pane is the `.signmatch` banner:
 

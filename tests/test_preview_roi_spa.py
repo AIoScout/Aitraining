@@ -189,6 +189,7 @@ def assert_both_toggles_show_the_processed_crop(page):
 def assert_square_stage_keeps_the_frame_sharp(page):
     """A 160x160 device frame fills a 1:1 stage; the ROI box stays on it."""
     raw160 = _png_b64((160, 160), (180, 180, 180))
+    full160 = _png_b64((160, 160), (250, 250, 250))
     payload = {
         "ok": "1",
         "labels": ["A", "1", "2"],
@@ -198,8 +199,8 @@ def assert_square_stage_keeps_the_frame_sharp(page):
         "image_b64": raw160,
         "processed_image_b64": PROCESSED,
         "crop_image_b64": "",
-        "full_image_b64": "",
-        "processed_variant": "sign-sequence",
+        "full_image_b64": full160,
+        "processed_variant": "sign-threshold",
         "crop": [0.15625, 0.15625, 0.84375, 0.84375],
         "sign_ocr": True,
         "sign_sequence": ["A", "1", "2"],
@@ -247,13 +248,54 @@ def assert_square_stage_keeps_the_frame_sharp(page):
     # The box must hug the image content, never the full wide pane.
     assert stage["width"] < stage["w"] * 0.80, stage
 
-    # ROI + Orig shows the processed sign/3-slot composite; the full-frame
-    # rectangle cannot describe that image, so it stays hidden.
+    # Orig ON: the backend's thresholded black-on-white frame, with the ROI
+    # box still visible on top when ROI is also ON.
     _set_toggle(page, "previewRawToggle", True)
     _apply(page, payload)
     state = _state(page)
+    assert state["src"] == _url(full160), state
+    assert state["display"] == "block", state
+
+    # Orig ON alone: threshold frame, no box.
+    _set_toggle(page, "previewRoiToggle", False)
+    _apply(page, payload)
+    state = _state(page)
+    assert state["src"] == _url(full160), state
     assert state["display"] == "none", state
-    assert state["src"] == _url(PROCESSED), state
+
+
+def assert_worktable_is_centered_with_square_stages(page):
+    """Edit modal centered; Original / Processed stages are 1:1."""
+    page.evaluate(
+        """(src) => {
+          STATE.sample_previews = Object.assign({}, STATE.sample_previews || {}, {
+            A: [{src, filename: 'sample.png'}],
+          });
+          STATE.counts = Object.assign({}, STATE.counts || {}, {A: 1});
+          openClassPreprocessEditor('A');
+        }""",
+        _url(RAW),
+    )
+    page.wait_for_selector("#classPreprocessStage", timeout=5000)
+    page.wait_for_timeout(250)
+    box = page.evaluate(
+        """() => {
+          const shell = document.querySelector('#classPreprocessModal .class-preprocess-shell').getBoundingClientRect();
+          const stage = document.getElementById('classPreprocessStage').getBoundingClientRect();
+          const result = document.querySelector('#classPreprocessModal .class-preprocess-result').getBoundingClientRect();
+          return {
+            vw: innerWidth, vh: innerHeight,
+            shell: {l: shell.left, t: shell.top, r: shell.right, b: shell.bottom},
+            stage: {w: stage.width, h: stage.height},
+            result: {w: result.width, h: result.height},
+          };
+        }"""
+    )
+    assert abs((box["shell"]["l"] + box["shell"]["r"]) / 2 - box["vw"] / 2) < 2.0, box
+    assert abs((box["shell"]["t"] + box["shell"]["b"]) / 2 - box["vh"] / 2) < 2.0, box
+    assert box["stage"]["w"] > 0 and abs(box["stage"]["w"] - box["stage"]["h"]) < 1.5, box
+    assert box["result"]["w"] > 0 and abs(box["result"]["w"] - box["result"]["h"]) < 1.5, box
+    page.evaluate("closeClassPreprocessEditor(true)")
 
 
 def assert_input_off_keeps_the_box_visible(page):
@@ -319,6 +361,7 @@ def main() -> int:
             run("Orig shows the masked frame without a box", assert_orig_shows_the_masked_frame_without_a_box, page)
             run("ROI + Orig shows the processed crop", assert_both_toggles_show_the_processed_crop, page)
             run("160x160 frame gets a square stage", assert_square_stage_keeps_the_frame_sharp, page)
+            run("worktable is centered with square stages", assert_worktable_is_centered_with_square_stages, page)
             run("Input OFF keeps the box visible", assert_input_off_keeps_the_box_visible, page)
 
             browser.close()
