@@ -10,13 +10,22 @@ What this script does
    Synth Mismatch -> Export / Save view.
 3. Injects numbered red callout boxes (``#e11d48``) through
    ``getBoundingClientRect()`` and captures 1440x900 @2x screenshots.
-4. Assembles the student manual with python-docx (Steps 1-8), reusing the
-   visual tone of the existing HKUST TFLite Training manual.
+4. Assembles the student manual with python-docx, following the exact
+   section structure of the reference HKUST "TF Lite Training Manual":
+   Title -> A) Objective / Background -> Task 0 (hardware) -> Task 1
+   (Arduino setup) -> Task 2 (the Road Sign 3-Char app walkthrough).
+   The front matter plus Task 0 and Task 1 are deep-copied straight out of
+   the reference .docx (photos, callout textboxes, bullets, numbering and
+   hyperlinks all travel with them); only the title suffix, the lab-goal
+   sentence and a photo-placeholder box in Task 0 Part A-(3) are patched.
+   Task 2 is written fresh in middle/high-school language around the ten
+   captured screenshots.
 5. Writes the .docx to the repository root and to the OneDrive Student_Helper
    folder.
 
-The manual deliberately stops after Export Model / Save Project.  It contains
-no Arduino IDE, firmware-flashing, UART or Serial-Monitor instructions.
+The manual deliberately stops after Export Model / Save Project (end of
+Task 2).  It contains no Task 3: no firmware-flashing or Serial-Monitor
+instructions beyond what Task 1 already covers.
 
 Usage
 -----
@@ -26,11 +35,14 @@ Usage
     # Reuse already-captured screenshots and only rebuild the Word file:
     .venv/bin/python scripts/build_car_sign_manual.py --only-docx
 
-Requires: streamlit, playwright (+ system Chrome), pillow, python-docx.
+Requires: streamlit, playwright (+ system Chrome), pillow, python-docx, and
+the reference manual at REFERENCE_DOCX (hardcoded OneDrive path).
 """
 from __future__ import annotations
 
 import argparse
+import copy
+import itertools
 import json
 import os
 import re
@@ -51,6 +63,9 @@ try:
     from docx.enum.style import WD_STYLE_TYPE
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.opc.packuri import PackURI
+    from docx.opc.part import Part
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.shared import Inches, Pt, RGBColor
@@ -892,7 +907,7 @@ def _add_table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
     return table
 
 
-def _callout_box(doc, title: str, body: Sequence[str]) -> None:
+def _callout_box(doc, title: str, body: Sequence[str], icon: str = "⚠") -> None:
     table = doc.add_table(rows=1, cols=1)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     cell = table.cell(0, 0)
@@ -900,7 +915,7 @@ def _callout_box(doc, title: str, body: Sequence[str]) -> None:
     _set_cell_borders(cell)
     cell.text = ""
     p = cell.paragraphs[0]
-    run = p.add_run(f"⚠ {title}")
+    run = p.add_run(f"{icon} {title}")
     run.bold = True
     run.font.name = BODY_FONT
     run.font.size = Pt(11)
@@ -998,17 +1013,30 @@ def _heading(doc, text: str, level: int) -> None:
     p.paragraph_format.keep_with_next = True
     run = p.add_run(text)
     run.font.name = HEADING_FONT
-    run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
     if level == 2:
         run.font.size = Pt(16)
+        run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
         p.paragraph_format.space_before = Pt(14)
         p.paragraph_format.space_after = Pt(6)
     elif level == 3:
         run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
         p.paragraph_format.space_before = Pt(10)
         p.paragraph_format.space_after = Pt(3)
-    else:
-        run.font.size = Pt(10.5)
+    else:  # level 4 — numbered sub-steps inside our Task 2
+        run.font.size = Pt(11.5)
+        run.font.color.rgb = RGBColor(0x1D, 0x4E, 0xD8)
+        p.paragraph_format.space_before = Pt(10)
+        p.paragraph_format.space_after = Pt(3)
+
+
+def _task_heading(doc, text: str):
+    """A Task-level heading matching the reference manual's Task 0 / Task 1
+    headings: the imported Heading 3 style, no explicit run formatting."""
+    p = doc.add_heading(level=3)
+    p.paragraph_format.keep_with_next = True
+    p.add_run(text)
+    return p
 
 
 def _page_break(doc) -> None:
@@ -1032,6 +1060,364 @@ def _add_page_number(paragraph) -> None:
     run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
 
 
+def _photo_placeholder_table(doc) -> Any:
+    """Amber photo-placeholder box for Task 0 Part A-(3).
+
+    The instructor replaces this box with a photo of the physical
+    3-character road sign / car plate before printing the manual.
+    """
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cell = table.cell(0, 0)
+    _set_cell_shading(cell, "FFFBEB")
+    _set_cell_borders(cell, "D97706", 18)
+    p = cell.paragraphs[0]
+    p.clear()
+    r = p.add_run("📷 [Photo Placeholder: Physical 3-Character Road Sign Setup]")
+    r.bold = True
+    r.font.name = BODY_FONT
+    r.font.size = Pt(11)
+    r.font.color.rgb = RGBColor(0xB4, 0x53, 0x09)
+    p2 = cell.add_paragraph()
+    r2 = p2.add_run(
+        "Instructor: replace this box with a photo of the physical 3-character "
+        "road sign / car plate (for example A 1 2) mounted on the signpost."
+    )
+    r2.font.name = BODY_FONT
+    r2.font.size = Pt(10)
+    r2.font.color.rgb = RGBColor(0x78, 0x35, 0x0F)
+    return table
+
+
+class _ReferenceImporter:
+    """Deep-copy the reference manual's front matter + Task 0 + Task 1.
+
+    The copied paragraphs keep their original look (photos, callout
+    textboxes, bullets, hyperlinks): the styles and numbering definitions
+    they rely on are imported from the reference, image parts are copied
+    into the new package under fresh names, and every relationship /
+    numbering / drawing id is remapped.  After copying, three patches are
+    applied: the title suffix, the lab-goal sentence, and a
+    photo-placeholder box in Task 0 Part A-(3).
+    """
+
+    VML_NS = "urn:schemas-microsoft-com:vml"
+
+    def __init__(self, doc: Document, reference_path: Path) -> None:
+        if not reference_path.exists():
+            raise RuntimeError(
+                f"reference manual not found: {reference_path}\n"
+                "Task 0 / Task 1 are copied from this file; restore it or "
+                "point REFERENCE_DOCX at the right location."
+            )
+        self.doc = doc
+        self.ref = Document(str(reference_path))
+        self._img_counter = 0
+        self._docpr_ids = itertools.count(4000)
+        self._image_rIds: Dict[str, str] = {}
+        self._hyperlink_rIds: Dict[str, str] = {}
+        self._numid_map: Dict[str, str] = {}
+        self._copied: List[Any] = []
+
+    # ── inventory ────────────────────────────────────────────────────────
+    @staticmethod
+    def _para_text(el) -> str:
+        return "".join(t.text or "" for t in el.iter(qn("w:t")))
+
+    def _children(self):
+        return list(self.ref.element.body.iterchildren())
+
+    def _block(self, start_prefix: str, end_prefix: str):
+        """Body elements from the paragraph starting with start_prefix up to
+        (not including) the paragraph starting with end_prefix."""
+        children = self._children()
+        start = end = None
+        for i, ch in enumerate(children):
+            if ch.tag != qn("w:p"):
+                continue
+            text = self._para_text(ch)
+            if start is None and text.startswith(start_prefix):
+                start = i
+            if end is None and text.startswith(end_prefix):
+                end = i
+        if start is None or end is None:
+            raise RuntimeError(
+                f"reference section {start_prefix!r} .. {end_prefix!r} not found"
+            )
+        return children[start:end]
+
+    def _style_ids_needed(self, block) -> set:
+        """Styles referenced by the copied block, plus the transitive
+        closure over basedOn / link / next, plus Normal."""
+        needed = {"Normal"}
+        for el in block:
+            for p in el.iter(qn("w:p")):
+                pPr = p.find(qn("w:pPr"))
+                if pPr is not None:
+                    pStyle = pPr.find(qn("w:pStyle"))
+                    if pStyle is not None:
+                        needed.add(pStyle.get(qn("w:val")))
+            for r in el.iter(qn("w:r")):
+                rPr = r.find(qn("w:rPr"))
+                if rPr is not None:
+                    rStyle = rPr.find(qn("w:rStyle"))
+                    if rStyle is not None:
+                        needed.add(rStyle.get(qn("w:val")))
+        ref_styles = self._ref_styles()
+        queue = list(needed)
+        while queue:
+            sid = queue.pop()
+            st = ref_styles.get(sid)
+            if st is None:
+                continue
+            for child_name in ("w:basedOn", "w:link", "w:next"):
+                ref_el = st.find(qn(child_name))
+                if ref_el is not None:
+                    val = ref_el.get(qn("w:val"))
+                    if val and val not in needed and val in ref_styles:
+                        needed.add(val)
+                        queue.append(val)
+        return needed
+
+    def _ref_styles(self) -> Dict[str, Any]:
+        return {
+            st.get(qn("w:styleId")): st
+            for st in self.ref.styles.element
+            if st.tag == qn("w:style")
+        }
+
+    # ── numbering ────────────────────────────────────────────────────────
+    @staticmethod
+    def _find_part(doc: Document, reltype: str):
+        for rel in doc.part.rels.values():
+            if rel.reltype == reltype:
+                return rel.target_part
+        return None
+
+    def _import_numbering(self, block, style_ids) -> set:
+        """Copy the numbering definitions the copied block relies on.
+
+        Returns any extra style ids referenced by the imported numbering
+        levels (w:lvl → w:pStyle), which then join the style import.
+        """
+        ref_numbering = self._find_part(self.ref, RT.NUMBERING)
+        if ref_numbering is None:
+            return set()
+        numids = set()
+        for el in block:
+            for numPr in el.iter(qn("w:numPr")):
+                numId = numPr.find(qn("w:numId"))
+                if numId is not None:
+                    numids.add(numId.get(qn("w:val")))
+        ref_styles = self._ref_styles()
+        for sid in style_ids:
+            st = ref_styles.get(sid)
+            if st is None:
+                continue
+            for numPr in st.iter(qn("w:numPr")):
+                numId = numPr.find(qn("w:numId"))
+                if numId is not None:
+                    numids.add(numId.get(qn("w:val")))
+        if not numids:
+            return set()
+        ref_root = ref_numbering.element
+        ref_nums = {
+            n.get(qn("w:numId")): n for n in ref_root.findall(qn("w:num"))
+        }
+        ref_abstracts = {
+            a.get(qn("w:abstractNumId")): a
+            for a in ref_root.findall(qn("w:abstractNum"))
+        }
+        dst_numbering = self._find_part(self.doc, RT.NUMBERING)
+        if dst_numbering is None:
+            raise RuntimeError("new document has no numbering part")
+        dst_root = dst_numbering.element
+        extra_styles = set()
+        new_abstract_ids: Dict[str, str] = {}
+        for nid in sorted(numids, key=int):
+            num_el = ref_nums.get(nid)
+            if num_el is None:
+                raise RuntimeError(f"reference numbering numId {nid} missing")
+            if num_el.find(qn("w:numStyleLink")) is not None:
+                raise RuntimeError("numStyleLink numbering not supported")
+            abst = num_el.find(qn("w:abstractNumId"))
+            if abst is None:
+                raise RuntimeError(f"reference numId {nid} has no abstractNumId")
+            orig_abst = abst.get(qn("w:val"))
+            if orig_abst not in ref_abstracts:
+                raise RuntimeError(f"reference abstractNum {orig_abst} missing")
+            if orig_abst not in new_abstract_ids:
+                new_abst_id = str(1000 + len(new_abstract_ids))
+                new_abst = copy.deepcopy(ref_abstracts[orig_abst])
+                new_abst.set(qn("w:abstractNumId"), new_abst_id)
+                for lvl in new_abst.findall(qn("w:lvl")):
+                    pStyle = lvl.find(qn("w:pStyle"))
+                    if pStyle is not None:
+                        extra_styles.add(pStyle.get(qn("w:val")))
+                dst_root.append(new_abst)
+                new_abstract_ids[orig_abst] = new_abst_id
+            if nid not in self._numid_map:
+                new_nid = str(1000 + len(self._numid_map))
+                new_num = copy.deepcopy(num_el)
+                new_num.set(qn("w:numId"), new_nid)
+                new_num.find(qn("w:abstractNumId")).set(
+                    qn("w:val"), new_abstract_ids[orig_abst]
+                )
+                dst_root.append(new_num)
+                self._numid_map[nid] = new_nid
+        return extra_styles
+
+    # ── styles ───────────────────────────────────────────────────────────
+    def _import_styles(self, style_ids) -> None:
+        ref_styles = self._ref_styles()
+        dst = self.doc.styles.element
+        for sid in sorted(style_ids):
+            src = ref_styles.get(sid)
+            if src is None:
+                continue
+            existing = [
+                st
+                for st in dst
+                if st.tag == qn("w:style") and st.get(qn("w:styleId")) == sid
+            ]
+            if existing:
+                dst.replace(existing[0], copy.deepcopy(src))
+            else:
+                dst.append(copy.deepcopy(src))
+        log(f"imported {len(style_ids)} styles from the reference manual")
+
+    # ── relationship remapping ───────────────────────────────────────────
+    def _image_rId(self, orig: str) -> str:
+        if orig in self._image_rIds:
+            return self._image_rIds[orig]
+        part = self.ref.part.related_parts.get(orig)
+        if part is None:
+            raise RuntimeError(f"reference image relationship {orig} not found")
+        # PackURI.ext drops the dot in python-docx 1.2.0, so re-add it here;
+        # a dotless partname would leave the image without a content-type
+        # Default mapping and trip Word's repair prompt.
+        name = PackURI(f"/word/media/ref{self._img_counter:03d}.{part.partname.ext}")
+        self._img_counter += 1
+        new_part = Part(name, part.content_type, part.blob, self.doc.part.package)
+        new_rId = self.doc.part.relate_to(new_part, RT.IMAGE)
+        self._image_rIds[orig] = new_rId
+        return new_rId
+
+    def _hyperlink_rId(self, orig: str) -> str:
+        if orig in self._hyperlink_rIds:
+            return self._hyperlink_rIds[orig]
+        rel = self.ref.part.rels[orig]
+        new_rId = self.doc.part.rels.get_or_add_ext_rel(
+            RT.HYPERLINK, rel.target_ref
+        )
+        self._hyperlink_rIds[orig] = new_rId
+        return new_rId
+
+    # ── copying ──────────────────────────────────────────────────────────
+    def _remap(self, el) -> None:
+        for blip in el.iter(qn("a:blip")):
+            rId = blip.get(qn("r:embed"))
+            if rId:
+                blip.set(qn("r:embed"), self._image_rId(rId))
+        for imagedata in el.iter("{%s}imagedata" % self.VML_NS):
+            rId = imagedata.get(qn("r:id"))
+            if rId:
+                imagedata.set(qn("r:id"), self._image_rId(rId))
+        for hyperlink in el.iter(qn("w:hyperlink")):
+            rId = hyperlink.get(qn("r:id"))
+            if rId:
+                hyperlink.set(qn("r:id"), self._hyperlink_rId(rId))
+        for numPr in el.iter(qn("w:numPr")):
+            numId = numPr.find(qn("w:numId"))
+            if numId is not None and numId.get(qn("w:val")) in self._numid_map:
+                numId.set(qn("w:val"), self._numid_map[numId.get(qn("w:val"))])
+        # Drawing ids must stay unique document-wide; the new document's own
+        # figures use ids 1..N, so shift the copied ones to 4000+.
+        for docPr in el.iter(qn("wp:docPr")):
+            docPr.set("id", str(next(self._docpr_ids)))
+        for cNvPr in el.iter(qn("pic:cNvPr")):
+            cNvPr.set("id", str(next(self._docpr_ids)))
+
+    def _copy_block(self, block) -> None:
+        body = self.doc.element.body
+        for el in block:
+            new_el = copy.deepcopy(el)
+            self._remap(new_el)
+            body.insert(-1, new_el)  # keep the trailing sectPr last
+            if new_el.tag == qn("w:p"):
+                self._copied.append(new_el)
+        log(f"copied {len(self._copied)} paragraphs from the reference manual")
+
+    # ── patches ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _set_para_text(el, text: str) -> None:
+        """Replace a paragraph's runs with a single run holding `text`,
+        keeping the first run's formatting."""
+        runs = el.findall(qn("w:r"))
+        if not runs:
+            r = OxmlElement("w:r")
+            pPr = el.find(qn("w:pPr"))
+            if pPr is not None:
+                pPr.addnext(r)
+            else:
+                el.insert(0, r)
+            runs = [r]
+        first = runs[0]
+        for t in first.findall(qn("w:t")):
+            first.remove(t)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = text
+        rPr = first.find(qn("w:rPr"))
+        if rPr is not None:
+            rPr.addnext(t)
+        else:
+            first.insert(0, t)
+        for extra in runs[1:]:
+            el.remove(extra)
+
+    def _patch_title(self) -> None:
+        for el in self._copied:
+            if self._para_text(el).startswith("Lab0:"):
+                self._set_para_text(
+                    el,
+                    "Lab0: Introduction to TensorFlow Lite Micro and "
+                    "TFLiteTraining App (Road Sign / Car Sign Project)",
+                )
+                return
+        raise RuntimeError("reference title paragraph not found")
+
+    def _patch_goal(self) -> None:
+        for el in self._copied:
+            if self._para_text(el).startswith("In this lab, we will be familiar"):
+                self._set_para_text(
+                    el,
+                    "In this lab, you will become familiar with TFLiteTraining "
+                    "and train a model to recognize a 3-character road sign / "
+                    "car plate (such as A 1 2).",
+                )
+                return
+        raise RuntimeError("reference lab-goal paragraph not found")
+
+    def _insert_photo_placeholder(self) -> None:
+        for el in self._copied:
+            if self._para_text(el).startswith("(3) Signpost with three Road Signs"):
+                el.addnext(_photo_placeholder_table(self.doc)._tbl)
+                return
+        raise RuntimeError("Task 0 Part A-(3) heading not found")
+
+    # ── entry point ──────────────────────────────────────────────────────
+    def run(self) -> None:
+        block = self._block("Lab0:", "Task 2-")
+        style_ids = self._style_ids_needed(block)
+        style_ids |= self._import_numbering(block, style_ids)
+        self._import_styles(style_ids)
+        self._copy_block(block)
+        self._patch_title()
+        self._patch_goal()
+        self._insert_photo_placeholder()
+
+
 def build_docx(assets: Dict[str, Path]) -> Path:
     doc = Document()
     section = doc.sections[0]
@@ -1040,8 +1426,11 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     for attr in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
         setattr(section, attr, Inches(1))
 
-    # Consistent styles; the reference manual is an Arial/Times mix, but the
-    # app screenshots are clean and modern, so Arial throughout reads best.
+    # Base styles for the parts we write ourselves.  The reference importer
+    # below then swaps Normal / Heading2 / Heading3 / ... for the reference
+    # manual's own definitions, so the copied Task 0 / Task 1 keeps the
+    # original look.  Every paragraph we add sets its fonts explicitly, so
+    # the swap does not change our Task 2.
     styles = doc.styles
     normal = styles["Normal"]
     normal.font.name = BODY_FONT
@@ -1076,359 +1465,289 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     fr.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
     _add_page_number(footer)
 
-    # ── Title block ─────────────────────────────────────────────────────
-    _heading(doc, "Student Lab Manual", 2)
-    p = doc.add_paragraph()
-    p.paragraph_format.space_after = Pt(2)
-    r = p.add_run("Road Sign / Car Sign Project (3-Char)")
-    r.bold = True
-    r.font.name = HEADING_FONT
-    r.font.size = Pt(22)
-    r.font.color.rgb = RGBColor(0x1D, 0x4E, 0xD8)
-    _para(doc, "TFLite Training desktop app · sign_ocr workflow", size=12, color="475569")
-    _para(
-        doc,
-        "In this lab you will build a three-character road-sign verifier: declare the target "
-        "sequence, collect or auto-generate character glyphs, train an int8 model, verify the "
-        "three-slot reading in Preview, then export the model and save the project archive.",
-        size=10.5,
-    )
-    _add_table(
-        doc,
-        ["Lab at a glance", "Details"],
-        [
-            ["Project type", "🛑 Road Sign (3-Char)  (sign_ocr)"],
-            ["Target in this lab", "A ▸ 1 ▸ 2  (reading direction: Left to Right)"],
-            ["Model input", "3 slots × 28 × 28 int8 glyphs"],
-            ["Verdict", "🟢 YES — MATCH / 🔴 NO — NOT MATCH"],
-            ["Estimated time", "45–60 minutes"],
-            ["Hardware", "Not required — EMNIST Auto-Fill + Synth plates"],
-            ["Ends with", "Export Model + Save Project (.tmproj)"],
-        ],
-        widths=[1.7, 4.8],
-    )
+    # ── Front matter + Task 0 + Task 1 (copied from the reference manual) ──
+    # Title "Lab0: Introduction to TensorFlow Lite Micro and TFLiteTraining
+    # App (Road Sign / Car Sign Project)", A) Objective / Background,
+    # Task 0 (hardware) and Task 1 (Arduino setup) all come verbatim from
+    # the reference manual; see _ReferenceImporter for the three patches.
+    importer = _ReferenceImporter(doc, REFERENCE_DOCX)
+    importer.run()
+    inline_before_task2 = len(doc.inline_shapes)
 
-    _heading(doc, "Before you start", 3)
+    # ── Task 2 (Road Sign 3-Char) ───────────────────────────────────────
+    # page_break_before (not an explicit break paragraph) keeps Task 1's
+    # "Continue to next page" arrow on its own page without leaving a blank
+    # page in between.
+    task2 = _task_heading(doc, "Task 2 – Familiarize Yourself with the TFLiteTraining App (Road Sign 3-Char Project)")
+    task2.paragraph_format.page_break_before = True
     _para(
         doc,
-        "TensorFlow Lite (LiteRT) for Microcontrollers is designed to run small machine-learning "
-        "models on microcontrollers. TFLite Training is the desktop trainer used in this course: "
-        "it captures or imports samples, applies the same preprocessing the device will use, "
-        "trains an int8 TensorFlow Lite model, and exports C/C++ sources for a downstream project.",
+        "Now for the fun part — teaching an AI to read a 3-character sign! In this task you "
+        "will collect example photos of each character, teach the app to recognize them, test "
+        "a whole sign, and export your very own model.",
     )
-    _para(doc, "By the end of this lab you will be able to:")
-    _bullet(doc, "Explain why a sign is trained as one class per unique character, not as one class per sign.")
-    _bullet(doc, "Set a three-slot target and read the duplicate-character badge (e.g. A ▸ 1 ▸ A → “Slots 1 & 3”).")
-    _bullet(doc, "Collect glyph samples with the camera/device drawer or fill every empty class with EMNIST Auto-Fill.")
-    _bullet(doc, "Tune ROI and luminance thresholds in the Sample Worktable.")
-    _bullet(doc, "Choose sign-specific hyperparameters and explain the EMNIST mix and two-stage transfer learning.")
-    _bullet(doc, "Verify a sign in Preview and read the three per-slot results behind the YES / NO banner.")
-    _bullet(doc, "Export the trained artifacts and save/reopen the whole project as a .tmproj archive.")
-
-    _heading(doc, "Key idea: training is per character; splitting is per sign", 3)
-    _para(
-        doc,
-        "The sign project reuses the same 28×28 single-glyph classifier as the OCR project. "
-        "Each character card collects glyphs of ONE character. The full three-character plate "
-        "is split into three slots only at Preview / inference time. Keeping those two ideas "
-        "separate is the most important rule in this lab.",
-    )
-
-    # ── Step 1 ──────────────────────────────────────────────────────────
-    _heading(doc, "Step 1 — Choose the Road Sign project", 2)
-    _para(
-        doc,
-        "Launch TFLite Training. The Start Page shows three project cards. Choose the third one, "
-        "🛑 Road Sign (3-Char).",
-    )
-    _figure(doc, assets["01_start_page"], "Figure 1 — Start Page: choose the Road Sign (3-Char) project.")
-    _numbered(doc, "Click Get Started on the 🛑 Road Sign (3-Char) card. A fresh project opens with the target A ▸ B ▸ C and matching character cards.")
-    _numbered(doc, "Alternatively, click Open Project (.tmproj) to reopen a saved sign project. The archive's project type is authoritative; a cross-type file is announced rather than silently switched.")
-    _numbered(doc, "The third button, Import classified class, starts the ordinary image importer. You do not need it for this lab.")
-    _para(doc, "Tip: the app follows the system dark-mode setting (prefers-color-scheme: dark).", size=10, color="475569")
-
-    # ── Step 2 ──────────────────────────────────────────────────────────
-    _heading(doc, "Step 2 — Tour the workspace and set the target", 2)
-    _para(
-        doc,
-        "The workspace has three columns: Character Sample Cards (left), Training (middle), "
-        "and Preview (right). The top toolbar holds File/Edit, Settings, Preferences, the "
-        "📖 Tutorial, and Return Home.",
-    )
-    _figure(doc, assets["02_workspace_overview"], "Figure 2 — Workspace overview with the five working areas.")
-    _bullet(doc, "Top bar — File ▾ (save/open/export dataset), Settings, 📖 Tutorial, ← Return Home, and the Preview card's Export Model button.")
-    _bullet(doc, "Target Sign Sequence Bar (#signSeqBar) — the single writer of the class list and target.")
-    _bullet(doc, "Character Sample Cards — one card per unique character; each card is a capture surface.")
-    _bullet(doc, "Training card — Train Embedded Model, status/accuracy, Advanced hyperparameters, 💡 Use recommended.")
-    _bullet(doc, "Preview card — source controls, Input/ROI/Orig, the 3-slot inference result, and 🧪 Synth pills for sign projects.")
-    _para(
-        doc,
-        "Set the target now: type A, 1, 2 into the three slots (left to right). "
-        "The class cards update automatically. If the first-run tour appears, close it with "
-        "Skip Tour or Esc — you can reopen it any time from 📖 Tutorial.",
-    )
-
-    # ── Step 3 ──────────────────────────────────────────────────────────
-    _heading(doc, "Step 3 — Understand the sequence bar and duplicate characters", 2)
-    _para(
-        doc,
-        "The three slots are the single source of truth. Each valid keystroke updates the target, "
-        "auto-advances to the next slot, and syncs the class cards to the server.",
-    )
-    _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 3 — Target slots, swap buttons, reading direction and duplicate-character badge.")
-    _bullet(doc, "Slots — click a slot and type 0–9 or A–Z. ✔ A complete character advances to the next slot. Backspace on an empty slot clears the previous one.")
-    _bullet(doc, "◀ / ▶ — swap the character with its neighbour. The edge buttons are disabled.")
-    _bullet(doc, "Reading direction — the bar echoes left → right (or right → left). Change it in Training → Advanced → Sign Reading Direction. RTL reverses the three boxes after the split; pixels are never mirrored.")
-    _bullet(doc, "Duplicate character — A ▸ 1 ▸ A creates only two class cards, A and 1. The A card carries the badge “Slots 1 & 3”; the model trains A once.")
-    _bullet(doc, "Auto-sync — every edit posts the new sequence/class list and returns fresh counts and previews atomically. New characters are auto-filled in the same request when Auto-Fill is on.")
-    _bullet(doc, "After training — editing the sequence changes the dataset fingerprint; the Training status adds ⚠ Stale until you retrain.")
-    _para(doc, "Return to A ▸ 1 ▸ 2 before continuing.", bold=False, color="B91C1C", size=10)
-
-    # ── Step 4 ──────────────────────────────────────────────────────────
-    _page_break(doc)
-    _heading(doc, "Step 4 — Collect training samples", 2)
     _callout_box(
         doc,
-        "Critical training rule",
+        "Why one character per card?",
         [
-            "Each character card must collect single-character glyph samples — the input the 28×28 model actually learns.",
-            "Use EMNIST Auto-Fill (⚙ Settings → Advanced Settings) for a zero-camera workflow, or capture/upload a frame and isolate ONE character with Auto / Manual ROI.",
-            "A whole 3-character sign filed under “A” trains A on the whole sign. The automatic three-slot split belongs to Preview / inference, not training.",
+            "We collect single letters like A, 1 and 2 separately instead of taking one photo "
+            "of the whole A12 sign, because teaching the AI individual letters lets it "
+            "recognize ANY 3-character combination later! During Preview, the app "
+            "automatically slices the whole sign into 3 boxes and checks each letter one by "
+            "one.",
         ],
+        icon="💡",
     )
-    _heading(doc, "4A — Zero hardware: EMNIST Auto-Fill (recommended first pass)", 3)
+
+    # ── 1. Start page ───────────────────────────────────────────────────
+    _heading(doc, "1. Opening the App & Choosing 🛑 Road Sign (3-Char)", 4)
     _para(
         doc,
-        "Open ⚙ Settings → Preview and set Preview Image Input Source to Local Image File. "
-        "Then expand ▸ Advanced Settings, enable the auto-fill checkbox, and (optionally) click "
-        "Fill Empty Classes with EMNIST Samples Now. Each empty character class receives 24 "
-        "dark-ink-on-light 96×96 captures; real camera samples are never touched.",
+        "Launch TFLite Training. The Start Page shows three project cards — choose the 🛑 "
+        "Road Sign (3-Char) one.",
     )
-    _figure(doc, assets["04a_settings_emnist_autofill"], "Figure 4a — Preview source and EMNIST Auto-Fill controls in Settings.")
-    _numbered(doc, "Set Preview Image Input Source = Local Image File.")
-    _numbered(doc, "Enable Auto-fill empty classes with EMNIST template samples (24 / class).")
-    _numbered(doc, "Wait for each card to show 24 Image Samples; the fill is immediate. Use the one-shot button if the checkbox is already on.")
-    _numbered(doc, "Click Save changes to apply the settings.")
+    _figure(doc, assets["01_start_page"], "Figure 2.1 — Start Page: choose the 🛑 Road Sign (3-Char) project.")
+    _numbered(doc, "Click Get Started on the 🛑 Road Sign (3-Char) card. A fresh project opens with a 3-character sign already set up.")
+    _numbered(doc, "Tip: Open Project (.tmproj) reopens a project you saved earlier — you will use it again at the very end of this lab.")
+
+    # ── 2. Workspace overview ───────────────────────────────────────────
+    _heading(doc, "2. Understanding the Four Main Areas", 4)
+    _para(doc, "The workspace is like a small factory with four working areas:")
+    _figure(doc, assets["02_workspace_overview"], "Figure 2.2 — The workspace: Target Sign Bar, Sample Area, Train Area and Preview Area.")
+    _bullet(doc, "Target Sign Bar (top left) — where you type the 3 letters/numbers on your sign (for example A, 1, 2).")
+    _bullet(doc, "Sample Area (left) — where you collect and tidy photos for each character.")
+    _bullet(doc, "Train Area (middle) — where you train your AI model.")
+    _bullet(doc, "Preview Area (right) — where you test your model and check whether a sign matches (🟢 YES or 🔴 NO).")
     _para(
         doc,
-        "The auto-fill flag is project state. Changing a slot later backfills the new character "
-        "in the same class-sync request, so a new class does not stay at 0 samples.",
+        "Along the top there is also a small toolbar with File ▾, ⚙ Settings, 📖 Tutorial and "
+        "← Return Home. You will use ⚙ Settings in a moment.",
         size=10,
         color="475569",
     )
 
-    _heading(doc, "4B — Camera, device drawer and upload", 3)
+    # ── 3. Target sign ──────────────────────────────────────────────────
+    _heading(doc, "3. Setting Your 3-Character Target Sign", 4)
     _para(
         doc,
-        "On a character card, click Webcam, Upload, or Device. The drawer opens below the card. "
-        "Capture saves one frame; Hold to Capture (or holding Space) records a burst. "
-        "Close folds the drawer away.",
+        "Type the three characters of your sign into the Target Sign Bar. The character cards "
+        "below update automatically as you type.",
     )
-    _figure(doc, assets["04b_capture_drawer"], "Figure 4b — Device capture drawer: source tiles, Capture / Hold, Close and sample thumbnails.")
-    _para(
-        doc,
-        "The example above shows the drawer with no board attached: it reports that no "
-        "compatible serial device was detected and leaves the live preview empty. Choose the "
-        "correct port in Settings to see frames. Webcam and Upload work without a board.",
-        size=9.5,
-        color="475569",
-    )
-    _bullet(doc, "Webcam — pick the camera in Settings; live preview appears in the drawer.")
-    _bullet(doc, "Device — connect the ESP32-P4 serial source, choose the port in Settings, and capture from the live serial frame. Use Capture or Hold to Capture.")
-    _bullet(doc, "Upload — choose existing images. Great for photos of printed characters.")
-    _bullet(doc, "Space — while a Webcam/Device drawer is open: tap for one frame, hold ≥220 ms for a burst; release stops.")
-    _bullet(doc, "Close — the pill in the drawer header (title: Collapse panel (Esc)).")
-    _para(
-        doc,
-        "If you use camera samples, capture a close view where the current character is the "
-        "dominant glyph, or use Manual ROI in Step 5. Vary distance, tilt and lighting; aim for "
-        "at least 10–20 varied samples per class.",
-        size=10,
-        color="475569",
-    )
+    _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 2.3 — The Target Sign Bar: the three slots, swap buttons, reading direction and the duplicate badge.")
+    _bullet(doc, "Click a slot and type 0–9 or A–Z. A complete character jumps you to the next slot automatically.")
+    _bullet(doc, "Use the ◀ / ▶ buttons to swap two neighbouring characters.")
+    _bullet(doc, "Reading direction is left → right by default. You can change it in the Train Area → Advanced.")
+    _bullet(doc, "Same character twice? A 1 A only needs TWO cards — A and 1. The A card gets a small badge “Slots 1 & 3”; the AI learns A once and the app reuses it for both boxes.")
+    _para(doc, "For this lab, set the target to A 1 2.", color="B91C1C", size=10)
 
-    # ── Step 5 ──────────────────────────────────────────────────────────
+    # ── 4. Collect samples ──────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "Step 5 — Inspect and tune samples in the Sample Worktable", 2)
+    _heading(doc, "4. Collecting Samples in the Sample Area", 4)
     _para(
         doc,
-        "Click Edit on a character card to open the worktable. The left shows the Original "
-        "Sample with its ROI box; the right shows the Processed Preview — the 28×28 glyph "
-        "the model receives.",
+        "The AI needs example photos of every character — around 20 per character is a great "
+        "start. You can collect real photos, use the quick Auto-fill shortcut, or both.",
     )
-    _figure(doc, assets["05_sample_worktable_edit"], "Figure 5 — Sample Worktable: original/ROI, 28×28 processed glyph, mode, thresholds and save controls.")
-    _bullet(doc, "Original Sample — the raw capture. The green box is auto-detected; blue is Manual ROI.")
-    _bullet(doc, "Processed Preview — integer Otsu + projection + 28×28 normalization. It should show one centered glyph with a clean margin.")
-    _bullet(doc, "Preprocess Mode — Auto (find sign) or Manual ROI. Manual ROI pins a fixed box; drag on the original image or type ROI X1/Y1/X2/Y2 (0–1).")
-    _bullet(doc, "Dark Thr (0–100) / Lum Thr (50–255) — the luminance window. Defaults 0/100 mean exact Otsu; other values pin the threshold and add a dark floor.")
-    _bullet(doc, "Save Sample — stores the current sample's edits. Saved is shown when there is nothing to save.")
-    _bullet(doc, "Shortcuts — F1 Auto, F2 Manual ROI, S Save, D Delete Sample, Esc Close, arrows navigate, Shift+Arrows nudge the ROI.")
+    _para(doc, "The quick way — Auto-fill 24 EMNIST samples:", bold=True)
     _para(
         doc,
-        "Remember: the worktable edits a class sample, not the Preview's three-slot split. "
-        "Use it to make each character's glyph clean and consistent.",
+        "Open ⚙ Settings, expand ▸ Advanced Settings, and tick Auto-fill empty classes with "
+        "EMNIST template samples (24 / class). Each character card instantly receives 24 "
+        "built-in handwriting examples of that letter or number. Real photos are never touched "
+        "— auto-fill only fills classes that are still empty.",
+    )
+    _figure(doc, assets["04a_settings_emnist_autofill"], "Figure 2.4a — ⚙ Settings: Preview source (left) and the EMNIST Auto-fill controls in Advanced Settings (right).")
+    _numbered(doc, "Click ⚙ Settings.")
+    _numbered(doc, "Under Preview, set Preview Image Input Source to Local Image File (you will use it for testing later).")
+    _numbered(doc, "Expand ▸ Advanced Settings and tick Auto-fill empty classes with EMNIST template samples (24 / class).")
+    _numbered(doc, "If the tick box was already on, click Fill Empty Classes with EMNIST Samples Now instead.")
+    _numbered(doc, "Click Save changes.")
+    _para(doc, "The real way — Webcam / Upload / Device:", bold=True)
+    _para(
+        doc,
+        "On any character card, click Webcam, Upload or Device. A drawer opens below the card "
+        "with a live view and the capture buttons.",
+    )
+    _figure(doc, assets["04b_capture_drawer"], "Figure 2.4b — The capture drawer on a character card: source tiles, Capture / Hold to Capture and Close.")
+    _bullet(doc, "Webcam — uses your laptop camera. Great for photos of printed letters and numbers.")
+    _bullet(doc, "Upload — pick photos you already have on your computer.")
+    _bullet(doc, "Device — reads pictures from the ESP32-P4 camera on the smart car! Choose the right port in ⚙ Settings first.")
+    _bullet(doc, "Capture — takes ONE photo. Hold to Capture (or hold the Space key) — keeps snapping while you hold.")
+    _bullet(doc, "Close (Esc) — folds the drawer away.")
+    _para(
+        doc,
+        "Top tip: capture the letter close-up and straight-on so it fills most of the picture. "
+        "Vary the distance, angle and lighting a little — variety makes the AI smarter.",
         size=10,
         color="475569",
     )
 
-    # ── Step 6 ──────────────────────────────────────────────────────────
+    # ── 5. Sample Worktable ─────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "Step 6 — Train the model", 2)
+    _heading(doc, "5. Preprocessing the Samples (Edit Page: Image Viewer & Sample Worktable)", 4)
     _para(
         doc,
-        "Open Training → ▸ Advanced. The project-specific controls are Sign Reading Direction "
-        "and Ink Polarity; the OCR/sign block holds EMNIST mixing and two-stage transfer "
-        "learning. Start with the defaults, then click Train Embedded Model.",
+        "Click Edit on a character card to open the Edit page. On the left, the Image Viewer "
+        "shows your Original Sample with a crop box. On the right, the Sample Worktable shows "
+        "the Processed Preview — the clean 28×28 picture the AI will actually learn from.",
     )
-    _figure(doc, assets["06_training_and_advanced"], "Figure 6 — Training card → Advanced (left) and Settings → Training Hyperparameters (right).")
-    _para(doc, "Complete hyperparameter reference for sign_ocr:", bold=True)
+    _figure(doc, assets["05_sample_worktable_edit"], "Figure 2.5 — The Edit page: Image Viewer (left) and Sample Worktable (right).")
+    _para(
+        doc,
+        "Dark Thr and Lum Thr work together: they turn very dark shadows or bright background "
+        "areas into clean white space so the AI only focuses on the letter itself.",
+    )
     _add_table(
         doc,
-        ["Field", "Default", "Range / options", "What it does"],
+        ["Parameter", "Effects"],
         [
-            ["Ink Polarity", "0 — Dark ink on bright bg", "0 / 1", "Global ink polarity for every class; 1 = bright ink on dark bg."],
-            ["Sign Reading Direction", "Left to Right (L ➔ R)", "LTR / RTL", "Order of the three slots. RTL reverses boxes after the split, never pixels."],
-            ["Image Size", "28", "8–512", "Model input side. 28×28 is the glyph geometry; keep it for sign_ocr."],
-            ["Batch Size", "32", "≥1", "Samples per gradient step; auto-adjust may lower it for small sets."],
-            ["Epochs", "20", "≥1", "Base epoch count; the OCR strategy replaces it with Head + Fine-tune epochs."],
-            ["Validation Split", "0.25", "0–0.5", "Fraction held out for validation."],
-            ["Learning Rate", "0.0016", "≥0", "Base learning rate; the two-stage schedule has its own head/finetune rates."],
-            ["💡 Use recommended", "—", "button", "Sets Batch Size, Epochs, Learning Rate and Validation Split from the dataset size (~800 updates, ≥4 steps/epoch). Does not change Image Size or architecture."],
-            ["Mix EMNIST into every class", "On", "on/off", "Adds synthetic EMNIST glyphs to every real class."],
-            ["EMNIST split", "balanced", "balanced / letters / digits", "Which EMNIST subset supplies the synthetic glyphs."],
-            ["Synthetic per class", "200", "0–5000", "Synthetic EMNIST glyphs added per class."],
-            ["Background / noise class", "On", "on/off", "Appends the _background rejector used for blank slots."],
-            ["Background crops", "0", "0–5000", "Random non-glyph crops; 0 mirrors Synthetic per class."],
-            ["Fine-tune pre-trained backbone", "On", "on/off", "Two-stage transfer learning from a cached EMNIST backbone."],
-            ["Pre-train samples / class", "1200", "100–6000", "Backbone warm-up corpus size."],
-            ["Pre-train epochs", "4", "1–100", "Backbone warm-up epochs."],
-            ["Head epochs", "12", "1–200", "Phase 1: train the new head with the backbone frozen."],
-            ["Head learning rate", "0.0015", "≥0", "Phase 1 learning rate."],
-            ["Fine-tune epochs", "25", "0–200", "Phase 2: unfreeze the last conv block(s)."],
-            ["Fine-tune learning rate", "0.0002", "≥0", "Phase 2 learning rate."],
-            ["Conv blocks to unfreeze", "1", "0–16", "How many final backbone blocks are unfrozen."],
+            ["Preprocess Mode (Auto / Manual ROI)", "Auto = the app finds the letter by itself (green box). Manual ROI = you draw the box yourself (blue box) — handy when Auto picks the wrong corner."],
+            ["Dark Thr (Darkness Threshold)", "How dark a pixel may be and still count as the letter. Turning it up erases dark shadows around the letter."],
+            ["Lum Thr (Luminosity Threshold)", "How bright the background may be. Turning it down erases bright background areas, leaving a clean letter."],
+            ["ROI X1, Y1, X2, Y2", "The four numbers that describe your Manual box: X1/Y1 is the top-left corner and X2/Y2 the bottom-right corner (0 = top/left edge, 1 = bottom/right edge)."],
         ],
-        widths=[1.65, 1.35, 1.35, 2.15],
+        widths=[1.9, 4.6],
+    )
+    _para(doc, "Handy keyboard shortcuts:", bold=True)
+    _bullet(doc, "F1 — Auto mode, F2 — Manual ROI mode.")
+    _bullet(doc, "Arrow keys — move to the next/previous sample.")
+    _bullet(doc, "Shift + Arrow keys — nudge the ROI box in Manual mode.")
+    _bullet(doc, "S — Save the sample. D — Delete the sample. Esc — close the Edit page.")
+    _para(doc, "Remember to click Save Sample after any change!", color="B91C1C", size=10)
+
+    # ── 6. Training ─────────────────────────────────────────────────────
+    _page_break(doc)
+    _heading(doc, "6. Training the Model in the Train Area", 4)
+    _para(
+        doc,
+        "Time to teach the AI! Open the Train Area, click ▸ Advanced to see all the settings, "
+        "then click Train Embedded Model. The status line shows Model Trained when it finishes "
+        "— click it to see how accurate the model is for each character.",
+    )
+    _figure(doc, assets["06_training_and_advanced"], "Figure 2.6 — The Train Area → Advanced (left) and ⚙ Settings → Training Hyperparameters (right).")
+    _para(doc, "The hyperparameters, in plain words:", bold=True)
+    _add_table(
+        doc,
+        ["#", "Hyperparameter", "Default", "Range", "What it does"],
+        [
+            ["1", "Ink Polarity", "0 — Dark ink on bright bg", "0 / 1", "Which way round your letters are: normal dark-on-light writing (0), or bright letters on a dark sign (1)."],
+            ["2", "Sign Reading Direction", "Left to Right", "L ➔ R / R ➔ L", "The order the app reads the three boxes of your sign."],
+            ["3", "Image Size", "28", "8–512", "How many pixels wide the small letter picture is. 28×28 fits one letter perfectly — leave it."],
+            ["4", "Batch Size", "32", "1 or more", "How many photos the AI practices with in one go."],
+            ["5", "Epochs", "20", "1 or more", "How many times the AI reads through all your photos. For this project the app follows its own smart two-phase plan."],
+            ["6", "Validation Split", "0.25", "0–0.5", "The part of your photos kept secret for testing."],
+            ["7", "Learning Rate", "0.0016", "0 or more", "How big each learning step is. Small steps = careful but slow."],
+            ["8", "💡 Use recommended", "—", "button", "One click: the app picks sensible numbers for you based on how many photos you have. Click this first!"],
+            ["9", "Mix EMNIST into every class", "On", "on / off", "Mixes built-in handwriting examples with your photos so the AI learns from more variety."],
+            ["10", "Synthetic per class", "200", "0–5000", "How many built-in handwriting examples are added to each character."],
+            ["11", "Background / noise class", "On", "on / off", "Adds a “no letter here” class, so the AI can tell you when a box is empty."],
+            ["12", "Fine-tune pre-trained backbone", "On", "on / off", "Starts from a smart pre-learned letter reader so your model trains fast and accurately even with just 20 photos!"],
+            ["13", "Head epochs", "12", "1–200", "Practice rounds for the new part of the AI that learns YOUR letters."],
+            ["14", "Fine-tune epochs", "25", "0–200", "Practice rounds where the AI polishes everything together."],
+            ["15", "Fine-tune learning rate", "0.0002", "0 or more", "The small, careful step size used while polishing."],
+        ],
+        widths=[0.3, 1.55, 1.3, 1.0, 2.35],
         font_size=8.5,
     )
-    _para(
-        doc,
-        "Under the hood: EMNIST mixing aligns synthetic glyphs to the capture convention, "
-        "isolates and centers them, and appends random background crops for the _background "
-        "class. Two-stage transfer learning first warms a cached EMNIST backbone, then trains "
-        "the new classification head with the backbone frozen, and finally unfreezes the last "
-        "conv block(s) at the lower fine-tune rate.",
-        size=9.5,
-        color="475569",
-    )
-    _heading(doc, "After training", 3)
-    _bullet(doc, "The status changes to Model Trained · tap for accuracy. Click it to see per-class accuracy, including 1, 2, A and _background.")
-    _bullet(doc, "The Train button stays available for re-training with new samples or a changed target.")
-    _bullet(doc, "If you change a character after training, the status adds ⚠ Stale. Retrain before exporting; the old model's labels may not include the new character.")
-    _bullet(doc, "Training uses the same int8 graph Preview runs, so Preview accuracy predicts the exported model's behavior.")
+    _para(doc, "What to do, step by step:", bold=True)
+    _numbered(doc, "Click 💡 Use recommended so the app picks good numbers for your photos.")
+    _numbered(doc, "Make sure Mix EMNIST into every class and Fine-tune pre-trained backbone are on — they help a lot when you only have a few photos.")
+    _numbered(doc, "Click Train Embedded Model and wait for the status Model Trained.")
+    _numbered(doc, "Click the status to check the accuracy for A, 1, 2 (and the “no letter” class).")
+    _numbered(doc, "Changed your target or added photos after training? The status shows ⚠ Stale — just train again.")
 
-    # ── Step 7 ──────────────────────────────────────────────────────────
+    # ── 7. Preview / testing ────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "Step 7 — Verify the sign in Preview", 2)
+    _heading(doc, "7. Testing Your Model in the Preview Area", 4)
     _para(
         doc,
-        "Set Preview Image Input Source to Local Image File. The context bar shows the Upload "
-        "control and three sign-only pills: 🧪 Synth Match, 🔀 Synth Reversed and "
-        "❌ Synth Mismatch. Toggle Input ON to run predictions.",
+        "The Preview Area is your test bench: it shows the whole sign, splits it into 3 boxes, "
+        "reads each box with your model, and gives a verdict.",
     )
-    _figure(doc, assets["07a_preview_synth_match"], "Figure 7a — Synth Match: three-slot reading and the 🟢 YES — MATCH verdict.")
-    _bullet(doc, "🧪 Synth Match — composes the current target characters into a sign plate and asserts YES.")
-    _bullet(doc, "🔀 Synth Reversed — composes the characters in reversed order to probe LTR/RTL direction.")
-    _bullet(doc, "❌ Synth Mismatch — substitutes a wrong character and asserts NO.")
-    _bullet(doc, "Input — starts/stops the prediction loop; ROI draws the crop box; Orig shows the full masked frame.")
-    _bullet(doc, "The banner replaces the class bars: 🟢 YES — MATCH means all three slots agreed; 🔴 NO — NOT MATCH names the failing slot(s).")
-    _bullet(doc, "Each .signmatch-slot shows WANT <char>, the read glyph, its 28×28 image, and the confidence percentage. Green = match, red = fail.")
-    _para(doc, "A YES requires all three slots to satisfy the same per-slot rule:", bold=True)
-    doc.paragraphs[-1].paragraph_format.keep_with_next = True
-    _numbered(doc, "The split found ink in the slot.")
-    _numbered(doc, "The winning class is not _background.")
-    _numbered(doc, "The winning class equals the target character for that slot.")
-    _numbered(doc, "The raw confidence (best_raw / sum(raw)) is at least 0.60.")
-    _numbered(doc, "The exported model uses the same rule; the sign path opens the generic OOD layers and rejects with _background + the confidence floor.")
-    _figure(doc, assets["07b_preview_synth_mismatch"], "Figure 7b — Synth Mismatch: the red NO verdict and the per-slot hint.")
+    _para(doc, "Choose where the test picture comes from:", bold=True)
+    _bullet(doc, "Device — live pictures from the ESP32-P4 camera on the smart car (pick the port in ⚙ Settings). This is the real thing!")
+    _bullet(doc, "Webcam — your laptop camera.")
+    _bullet(doc, "Local Image File — pictures you upload from your computer.")
+    _para(doc, "No camera handy? Use the three magic buttons to make pretend test signs:", bold=True)
+    _bullet(doc, "🧪 Synth Match — builds a test sign out of YOUR three characters (A 1 2). A well-trained model says YES.")
+    _bullet(doc, "🔀 Synth Reversed — the same sign backwards, to double-check the reading direction.")
+    _bullet(doc, "❌ Synth Mismatch — swaps in a wrong character. A good model says NO.")
+    _para(doc, "Click Input to start reading, and watch the banner:")
+    _figure(doc, assets["07a_preview_synth_match"], "Figure 2.7a — 🧪 Synth Match: all three boxes agree → 🟢 YES — MATCH.")
+    _figure(doc, assets["07b_preview_synth_mismatch"], "Figure 2.7b — ❌ Synth Mismatch: one box disagrees → 🔴 NO — NOT MATCH.")
+    _para(doc, "Reading the 3 character boxes:", bold=True)
+    _bullet(doc, "WANT — the character the box should read.")
+    _bullet(doc, "The small picture — the cleaned 28×28 image the AI actually looked at.")
+    _bullet(doc, "The character the AI read, plus its confidence percentage. Green = correct, red = wrong.")
     _para(
         doc,
-        "Read a red banner from the hint: “slot 2 read ‘6’ at 41.2%” means the glyph was "
-        "classified as the wrong character or missed the 60% floor. A _background result means "
-        "the slot crop held no recognized glyph. Use the worktable to clean that character's "
-        "samples, then retrain.",
+        "A box passes only if the AI (1) found a letter shape in it, (2) the letter is not "
+        "“no letter”, (3) it matches the wanted character, and (4) it is at least 60% sure. "
+        "The banner says 🟢 YES — MATCH when all three boxes pass; otherwise it says 🔴 NO — "
+        "NOT MATCH, with a hint telling you which box went wrong.",
+    )
+    _para(
+        doc,
+        "Fix a failing box: open Edit for that character (Section 5), tidy its samples, and "
+        "train again.",
         size=10,
         color="475569",
     )
 
-    # ── Step 8 ──────────────────────────────────────────────────────────
+    # ── 8. Export + save ────────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "Step 8 — Export the model and save the project", 2)
+    _heading(doc, "8. Exporting the Model & Saving Your Project (.tmproj)", 4)
     _para(
         doc,
-        "When the Preview verdict is reliably correct, export the trained artifacts for your "
-        "downstream project and save the whole workspace so you can reopen it later.",
+        "Happy with the YES / NO answers? Export the trained model and save your project so "
+        "you can come back to it any time.",
     )
-    _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model in the Preview card and Save / Save as in the File menu.")
-    _heading(doc, "Export Model", 3)
-    _numbered(doc, "Click Export Model in the Preview card head.")
-    _numbered(doc, "Choose the target folder for the downstream project.")
-    _numbered(doc, "Confirm overwrite if the folder already contains an export.")
-    _para(doc, "With the default export name tm, the folder receives:")
-    _add_table(
-        doc,
-        ["File", "Purpose"],
-        [
-            ["tm.tflite", "The trained int8 TensorFlow Lite model."],
-            ["tm_model_data.h / .cpp", "The model bytes as a C/C++ array (default symbol g_tm_model_data)."],
-            ["model_settings.h / .cpp", "Labels, 28×28 geometry, target sequence, class indices, reading order, confidence floor, thresholds and OOD constants."],
-            ["model_resolver.h", "The MicroInterpreter operator resolver for this model's ops."],
-            ["labels.txt", "Human-readable label order, including _background when enabled."],
-        ],
-        widths=[2.1, 4.4],
-    )
+    _figure(doc, assets["08_export_and_save"], "Figure 2.8 — Export Model on the Preview card, and File ▾ → Save / Save as.")
+    _para(doc, "Export the model:", bold=True)
+    _numbered(doc, "Click Export Model on the Preview card.")
+    _numbered(doc, "Choose a folder, then confirm.")
     _para(
         doc,
-        "For the downstream project, the usual integration set is tm_model_data.cpp/.h, "
-        "model_resolver.h and model_settings.cpp/.h. The .tflite and labels.txt are useful "
-        "diagnostics. Exporting also pins Preview to this exact model until the next export.",
-        size=10,
-        color="475569",
+        "The folder receives a small set of files: the trained model (tm.tflite), the model "
+        "packed as C/C++ code for the microcontroller (tm_model_data.h / .cpp), a settings "
+        "file that remembers your three characters and the 28×28 picture size "
+        "(model_settings.h / .cpp), and labels.txt listing the characters.",
     )
-    _heading(doc, "Save Project (.tmproj)", 3)
-    _numbered(doc, "Open File ▾ → Save (⌘S / Ctrl+S) to save to the current path, or Save as (⇧⌘S / Shift+Ctrl+S) to choose a new file.")
-    _numbered(doc, "The .tmproj is a ZIP archive containing the project header/type, classes and target, samples, preprocessing, training config and the latest run artifacts.")
-    _numbered(doc, "Reopen it later with Open Project (.tmproj) on the Start Page. The archive restores the full sign workspace, including sign_sequence, reading_order and the Auto-Fill flag.")
+    _para(doc, "Save your project:", bold=True)
+    _numbered(doc, "Open File ▾ → Save (⌘S / Ctrl+S), or Save as (⇧⌘S / Shift+Ctrl+S) to pick a new file.")
+    _numbered(doc, "The .tmproj file is a little zip archive that remembers EVERYTHING: your characters, photos, preprocessing choices, training settings and the trained model.")
+    _numbered(doc, "Reopen it later with Open Project (.tmproj) on the Start Page.")
     _callout_box(
         doc,
         "Save early and often",
         [
-            "Save the .tmproj before training and again after a good result. A project archive is the only way to return to the exact class list, target, preprocessing and trained model.",
+            "Save the .tmproj before training and again after a good result — it is the only "
+            "way to get back to exactly what you had.",
         ],
     )
     _para(
         doc,
-        "You have completed the full Road Sign (3-Char) workflow: target sequence → glyph "
-        "samples → worktable preprocessing → training → three-slot Preview verification → "
-        "export and project save.",
+        "That's it — you collected letters, trained an AI to read them, tested a whole sign, "
+        "and exported your model. Well done!",
         bold=True,
-        size=10.5,
         color="1D4ED8",
     )
 
-    # Scope guard: this lab stops at Export / Save.  A future edit that
-    # slips an Arduino/Serial section back in should fail the build rather
-    # than silently producing the wrong manual.
+    # Scope guard: this lab stops at the end of Task 2 (Export / Save).
+    # A future edit that slips a Task 3 (firmware flashing / serial
+    # commands) back in should fail the build rather than silently
+    # producing the wrong manual.
     all_text = "\n".join(p.text for p in doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 all_text += "\n" + cell.text
-    for banned in ("Arduino", "Serial Monitor", "TFLite_Sign.ino", "TFLite_Sign"):
+    for banned in ("Task 3", "TFLite_Sign", "Copy the five files"):
         if banned.lower() in all_text.lower():
             raise RuntimeError(f"manual scope violation: contains {banned!r}")
-    if len(doc.inline_shapes) < 10:
-        raise RuntimeError(f"expected 10 figures, found {len(doc.inline_shapes)}")
+    our_figures = len(doc.inline_shapes) - inline_before_task2
+    if our_figures != 10:
+        raise RuntimeError(f"expected 10 Task 2 figures, found {our_figures}")
 
     LOCAL_DOCX.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(LOCAL_DOCX))
