@@ -166,6 +166,7 @@ def test_thin_one_sign_reads_a12_not_background():
         cfg["ocr_emnist_enabled"] = True
         cfg["ocr_emnist_per_class"] = 200
         cfg["ocr_background_enabled"] = True
+        cfg["sign_background_replace_ood"] = True
         cfg["ocr_background_samples"] = 120
         ctrl._train_worker("s", cfg)
         assert not (ctrl._train.get("s") or {}).get("error"), ctrl._train.get("s")

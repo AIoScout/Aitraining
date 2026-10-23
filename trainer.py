@@ -107,6 +107,13 @@ class TrainConfig:
     ocr_emnist_per_class: int = 200
     ocr_background_enabled: bool = True
     ocr_background_samples: int = 0          # 0 -> mirror ocr_emnist_per_class
+    # sign_ocr only: train the extra `_background` class AND let it replace
+    # the OOD Layers 1-3 as the per-slot rejector (the device's
+    # kSignBackgroundIsTheOnlyRejector).  OFF (the Car License default) trains
+    # only the target characters and uses the standard OOD gates + the 60 %
+    # match floor.  The trainer folds this into ocr_background_enabled for a
+    # sign run; OCR projects keep using ocr_background_enabled directly.
+    sign_background_replace_ood: bool = False
     # Transfer learning (ocr_trainer)
     ocr_transfer_learning: bool = True
     ocr_pretrain_per_class: int = 1200       # EMNIST samples/class for the cached backbone

@@ -17,7 +17,7 @@ The Start Page (`✨ Choose a project type`) has three cards:
 |---|---|---|---|---|
 | **Image Project** (`image`) | *Build an image classification model from images, webcam, or ESP32-P4 device stream. Great for classroom demos and local training for tinyML MCU deployment.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 96×96 default | `TFLite/` |
 | **🔠 OCR / Character Project** (`ocr`) | *Train a highly optimized INT8 character recognition model for ESP32. Features EMNIST dataset mixing, bit-exact Vertical Projection, and OOD rejection.* | `Get Started`, `Open Project (.tmproj)` | 28×28 glyph, `0–9 A–Z` + `_background` | `TFLite_OCR/` |
-| **🛑 Road Sign (3-Char)** (`sign_ocr`) | *Train a 3-character road-sign reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the sign in view.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 3 slots × 28×28 glyphs | `TFLite_Sign/` |
+| **🚗 Car License Project** (`sign_ocr`) | *Train a 3-character car-license reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the plate in view.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 3 slots × 28×28 glyphs | `TFLite_Sign/` |
 
 `Open Project (.tmproj)` opens a native file picker.  The archive manifest's
 `project_type` is authoritative: a file opened from any card is restored into
@@ -155,8 +155,8 @@ longer matches the last training.
 | Mix EMNIST into every class | on | on/off | Adds synthetic glyphs to every real class |
 | EMNIST split | `balanced` | `balanced`, `letters`, `digits` | Which EMNIST subset |
 | Synthetic per class | 200 | 0–5000, step 10 | EMNIST glyphs added per class |
-| Background / noise class | on | on/off | Appends `_background` rejector |
-| Background crops | 0 | 0–5000, step 10 | 0 mirrors Synthetic per class |
+| Use `_background` noise class to replace OOD rejection (`#settingsUseBackgroundOod`) | **off** for Car License (`sign_ocr`), on for basic OCR | on/off | Car License ON: trains the extra `_background` class and exports `kSignBackgroundIsTheOnlyRejector = 1`. OFF: target characters only, OOD gates + 60 % floor, exports `0`. Basic OCR maps the same checkbox to `ocr_background_enabled`. |
+| Background crops | 0 | 0–5000, step 10 | 0 mirrors Synthetic per class; used only when the toggle above is ON |
 | Fine-tune pre-trained backbone | on | on/off | Two-stage transfer learning |
 | Pre-train samples / class | 1200 | 100–6000, step 100 | Backbone warm-up corpus |
 | Pre-train epochs | 4 | 1–100 | Backbone warm-up |
@@ -179,7 +179,11 @@ Under the hood:
 - **EMNIST mixing** rebuilds a mixed dataset at `img_size`: per-class EMNIST
   glyphs are polarity-aligned to the capture convention, isolated and
   centered (no segmentation), shuffled with the real captures; the optional
-  `_background` class receives random non-glyph crops.
+  `_background` class receives random non-glyph crops.  In a Car License
+  project the class list is locked to the unique target characters — stale
+  `Class 1`/`Class 2` folders are deleted from `dataset/`,
+  `.tm_processed_cache/` and `.tm_ocr_mixed/` before mixing (the EMNIST
+  mapper would otherwise fill them and turn them into real labels).
 - **Transfer learning** caches one EMNIST-pretrained backbone keyed by
   architecture, split, convention and polarity.  Phase 1 trains a fresh
   `N+1` classification head with the backbone frozen; phase 2 unfreezes the

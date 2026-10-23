@@ -54,6 +54,59 @@ NORMALISE_CASES = [
 ]
 
 
+def assert_background_ood_toggle_defaults_off_and_syncs(page):
+    """#settingsUseBackgroundOod: OFF by default for Car License, ON for OCR.
+
+    The same checkbox backs `sign_background_replace_ood` in a sign project
+    and `ocr_background_enabled` in a basic OCR project.  It must write both
+    so training and export cannot disagree about which rejector is active.
+    """
+    page.evaluate(
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            sign_background_replace_ood: false,
+            ocr_background_enabled: true
+          });
+          syncAdvancedInlineInputs();
+        }"""
+    )
+    assert page.evaluate("!!document.getElementById('settingsUseBackgroundOod')")
+    assert page.evaluate(
+        "document.getElementById('settingsUseBackgroundOod').checked"
+    ) is False, "sign_ocr must default the background/OOD replacement OFF"
+
+    page.evaluate(
+        """() => {
+          const el = document.getElementById('settingsUseBackgroundOod');
+          el.checked = true;
+          el.dispatchEvent(new Event('change', {bubbles: true}));
+        }"""
+    )
+    page.wait_for_timeout(50)
+    got = page.evaluate(
+        """() => ({
+          sign: !!STATE.train_cfg.sign_background_replace_ood,
+          ocr: !!STATE.train_cfg.ocr_background_enabled
+        })"""
+    )
+    assert got == {"sign": True, "ocr": True}, got
+
+    # A basic OCR project reads the same checkbox through its own field.
+    page.evaluate(
+        """() => {
+          STATE.project_type = 'ocr';
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            ocr_background_enabled: true
+          });
+          syncAdvancedInlineInputs();
+        }"""
+    )
+    assert page.evaluate(
+        "document.getElementById('settingsUseBackgroundOod').checked"
+    ) is True
+
+
 def assert_normalisation_matches_python(page):
     """The JS mirror must agree with ocr_preprocess on every case."""
     js = page.evaluate(
@@ -880,6 +933,7 @@ def main() -> int:
             run("seeder fills empty classes", assert_seeder_button_fills_empty_classes, page)
             run("auto-seed fills new empty class", assert_auto_seed_fills_a_new_empty_class, page)
             run("sync_ocr carries auto-fill state", assert_sync_ocr_carries_autofill_state, page)
+            run("background/OOD toggle defaults OFF and syncs", assert_background_ood_toggle_defaults_off_and_syncs, page)
 
             browser.close()
 

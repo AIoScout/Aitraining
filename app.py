@@ -1314,7 +1314,7 @@ def _tm_notice_opened_project(path: Path, state: Any, project_type: str) -> None
 _TM_PROJECT_TYPE_LABELS = {
     "image": "Image Project",
     "ocr": "OCR / Character Project",
-    "sign_ocr": "Road Sign (3-Char) Project",
+    "sign_ocr": "🚗 Car License Project",
     "image_classified_import": "Classified Import",
 }
 
@@ -1544,10 +1544,10 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">🛑 Road Sign (3-Char)</h3>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">🚗 Car License Project</h3>
             <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
             </div>
-            <p>Train a 3-character road-sign reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the sign in view.</p>
+            <p>Train a 3-character car-license reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the plate in view.</p>
             </div>
             </div>
             ''').strip(),
@@ -5028,9 +5028,9 @@ def _render_tm_old_frontend_html(
             <div class="adv-help" id="advOcrMixHelp">EMNIST glyphs are already isolated and centred, so they bypass segmentation and are polarity-aligned to the capture convention before scaling.</div>
             <div class="train-adv-row" id="advOcrSplitRow"><span>EMNIST split <span class="tm-help" data-tooltip="Which EMNIST character set to sample from (ByClass, ByMerge, Letters, Digits, MNIST).">?</span></span><select id="advOcrSplit">{emnist_split_options}</select></div>
             <div class="train-adv-row" id="advOcrPerClassRow"><span>Synthetic per class <span class="tm-help" data-tooltip="Extra EMNIST glyphs added per class to balance and enlarge the training set.">?</span></span><input id="advOcrPerClass" type="number" min="0" max="5000" step="10"/></div>
-            <div class="train-adv-row"><span>Background / noise class <span class="tm-help" data-tooltip="Adds a catch-all background class so the model learns to reject non-sign crops.">?</span></span><input id="advOcrBackground" type="checkbox"/></div>
-            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops <span class="tm-help" data-tooltip="Number of random background/noise crops used to train the rejector class.">?</span></span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
-            <div class="adv-help">0 mirrors the per-class count. The extra N+1 class is named <b>{BACKGROUND_CLASS_NAME}</b> and teaches the model to reject OOD crops.</div>
+            <div class="train-adv-row" id="advOcrBackgroundRow"><span>Use <b>_background</b> noise class to replace OOD rejection <span class="tm-help" data-tooltip="OFF (the Car License default): train only the target character classes and reject non-sign crops with the standard OOD gates (sign %, max prob, entropy) plus the match-probability floor. ON: train an extra synthetic _background class and let it be the only per-slot rejector (kSignBackgroundIsTheOnlyRejector = 1 on export).">?</span></span><input id="settingsUseBackgroundOod" type="checkbox"/></div>
+            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops <span class="tm-help" data-tooltip="Number of random background/noise crops used to train the rejector class. Used only when the _background toggle above is ON.">?</span></span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
+            <div class="adv-help">0 mirrors the per-class count. With the toggle OFF a Car License model has exactly the target characters as classes (e.g. A, 1, 2) and no <b>{BACKGROUND_CLASS_NAME}</b> output; with it ON the extra N+1 class named <b>{BACKGROUND_CLASS_NAME}</b> teaches the model to reject OOD crops directly.</div>
             <div class="train-adv-sub">Transfer learning</div>
             <div class="train-adv-row"><span>Fine-tune pre-trained backbone <span class="tm-help" data-tooltip="Uses a pre-trained EMNIST backbone and fine-tunes it on your data instead of training from scratch.">?</span></span><input id="advOcrTransfer" type="checkbox"/></div>
             <div class="train-adv-row"><span>Pre-train samples / class <span class="tm-help" data-tooltip="Samples per class used to warm up the backbone before the head is attached.">?</span></span><input id="advOcrPretrainN" type="number" min="100" max="6000" step="100"/></div>
@@ -5138,7 +5138,7 @@ def _render_tm_old_frontend_html(
               </select>
             </div>
             <div id="advReadingOrderRow" class="train-adv-row" style="display:none">
-              <span>Sign Reading Direction <span class="tm-help" data-tooltip="Which way the characters on a road sign are read. Left to Right for signs like &quot;L 50&quot;; Right to Left for signs whose glyphs run the other way, such as Arabic or Hebrew signage.">?</span></span>
+              <span>Sign Reading Direction <span class="tm-help" data-tooltip="Which way the characters on a license plate are read. Left to Right for plates like &quot;L 50&quot;; Right to Left for plates whose glyphs run the other way, such as Arabic or Hebrew signage.">?</span></span>
               <select id="advReadingOrder">
                 <option value="ltr">Left to Right (L ➔ R)</option>
                 <option value="rtl">Right to Left (R ➔ L)</option>
@@ -5916,6 +5916,7 @@ function restoreTrainCfgFromStorage() {{
     }}
     if ('ocr_emnist_per_class' in data) next.ocr_emnist_per_class = clampInt(data.ocr_emnist_per_class, 0, 5000, nullish(prev.ocr_emnist_per_class, 200));
     if ('ocr_background_enabled' in data) next.ocr_background_enabled = !!data.ocr_background_enabled;
+    if ('sign_background_replace_ood' in data) next.sign_background_replace_ood = !!data.sign_background_replace_ood;
     if ('ocr_background_samples' in data) next.ocr_background_samples = clampInt(data.ocr_background_samples, 0, 5000, nullish(prev.ocr_background_samples, 0));
     if ('ocr_transfer_learning' in data) next.ocr_transfer_learning = !!data.ocr_transfer_learning;
     if ('ocr_pretrain_per_class' in data) next.ocr_pretrain_per_class = clampInt(data.ocr_pretrain_per_class, 100, 6000, nullish(prev.ocr_pretrain_per_class, 1200));
@@ -12539,12 +12540,20 @@ function syncAdvancedInlineInputs() {{
   set('advOcrFinetuneLr', nullish(cfg.ocr_finetune_lr, 0.0002));
   set('advOcrUnfreeze', nullish(cfg.ocr_unfreeze_blocks, 1));
   setBool('advOcrEmnist', nullish(cfg.ocr_emnist_enabled, true));
-  setBool('advOcrBackground', nullish(cfg.ocr_background_enabled, true));
+  // One toggle, two backing fields: a Car License project owns the explicit
+  // "use _background INSTEAD of OOD" setting (default OFF); a basic OCR
+  // project keeps its existing background-class switch (default ON).
+  setBool(
+    'settingsUseBackgroundOod',
+    isSignOcrProject()
+      ? !!nullish(cfg.sign_background_replace_ood, false)
+      : !!nullish(cfg.ocr_background_enabled, true)
+  );
   setBool('advOcrTransfer', nullish(cfg.ocr_transfer_learning, true));
   syncOcrPanelVisibility();
   refreshRecHints();
 }}
-const OCR_BOOL_KEYS = ['ocr_emnist_enabled', 'ocr_background_enabled', 'ocr_transfer_learning'];
+const OCR_BOOL_KEYS = ['ocr_emnist_enabled', 'ocr_background_enabled', 'sign_background_replace_ood', 'ocr_transfer_learning'];
 const OCR_STRING_KEYS = ['ocr_emnist_split', 'reading_order'];
 const OCR_FLOAT_KEYS = ['ocr_head_lr', 'ocr_finetune_lr'];
 function setTrainCfgField(key, rawValue) {{
@@ -12664,7 +12673,10 @@ function syncOcrPanelVisibility() {{
   show('advOcrSplitRow', ocr && mix);
   show('advOcrPerClassRow', ocr && mix);
   show('advOcrMixHelp', ocr && mix);
-  show('advOcrBackgroundNRow', ocr && !!nullish(cfg.ocr_background_enabled, true));
+  const useBackgroundOod = isSignOcrProject()
+    ? !!nullish(cfg.sign_background_replace_ood, false)
+    : !!nullish(cfg.ocr_background_enabled, true);
+  show('advOcrBackgroundNRow', ocr && useBackgroundOod);
 }}
 function renderAdvancedPanel() {{
   const panel = document.getElementById('trainAdvPanel');
@@ -12791,7 +12803,20 @@ function bindAdvancedInlineHandlers() {{
   // still carries its value into the train payload.
   bindSelect('advReadingOrder', 'reading_order');
   bindNum('advOcrPerClass', 'ocr_emnist_per_class');
-  bindCheck('advOcrBackground', 'ocr_background_enabled');
+  // The toggle writes BOTH fields.  `sign_background_replace_ood` is what a
+  // Car License training/export reads; `ocr_background_enabled` keeps a
+  // basic-OCR project's background switch in sync and is what the mixed-set
+  // builder ultimately consumes.  Writing both here is what makes one
+  // checkbox mean the same thing in either workspace.
+  const bgOodToggle = document.getElementById('settingsUseBackgroundOod');
+  if (bgOodToggle) {{
+    bgOodToggle.addEventListener('change', (e) => {{
+      const on = !!e.target.checked;
+      setTrainCfgField('sign_background_replace_ood', on);
+      setTrainCfgField('ocr_background_enabled', on);
+      syncAdvancedInlineInputs();
+    }});
+  }}
   bindNum('advOcrBackgroundN', 'ocr_background_samples');
   bindCheck('advOcrTransfer', 'ocr_transfer_learning');
   bindNum('advOcrPretrainN', 'ocr_pretrain_per_class');
@@ -14289,7 +14314,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<details class="tm-tour-details"><summary>📖 View all 9 hyperparameters</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table"><tr><th>Parameter</th><th>What it controls</th></tr>' +
         '<tr><td><code>Image Size</code></td><td>Square input resolution; must equal the MCU <code>IMG_SIZE</code>.</td></tr>' +
-        '<tr><td><code>Color Mode</code></td><td>1 channel is roughly 3× cheaper; road signs need no colour.</td></tr>' +
+        '<tr><td><code>Color Mode</code></td><td>1 channel is roughly 3× cheaper; license plates need no colour.</td></tr>' +
         '<tr><td><code>Batch Size</code></td><td>How many samples make up one gradient step.</td></tr>' +
         '<tr><td><code>Epochs</code></td><td>Full passes over the training data.</td></tr>' +
         '<tr><td><code>Validation Split</code></td><td>Fraction held out to produce an honest accuracy score.</td></tr>' +
@@ -14723,17 +14748,17 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<li>Transfer-learn from EMNIST, with the ink polarity matching your captures.</li>' +
         '<li>Preview a single glyph, then export the 5 files into <code>TFLite_OCR.ino</code>.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📖</span><span>Re-open this guide any time from <b>📖 Tutorial</b>. The road-sign workflow has its own tour.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📖</span><span>Re-open this guide any time from <b>📖 Tutorial</b>. The Car License workflow has its own tour.</span></div>'
     }}
   ];
 
-  /* ═══ Curriculum 3 · Road Sign, 3 characters (16 steps) ══════════════
-     A labelled SEQUENCE: find the sign, split it into three slots, read
+  /* ═══ Curriculum 3 · Car License, 3 characters (16 steps) ═══════════
+     A labelled SEQUENCE: find the plate, split it into three slots, read
      each slot as a glyph, then verify the whole reading. */
   var SIGN_OCR_STEPS = [
     {{
       chapter: 1,
-      title: 'Your Road Sign Verification, End to End',
+      title: 'Your Car License Verification, End to End',
       /* Step 0 is the big picture rather than a lesson, so it carries
          `overview` and a `stages` list instead of a spotlight: the card
          floats centred over a dimmed workspace and its one button starts
@@ -14830,7 +14855,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       checkpoint: 'Click "Edit" to open the Sample Worktable',
       body: '<p>Click <b>Edit</b> on a character card to open the <b>Sample Worktable</b> for that character.</p>' +
         '<ul>' +
-        '<li>A road sign is a <b>fixed target</b>, so pinning this character&rsquo;s glyph with <b>Manual ROI</b> is often more reliable than auto-search.</li>' +
+        '<li>A license plate is a <b>fixed target</b>, so pinning this character&rsquo;s glyph with <b>Manual ROI</b> is often more reliable than auto-search.</li>' +
         '<li><b>Dark Thr</b> / <b>Lum Thr</b> isolate the dark glyphs from the plate and the background.</li>' +
         '</ul>' +
         '<p>The next two checkpoints walk the worktable and then close it again.</p>'
@@ -15005,7 +15030,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: null,
       fallback: [],
       placement: 'auto',
-      body: '<p>That is the whole <b>3-character road sign</b> loop:</p>' +
+      body: '<p>That is the whole <b>3-character car license</b> loop:</p>' +
         '<ul>' +
         '<li>Declare the sign in the three slots, then collect samples of the sign as a whole.</li>' +
         '<li>Pin the plate with a Manual ROI, isolate each slot, and train the tiny glyph classifier.</li>' +
@@ -16610,7 +16635,7 @@ def _render_ocr_project_page() -> None:
 
 
 def _render_sign_ocr_project_page() -> None:
-    """Road Signal (3-character) workspace.
+    """Car License (3-character) workspace.
 
     The third glyph project, and structurally the second one: the same 28x28
     character front-end, the same per-character class cards, the same
@@ -16624,12 +16649,13 @@ def _render_sign_ocr_project_page() -> None:
     st.markdown(
         '''
         <div class="tm-start-panel" style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;">
-            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🛑🏷️ Road Sign Project (3-Char)</h1>
+            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🚗 Car License Project</h1>
             <p class="tm-start-panel-sub" style="margin:0;max-width:860px;line-height:1.6;color:#475569;font-size:15px;">
-                A sign is one frame holding three characters in a fixed reading order.
-                Set the target sequence, train one class per CHARACTER — a repeated
-                character is one class, not two — then point a camera at a sign and the
-                preview splits it into three slots and answers 🟢 YES or 🔴 NO.
+                A license plate is one frame holding three characters in a fixed
+                reading order. Set the target sequence, train one class per CHARACTER
+                — a repeated character is one class, not two — then point a camera at
+                the plate and the preview splits it into three slots and answers
+                🟢 YES or 🔴 NO.
             </p>
         </div>
         ''',

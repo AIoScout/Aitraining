@@ -670,6 +670,7 @@ class RecordController:
             cfg = self._configs.get(session_id)
             if cfg is None:
                 raise RuntimeError("missing config")
+            previous_type = str(getattr(cfg, "project_type", "") or "").strip().lower()
             updated = replace(
                 cfg,
                 project_type=str(cfg.project_type if project_type is None else project_type),
@@ -685,7 +686,24 @@ class RecordController:
             )
             self._configs[session_id] = updated
             _persist_webcam_choice(updated)
-            return updated
+        # Switching INTO a Car License project locks the class list to its
+        # target.  Done outside the lock because enforcement reads the
+        # config and writes tm_classes.json.  A project OPEN also lands here
+        # before the archive is copied, which is harmless: the reset that
+        # follows wipes the workspace anyway, and the real enforcement runs
+        # again after the archive's sequence is known.
+        if (
+            str(getattr(updated, "project_type", "") or "").strip().lower()
+            == PROJECT_TYPE_SIGN_OCR
+            and previous_type != PROJECT_TYPE_SIGN_OCR
+        ):
+            try:
+                seq = self._project_train_cfg(updated.dataset_root).get("sign_sequence")
+                if seq:
+                    self._enforce_sign_classes(session_id, seq)
+            except Exception:
+                pass
+        return updated
 
     def get_config(self, session_id: str) -> Optional["SessionConfig"]:
         with self._lock:
@@ -1142,6 +1160,10 @@ class RecordController:
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
                         match_min_prob=sign_match_min,
+                        ood_sign_pct_min=ood_sign_pct_min,
+                        ood_sign_pct_max=ood_sign_pct_max,
+                        ood_max_prob_min=ood_max_prob_min,
+                        ood_entropy_ratio_max=ood_entropy_ratio_max,
                         source=source,
                     )
                 else:
@@ -2610,6 +2632,87 @@ class RecordController:
         self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
         return classes
 
+    @staticmethod
+    def _sign_sequence_classes(sequence: Any) -> List[str]:
+        """The authoritative sign_ocr class list: unique target characters.
+
+        A Car License project has no class editor: its classes ARE the
+        characters of `sign_sequence`, in sequence order.  The '?' pad and
+        anything that is not one 0-9/A-Z character are not classes.
+        """
+        out: List[str] = []
+        for ch in normalize_sign_sequence(sequence):
+            text = str(ch or "").strip().upper()
+            if (
+                len(text) == 1
+                and text != SIGN_SEQUENCE_PAD
+                and re.fullmatch(r"[0-9A-Z]", text)
+                and text not in out
+            ):
+                out.append(text)
+        return out
+
+    def _purge_sign_artifact_dirs(
+        self, dataset_root: Path, keep: List[str]
+    ) -> None:
+        """Delete every class folder that is not one of `keep`.
+
+        The three roots that can hold a class are the raw dataset, the
+        processed cache and the mixed training set.  A stale "Class 1"/
+        "Class 2" left in ANY of them is dangerous: `map_class_to_char`
+        reads the trailing digit, so EMNIST injection fills the stale
+        folder and it becomes a REAL model label (often the one the target
+        digit should have owned).  Only directories are touched, hidden
+        names are skipped, and the comparison goes through the same
+        sanitiser the folders were created with.
+        """
+        wanted = {sanitize_class_name(str(n)).lower() for n in keep if str(n).strip()}
+        roots = (
+            Path(dataset_root),
+            self._processed_cache_dir(Path(dataset_root)),
+            Path(dataset_root).parent / ".tm_ocr_mixed",
+        )
+        for root in roots:
+            try:
+                if not root.exists():
+                    continue
+                children = list(root.iterdir())
+            except Exception:
+                continue
+            for child in children:
+                try:
+                    if not child.is_dir():
+                        continue
+                    name = child.name
+                    if name.startswith("."):
+                        continue
+                    if sanitize_class_name(name).lower() in wanted:
+                        continue
+                    shutil.rmtree(child, ignore_errors=True)
+                except Exception:
+                    continue
+
+    def _enforce_sign_classes(
+        self, session_id: str, sequence: Any
+    ) -> List[str]:
+        """Lock the class list and every class folder to the sign sequence.
+
+        Called when a sign project is opened, when its classes are synced
+        from the target bar, and at the start of training.  Returns the
+        authoritative class list; with no usable target it leaves the
+        project untouched (the training path refuses that case explicitly).
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        chars = self._sign_sequence_classes(sequence)
+        if not chars:
+            return self._classes_load(cfg.dataset_root)
+        classes = self._classes_sync_ocr(session_id=session_id, names=chars)
+        self._purge_sign_artifact_dirs(cfg.dataset_root, classes)
+        return classes
+
     def _classes_sync_ocr(self, session_id: str, names: List[Any]) -> List[str]:
         """Make the class list exactly the sign's characters, in sequence order.
 
@@ -2712,6 +2815,12 @@ class RecordController:
             class_preprocess=class_preprocess,
             sample_preprocess=sample_preprocess,
         )
+        # The list above is the authority.  Any folder on disk that is not
+        # one of its characters — including a stale "Class 1"/"Class 2" that
+        # was never in tm_classes.json — is a label waiting to be injected
+        # into the next training run, so remove it here as well as in
+        # _enforce_sign_classes().
+        self._purge_sign_artifact_dirs(cfg.dataset_root, keep)
         return list(keep)
 
     def _rename_class_storage(self, dataset_root: Path, old_name: str, new_name: str) -> None:
@@ -3096,6 +3205,22 @@ class RecordController:
         except (TypeError, ValueError):
             sign_match_min_prob = 0.60
         sign_match_min_prob = max(0.0, min(1.0, sign_match_min_prob))
+        # Which rejector did THIS run train?  A `_background` class can only
+        # replace OOD if it actually exists in the exported label list.  An
+        # old run with no recorded flag used it as the only rejector (the
+        # pre-toggle device behaviour), so preserve that for legacy exports.
+        has_background_class = any(
+            str(x).strip().lower() == "_background" for x in labels
+        )
+        meta_bg_replace = (
+            meta.get("sign_background_replace_ood")
+            if isinstance(meta, dict) else None
+        )
+        sign_background_is_only_rejector = (
+            bool(meta_bg_replace)
+            if meta_bg_replace is not None
+            else bool(has_background_class)
+        ) and has_background_class
         # Map each target character to its class index the same way the
         # device's match rule compares: label.upper() == char.upper().  -1
         # means "no such class" and the device treats that slot as never
@@ -3122,6 +3247,15 @@ class RecordController:
                 + ", ".join(str(int(i)) for i in sign_class_indices) + "};",
                 "constexpr int kSignReadingOrder = " + ("1" if reading_order == "rtl" else "0") + ";",
                 "constexpr float kSignMatchMinProb = " + f"{sign_match_min_prob:.6f}f;",
+                "// 1 = the model's own _background class is the only rejector",
+                "//     (OOD Layers 1-3 are bypassed on the device).",
+                "// 0 = no _background class; the standard OOD gates + the",
+                "//     per-slot kSignMatchMinProb floor do the rejecting.",
+                "#define TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR "
+                + ("1" if sign_background_is_only_rejector else "0"),
+                "constexpr bool kSignBackgroundIsTheOnlyRejector = "
+                + ("true" if sign_background_is_only_rejector else "false")
+                + ";",
                 "",
             ]
         model_settings_h = "\n".join(
@@ -3644,6 +3778,24 @@ class RecordController:
                 state_cfg["project_type"] = resolved_type
             if resolved_size:
                 state_cfg["img_size"] = resolved_size
+            # A sign archive's target is its class list.  Prune any class
+            # folder the archive's own target does not name BEFORE the state
+            # payload reports counts/labels — a stale "Class 1" here would
+            # otherwise be injected with EMNIST samples at the next training
+            # and become a real model output.
+            if resolved_type == PROJECT_TYPE_SIGN_OCR:
+                seq_src = state_cfg.get("sign_sequence")
+                if not seq_src:
+                    seq_src = self._project_train_cfg(
+                        dataset_root, project_state=project_state
+                    ).get("sign_sequence")
+                try:
+                    self._enforce_sign_classes(session_id, seq_src)
+                    # The enforcement may have normalized/added classes;
+                    # report the post-prune list to the SPA.
+                    project_state["classes"] = self._classes_load(dataset_root)
+                except Exception:
+                    pass
             project_state["project_format"] = {
                 **header,
                 "missing_train_cfg_fields": missing,
@@ -4600,11 +4752,26 @@ class RecordController:
         interpreter.allocate_tensors()
         input_details = interpreter.get_input_details()[0]
         output_details = interpreter.get_output_details()[0]
+        has_background_class = any(
+            str(x).strip().lower() == "_background" for x in labels
+        )
+        # The setting lives in the RUN meta, not the live train_cfg: toggling
+        # it after training must not reinterpret the model that was actually
+        # trained.  Legacy runs (no field) that carry a `_background` class
+        # used it as the only rejector — the old hard-coded device behaviour.
+        bg_replace_raw = meta.get("sign_background_replace_ood") if isinstance(meta, dict) else None
+        sign_background_replace_ood = (
+            bool(bg_replace_raw)
+            if bg_replace_raw is not None
+            else bool(has_background_class)
+        )
         cur = {
             "tflite_path": str(tflite_path),
             "tflite_mtime": mtime,
             "model_source": str(model_source),
             "labels": list(labels),
+            "has_background_class": bool(has_background_class),
+            "sign_background_replace_ood": bool(sign_background_replace_ood),
             "preprocess_mode": str(meta.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL) if isinstance(meta, dict) else PREPROCESS_MODE_AUTO_BY_LABEL,
             "crop_mode": str(meta.get("crop_mode") or CROP_MODE_CENTER) if isinstance(meta, dict) else CROP_MODE_CENTER,
             "manual_roi": normalize_manual_roi(meta.get("manual_roi")) if isinstance(meta, dict) else None,
@@ -5216,6 +5383,10 @@ class RecordController:
         bg_dark_thresh: Optional[int] = None,
         bg_lum_thresh: Optional[int] = None,
         match_min_prob: Optional[float] = None,
+        ood_sign_pct_min: Optional[float] = None,
+        ood_sign_pct_max: Optional[float] = None,
+        ood_max_prob_min: Optional[float] = None,
+        ood_entropy_ratio_max: Optional[float] = None,
         source: str = "",
     ) -> Dict[str, Any]:
         """Read a whole road sign: locate, split, one inference per glyph.
@@ -5241,12 +5412,41 @@ class RecordController:
 
         model = self._preview_load_model(session_id=session_id)
         labels: List[str] = list(model.get("labels") or [])
+        has_background_class = any(
+            str(x).strip().lower() == BACKGROUND_CLASS_NAME.lower()
+            for x in labels
+        )
+        # The run's own rejection policy.  When a `_background` class is the
+        # only rejector, Layers 1-3 are bypassed (the device does the same);
+        # otherwise the standard OOD gates compose with the per-slot match
+        # rule and the probability floor.  A model dict with no explicit flag
+        # predates the toggle: having a background class is what old runs
+        # used, so preserve that rather than silently changing their verdicts.
+        raw_bg_replace = model.get("sign_background_replace_ood")
+        background_is_only_rejector = (
+            bool(raw_bg_replace)
+            if raw_bg_replace is not None
+            else bool(has_background_class)
+        ) and has_background_class
         shape_raw = model["input_details"].get("shape")
         shape = tuple(int(x) for x in (shape_raw if shape_raw is not None else []))
         if len(shape) != 4:
             raise RuntimeError("unsupported input shape")
         _, h, w, c = shape
         channels = int(c) if int(c) > 0 else 1
+
+        SIGN_PCT_MIN = float(ood_sign_pct_min if ood_sign_pct_min is not None else 0.3)
+        SIGN_PCT_MAX = float(ood_sign_pct_max if ood_sign_pct_max is not None else 70.0)
+        MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.60)
+        ENTROPY_RATIO_MAX = float(
+            ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.70
+        )
+        SIGN_PCT_MIN = max(0.0, min(100.0, SIGN_PCT_MIN))
+        SIGN_PCT_MAX = max(0.0, min(100.0, SIGN_PCT_MAX))
+        MAX_PROB_MIN = max(0.0, min(1.0, MAX_PROB_MIN))
+        ENTROPY_RATIO_MAX = max(0.0, min(1.0, ENTROPY_RATIO_MAX))
+        if SIGN_PCT_MIN > SIGN_PCT_MAX:
+            SIGN_PCT_MIN, SIGN_PCT_MAX = SIGN_PCT_MAX, SIGN_PCT_MIN
 
         # The luminance window.  A caller-supplied value (the live preview's
         # Dark/Lum sliders) wins; otherwise the sign's own stored record;
@@ -5315,6 +5515,20 @@ class RecordController:
             dark_thr=floor,
             clean_border=True,
         )
+        # OOD Layer 1's input: the cleaned ink share of the sign ROI.  Same
+        # number the image project calls sign_pct, so spmin/spmax mean the
+        # same thing in both workspaces.
+        ink = reading.get("ink")
+        ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
+        sign_pct = (
+            float(ink_arr.mean() * 100.0)
+            if ink_arr is not None and ink_arr.size
+            else 0.0
+        )
+        sign_pct_in_band = (
+            background_is_only_rejector
+            or (SIGN_PCT_MIN <= sign_pct <= SIGN_PCT_MAX)
+        )
 
         def _to_full_box(box: Any) -> Any:
             """Slot/sign box from the ROI-local frame back to frame pixels."""
@@ -5331,6 +5545,7 @@ class RecordController:
         slots: List[Dict[str, Any]] = []
         slot_pngs: List[bytes] = []
         all_match = bool(labels)
+        ood_reasons: List[str] = []
         for i, slot in enumerate(reading.get("slots") or []):
             glyph = np.asarray(slot.get("glyph"), dtype=np.uint8)
             target = str(slot.get("char") or "")
@@ -5355,6 +5570,33 @@ class RecordController:
                 if 0 <= top_i < len(labels):
                     label = str(labels[top_i])
             is_background = label.startswith("_") or label == BACKGROUND_CLASS_NAME
+            slot_max_prob = 0.0
+            slot_entropy_ratio = 1.0
+            slot_ood = False
+            slot_ood_reason = ""
+            if raw_out is not None and raw_out.size:
+                slot_max_prob, slot_entropy_ratio = _raw_ood_metrics(raw_out)
+                if not background_is_only_rejector:
+                    # Standard OOD Layers 1-3, mirroring _preview_predict and
+                    # the exported device thresholds.
+                    if not sign_pct_in_band:
+                        slot_ood = True
+                        slot_ood_reason = (
+                            f"sign_pct={sign_pct:.1f}% outside "
+                            f"[{SIGN_PCT_MIN:.1f},{SIGN_PCT_MAX:.1f}]"
+                        )
+                    elif slot_max_prob < MAX_PROB_MIN:
+                        slot_ood = True
+                        slot_ood_reason = (
+                            f"max_prob={slot_max_prob:.3f} < {MAX_PROB_MIN:.2f}"
+                        )
+                    elif slot_entropy_ratio > ENTROPY_RATIO_MAX:
+                        slot_ood = True
+                        slot_ood_reason = (
+                            f"entropy_ratio={slot_entropy_ratio:.3f} > "
+                            f"{ENTROPY_RATIO_MAX:.2f}"
+                        )
+            in_distribution = not slot_ood
             matched = bool(
                 labels
                 and not is_background
@@ -5362,8 +5604,11 @@ class RecordController:
                 and label.upper() == target.upper()
                 and prob >= SLOT_MIN
                 and bool(slot.get("ok"))
+                and in_distribution
             )
             all_match = all_match and matched
+            if slot_ood:
+                ood_reasons.append(f"slot {i + 1}: {slot_ood_reason}")
             full_box = _to_full_box(slot.get("box"))
             full_box_norm = None
             if full_box is not None and full_w > 0 and full_h > 0:
@@ -5381,6 +5626,10 @@ class RecordController:
                     "prob": float(prob),
                     "match": bool(matched),
                     "background": bool(is_background),
+                    "ood": bool(slot_ood),
+                    "ood_reason": str(slot_ood_reason),
+                    "max_prob": float(slot_max_prob),
+                    "entropy_ratio": float(slot_entropy_ratio),
                     "empty": bool(slot.get("empty", True)),
                     "box": full_box,
                     "box_norm": full_box_norm,
@@ -5421,13 +5670,6 @@ class RecordController:
             float(rx2) / float(full_w) if full_w > 0 else 1.0,
             float(ry2) / float(full_h) if full_h > 0 else 1.0,
         ]
-        ink = reading.get("ink")
-        ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
-        sign_pct = (
-            float(ink_arr.mean() * 100.0)
-            if ink_arr is not None and ink_arr.size
-            else 0.0
-        )
         # User-facing threshold view: inside the Dark..Lum window is BLACK
         # ink; everything else is PURE WHITE.  This is what Orig / both
         # toggles show (with the ROI box on top); the model tensor is built
@@ -5456,11 +5698,11 @@ class RecordController:
             "crop_image_b64": base64.b64encode(raw_crop_png).decode("ascii"),
             "full_image_b64": base64.b64encode(full_png).decode("ascii"),
             "processed_variant": "sign-threshold",
-            "ood": False,
-            "ood_reason": "",
+            "ood": bool(ood_reasons),
+            "ood_reason": " | ".join(ood_reasons),
             "sign_pct": float(sign_pct),
             "max_prob": float(min((s["prob"] for s in slots), default=0.0)),
-            "entropy_ratio": 0.0,
+            "entropy_ratio": float(max((s["entropy_ratio"] for s in slots), default=0.0)),
             # ── the sign_ocr payload ────────────────────────────────────
             "sign_ocr": True,
             "sign_sequence": list(seq),
@@ -5670,6 +5912,52 @@ class RecordController:
         try:
             from trainer import TrainConfig, TrainResult, new_run_dir, train_and_export
 
+            project_type = str(
+                getattr(sess_cfg, "project_type", PROJECT_TYPE_IMAGE)
+                or PROJECT_TYPE_IMAGE
+            ).strip().lower()
+
+            # ── sign_ocr: the target sequence IS the class list ───────────
+            # A stale "Class 1"/"Class 2" directory is not inert: the EMNIST
+            # mapper reads its trailing digit and fills it, which turns it
+            # into a real model label (and takes the samples away from the
+            # target class).  Enforce the sequence BEFORE any cache rebuild,
+            # so the mixed set, labels.txt and the model output indices all
+            # come from exactly the characters the sign prints.
+            saved_train_cfg = self._project_train_cfg(sess_cfg.dataset_root)
+            sign_seq_src = cfg_dict.get("sign_sequence")
+            if sign_seq_src in (None, "", []):
+                sign_seq_src = saved_train_cfg.get("sign_sequence")
+            effective_sign_seq: Optional[List[str]] = None
+            if project_type == PROJECT_TYPE_SIGN_OCR:
+                # Keep the FULL sequence (a repeated A 1 A is one class but
+                # still three slots); dedupe only for the class list.
+                effective_sign_seq = normalize_sign_sequence(sign_seq_src)
+                sign_chars = self._sign_sequence_classes(effective_sign_seq)
+                if not sign_chars:
+                    raise ValueError(
+                        "Set the target sign sequence before training — its "
+                        "characters are the model's classes."
+                    )
+                self._enforce_sign_classes(session_id, sign_chars)
+                # Feature toggle: _background is the ONLY rejector when this
+                # is on; when off the model trains on the target characters
+                # alone and the standard OOD gates do the rejecting.  The
+                # default for a Car License project is OFF.
+                raw_bg_replace = cfg_dict.get("sign_background_replace_ood")
+                sign_background_replace_ood = (
+                    _is_truthy(raw_bg_replace)
+                    if raw_bg_replace is not None
+                    else False
+                )
+            else:
+                sign_background_replace_ood = False
+            background_enabled = (
+                sign_background_replace_ood
+                if project_type == PROJECT_TYPE_SIGN_OCR
+                else _is_truthy(cfg_dict.get("ocr_background_enabled", True))
+            )
+
             project_classes = self._classes_load(sess_cfg.dataset_root)
             project_class_preprocess = self._class_preprocess_load(sess_cfg.dataset_root)
             project_sample_preprocess = self._sample_preprocess_load(sess_cfg.dataset_root)
@@ -5717,15 +6005,19 @@ class RecordController:
                 auto_adjust_batch_and_epochs=bool(cfg_dict.get("auto_adjust_batch_and_epochs", True)),
                 # The session owns the project type; a stray cfg_dict must not
                 # be able to train an OCR workspace with the sign transform.
-                project_type=str(getattr(sess_cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                project_type=project_type,
                 # OCR: dataset mixing + transfer learning.  Read only by the
                 # OCR strategy, so an image project is unaffected by their
                 # presence (and by their absence).
                 ocr_emnist_enabled=bool(cfg_dict.get("ocr_emnist_enabled", True)),
                 ocr_emnist_split=str(cfg_dict.get("ocr_emnist_split") or "balanced"),
                 ocr_emnist_per_class=int(cfg_dict.get("ocr_emnist_per_class") or 200),
-                ocr_background_enabled=bool(cfg_dict.get("ocr_background_enabled", True)),
+                # sign_ocr derives this from the explicit "use _background as
+                # the only rejector" toggle (default OFF); OCR keeps its own
+                # background-class checkbox.
+                ocr_background_enabled=background_enabled,
                 ocr_background_samples=int(cfg_dict.get("ocr_background_samples") or 0),
+                sign_background_replace_ood=sign_background_replace_ood,
                 ocr_transfer_learning=bool(cfg_dict.get("ocr_transfer_learning", True)),
                 ocr_pretrain_per_class=int(cfg_dict.get("ocr_pretrain_per_class") or 1200),
                 ocr_pretrain_epochs=int(cfg_dict.get("ocr_pretrain_epochs") or 4),
@@ -5739,10 +6031,7 @@ class RecordController:
                 # an export (or a reopened project) can recover what THIS
                 # model was trained to read instead of guessing from the
                 # current editor state.
-                sign_sequence=(
-                    normalize_sign_sequence(cfg_dict.get("sign_sequence"))
-                    if cfg_dict.get("sign_sequence") is not None else None
-                ),
+                sign_sequence=effective_sign_seq,
                 reading_order=str(cfg_dict.get("reading_order") or "ltr"),
                 auto_seed_emnist_samples=bool(auto_seed_samples),
             )
@@ -5809,6 +6098,12 @@ class RecordController:
                 "img_size": int(cfg.img_size),
                 "project_type": str(cfg.project_type),
                 "color_mode": str(cfg.color_mode),
+                # Rejection policy actually used by this run.  The sign
+                # preview and the exporter read these from the run meta so a
+                # later toggle change cannot retroactively reinterpret a
+                # model that was trained differently.
+                "ocr_background_enabled": bool(cfg.ocr_background_enabled),
+                "sign_background_replace_ood": bool(cfg.sign_background_replace_ood),
                 "preprocess_mode": str(cfg.preprocess_mode),
                 "crop_mode": str(cfg.crop_mode or CROP_MODE_AUTO_SEARCH),
                 "manual_roi": list(cfg.manual_roi) if cfg.manual_roi is not None else None,
@@ -5850,6 +6145,8 @@ class RecordController:
                         {
                             "sign_sequence": cfg.sign_sequence,
                             "reading_order": cfg.reading_order,
+                            "sign_background_replace_ood": bool(cfg.sign_background_replace_ood),
+                            "ocr_background_enabled": bool(cfg.ocr_background_enabled),
                             "auto_seed_emnist_samples": bool(cfg.auto_seed_emnist_samples),
                         },
                     )
@@ -6835,6 +7132,36 @@ def _send_png(req: BaseHTTPRequestHandler, data: bytes, cors: bool = False, cach
     except (BrokenPipeError, ConnectionResetError, OSError):
         # Client disconnected mid-response — ignore silently.
         pass
+
+
+def _raw_ood_metrics(raw_out: np.ndarray) -> Tuple[float, float]:
+    """(max_prob, entropy_ratio) from the raw device-mirror output.
+
+    The same float32 arithmetic and op order as _preview_predict and
+    TFLite.ino: raw_best / sum(raw) and natural-log entropy over
+    raw_i / sum(raw), normalised by ln(N) and clamped to 1.0.  Module-level
+    so the sign preview and the image preview (and their test fakes) share
+    one implementation.
+    """
+    arr = np.asarray(raw_out)
+    total = int(np.sum(arr))
+    if total <= 0:
+        total = 1
+    max_prob = float(np.float32(np.max(arr)) / np.float32(total))
+    f_total = np.float32(total)
+    entropy = np.float32(0.0)
+    for value in arr:
+        p = np.float32(value) / f_total
+        if float(p) <= 1e-6:
+            continue
+        entropy = entropy - p * np.float32(math.log(float(p)))
+    n_classes = max(1, int(arr.size))
+    max_entropy = float(math.log(n_classes)) if n_classes > 1 else 1.0
+    entropy_ratio = (
+        float(np.float32(entropy) / np.float32(max_entropy))
+        if max_entropy > 0 else 1.0
+    )
+    return max_prob, min(1.0, entropy_ratio)
 
 
 def _bytes_io(data: bytes):
