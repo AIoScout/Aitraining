@@ -724,6 +724,10 @@ class RecordController:
             return None
         import cv2
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        cfg = self.get_config(session_id) if session_id else None
+        frame = _center_crop_webcam_square(
+            frame, getattr(cfg, "project_type", "") if cfg is not None else ""
+        )
         img = Image.fromarray(frame)
         return _to_png_bytes(img)
 
@@ -4290,7 +4294,10 @@ class RecordController:
         bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
         thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
         pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
-        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+        # Dark=0 means "no lower bound": nudging it to 1 would drop pure
+        # black glyph pixels and fragment a thin '1'.  Keep 0 as the
+        # inclusive lower edge of the user's window.
+        floor = (0 if bg_dark <= 0 else min(255, bg_dark + 1)) if thresholds_adjusted else 0
 
         result = preprocess_glyph(
             gray,
@@ -4314,11 +4321,11 @@ class RecordController:
         #                    the model consumes)
         #   crop_png      -> the pre-decision region (what the camera saw)
         box = result.get("box")
+        # Manual ROI: the user's crop IS the view, so show the whole manual
+        # ROI mask.  Auto: show the segmented glyph box.
         ink = result.get("ink")
         if ink is not None:
             ink_arr = np.asarray(ink, dtype=bool)
-            # Manual ROI: the user's crop IS the view.  Auto: show the
-            # segmented glyph box, never the whole frame.
             view = ink_arr
             if mode != PREPROCESS_MODE_MANUAL_ROI and box is not None:
                 ix1, iy1, ix2, iy2 = (int(v) for v in box)
@@ -5258,7 +5265,10 @@ class RecordController:
         bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
         thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
         pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
-        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+        # Dark=0 means "no lower bound": nudging it to 1 would drop pure
+        # black glyph pixels and fragment a thin '1'.  Keep 0 as the
+        # inclusive lower edge of the user's window.
+        floor = (0 if bg_dark <= 0 else min(255, bg_dark + 1)) if thresholds_adjusted else 0
 
         src_img = Image.open(_bytes_io(png)).convert("L")
         gray = np.asarray(src_img, dtype=np.uint8)
@@ -5430,6 +5440,7 @@ class RecordController:
             processed_display = full_display[ry1:ry2, rx1:rx2].copy()
         full_png = _to_png_bytes(Image.fromarray(full_display, mode="L"))
         processed_png = _to_png_bytes(Image.fromarray(processed_display, mode="L"))
+        raw_crop_png = _to_png_bytes(Image.fromarray(roi_gray, mode="L"))
 
         return {
             "labels": slot_labels,
@@ -5442,7 +5453,7 @@ class RecordController:
             "roi_method": str(roi_info.get("method") or ""),
             "model_source": str(model.get("model_source") or "latest"),
             "processed_image_b64": base64.b64encode(processed_png).decode("ascii"),
-            "crop_image_b64": "",
+            "crop_image_b64": base64.b64encode(raw_crop_png).decode("ascii"),
             "full_image_b64": base64.b64encode(full_png).decode("ascii"),
             "processed_variant": "sign-threshold",
             "ood": False,
@@ -6336,6 +6347,11 @@ class RecordController:
                     read_failures = 0
                     ever_framed = True
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # 1:1 on ingest for the glyph projects (see the helper):
+                    # the stage is square and the device frame is square.
+                    frame = _center_crop_webcam_square(
+                        frame, getattr(cfg, "project_type", "")
+                    )
                     preview_frame = frame
                     try:
                         h, w = frame.shape[:2]
@@ -6500,6 +6516,9 @@ class RecordController:
                     time.sleep(interval)
                     continue
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = _center_crop_webcam_square(
+                    frame, getattr(cfg, "project_type", "")
+                )
                 img = Image.fromarray(frame).convert("RGB")
                 if cfg.crop_box is not None:
                     x1, y1, x2, y2 = cfg.crop_box
@@ -7018,6 +7037,35 @@ def _raw96_preview_png(raw: bytes, frame_side: int = 96) -> bytes:
         arr = np.frombuffer(raw, dtype=np.uint8).reshape((side, side))
         img = Image.fromarray(arr, mode="L").resize((side * 3, side * 3), Image.NEAREST)
     return _to_png_bytes(img)
+
+
+def _center_crop_webcam_square(frame: np.ndarray, project_type: Any) -> np.ndarray:
+    """Center-crop a webcam frame to 1:1 for the glyph projects.
+
+    The MCU streams a square frame and the Preview / class-preprocess
+    stages are 1:1.  A 16:9 MacBook camera in the same stage would be
+    letterboxed (black bars top and bottom), and the ROI coordinates would
+    describe a different geometry from the square device frame.  Cropping
+    ON INGEST makes webcam and device share one geometry, and every
+    downstream consumer (live preview, hold capture, Preview inference)
+    sees the same square pixels.
+
+    Image projects keep their native aspect: their pipeline and overlays
+    are built around the full webcam frame, and there is no device square
+    to match.  No-op for already-square frames.
+    """
+    if not is_glyph_project(str(project_type or "")):
+        return frame
+    arr = np.asarray(frame)
+    if arr.ndim < 2:
+        return frame
+    fh, fw = int(arr.shape[0]), int(arr.shape[1])
+    side = min(fh, fw)
+    if side <= 0 or fh == fw:
+        return frame
+    x0 = (fw - side) // 2
+    y0 = (fh - side) // 2
+    return np.ascontiguousarray(arr[y0:y0 + side, x0:x0 + side])
 
 
 def _cap_capture_resolution(img: Image.Image, max_side: int = CAPTURE_MAX_SIDE) -> Image.Image:

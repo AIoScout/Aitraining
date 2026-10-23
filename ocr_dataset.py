@@ -969,6 +969,35 @@ def _noise_frame(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
     return np.clip(grad + grain, 0, 255).astype(np.uint8)
 
 
+def _glyph_looks_like_stroke_bar(glyph: np.ndarray) -> bool:
+    """True for a centered narrow vertical/horizontal bar.
+
+    The reject class must not teach the model that a centered stroke is
+    background: a camera-segmented '1' is exactly that shape.  A textured or
+    flat background is fine; a lone centered bar is not.
+    """
+    arr = np.asarray(glyph, dtype=np.uint8)
+    if arr.ndim != 2 or arr.size == 0:
+        return False
+    ink = arr < 128
+    if int(ink.sum()) < 8:
+        return False
+    h, w = ink.shape
+    col = ink.mean(axis=0)
+    row = ink.mean(axis=1)
+    strong_cols = np.flatnonzero(col > 0.35)
+    if 1 <= len(strong_cols) <= 4:
+        centre = float(np.mean(strong_cols)) / float(max(1, w))
+        if 0.30 <= centre <= 0.70:
+            return True
+    strong_rows = np.flatnonzero(row > 0.35)
+    if 1 <= len(strong_rows) <= 4:
+        centre = float(np.mean(strong_rows)) / float(max(1, h))
+        if 0.30 <= centre <= 0.70:
+            return True
+    return False
+
+
 def synthesize_background_glyphs(
     raw_frames: Sequence[np.ndarray],
     count: int,
@@ -988,12 +1017,19 @@ def synthesize_background_glyphs(
                     hypothetical: `preprocess_glyph` returns an ALL-ZERO
                     glyph for it, so if the model never sees a zero image
                     during training it has never seen the single most
-                    common negative the device produces.
+                    common negative the device produces.  Kept a minority:
+                    200 identical black canvases made a stroke-only '1'
+                    look like background.
     BG_KIND_ERASED  A real capture with its glyph removed.  Real
                     illumination, real grain, real paper texture — the
                     negatives that actually get confused with a faint mark.
     BG_KIND_NOISE   Grain + gradient with no capture behind it.  Covers a
                     camera pointed at something the user never captured.
+
+    Erased/noise samples are normalised as WHOLE PATCHES (no segmentation)
+    so they carry texture instead of collapsing to the same all-zero tensor.
+    Any glyph that still looks like a centered stroke bar is rejected and
+    replaced with a noise patch.
     """
     rng = np.random.default_rng(int(seed))
     side = int(frame_side or (raw_frames[0].shape[0] if len(raw_frames) else 96))
@@ -1001,32 +1037,44 @@ def synthesize_background_glyphs(
     if count <= 0:
         return out
 
-    n_flat = max(1, int(round(count * 0.30)))
-    n_erased = max(1, int(round(count * 0.40))) if raw_frames else 0
+    n_flat = max(1, int(round(count * 0.10)))
+    n_erased = max(1, int(round(count * 0.45))) if raw_frames else 0
     n_noise = max(1, count - n_flat - n_erased)
 
-    def _run(frame: np.ndarray) -> np.ndarray:
+    def _run(frame: np.ndarray, segmented: bool = True) -> np.ndarray:
         res = preprocess_glyph(
             frame, out_size=int(out_size), polarity=polarity,
-            apply_segmentation=True, convention=convention,
+            apply_segmentation=segmented, convention=convention,
         )
         return np.asarray(res.get("glyph"), dtype=np.uint8)
 
-    # flat: a constant frame has no split, so this exercises the t == 0
-    # branch and yields the all-zero glyph the device really emits.
+    def _append_safe(glyph: np.ndarray, kind: str) -> None:
+        if not _glyph_looks_like_stroke_bar(glyph):
+            out.append((glyph, kind))
+            return
+        for _ in range(4):
+            alt = _run(_noise_frame(side, side, rng), segmented=False)
+            if not _glyph_looks_like_stroke_bar(alt):
+                out.append((alt, BG_KIND_NOISE))
+                return
+        # Last resort: a flat mid-gray patch, never a bar.
+        out.append((np.full((int(out_size), int(out_size)), 128, dtype=np.uint8), BG_KIND_FLAT))
+
+    # flat: a constant frame has no split, so this subset exercises the
+    # t == 0 branch and yields the all-zero glyph the device really emits.
     for _ in range(n_flat):
         level = int(rng.integers(0, 256))
         frame = np.full((side, side), level, dtype=np.uint8)
-        out.append((_run(frame), BG_KIND_FLAT))
+        _append_safe(_run(frame, segmented=True), BG_KIND_FLAT)
 
     for i in range(n_erased):
         src = np.asarray(raw_frames[i % len(raw_frames)], dtype=np.uint8)
         if src.ndim == 3:
             src = src[:, :, 0]
-        out.append((_run(_erase_ink(src, rng)), BG_KIND_ERASED))
+        _append_safe(_run(_erase_ink(src, rng), segmented=False), BG_KIND_ERASED)
 
     for _ in range(n_noise):
-        out.append((_run(_noise_frame(side, side, rng)), BG_KIND_NOISE))
+        _append_safe(_run(_noise_frame(side, side, rng), segmented=False), BG_KIND_NOISE)
 
     return out[:count] if len(out) > count else out
 

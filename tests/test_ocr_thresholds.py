@@ -55,6 +55,18 @@ def _run(gray: np.ndarray, config: Dict[str, Any], **kw):
     )
 
 
+def _ink_pixels(res: Dict[str, Any]) -> int:
+    """Black pixels in the processed preview.
+
+    With `return_crop=True`, `processed_png` is the decision mask cropped
+    to the detected glyph / manual ROI and rendered BLACK INK ON PURE
+    WHITE — the same contract the Preview pane consumes.  Ink is therefore
+    0, not 255; counting `> 0` (the old raw-mask convention) measured the
+    white background instead.
+    """
+    return int((_decode(res["processed_png"]) == 0).sum())
+
+
 def _frame(ink: int = 40, paper: int = 230, mid: int | None = None) -> np.ndarray:
     """Paper with one dark rectangle, and optionally a mid-tone one.
 
@@ -104,11 +116,11 @@ def test_lum_slider_pins_the_window_and_drops_the_brighter_ink():
     default = _run(gray, {}, return_crop=True)
     pinned = _run(gray, {"bg_lum_thresh": 120}, return_crop=True)
 
-    default_ink = _decode(default["processed_png"]) > 0
-    pinned_ink = _decode(pinned["processed_png"]) > 0
-    assert default_ink[DARK_AT] and default_ink[MID_AT], "Otsu should ink both blocks"
-    assert pinned_ink[DARK_AT], "the 40 block is inside the window"
-    assert not pinned_ink[MID_AT], "the 120 block is above the 119 ceiling"
+    # Both 24x40 blocks are inked by default (1,200 px); the pinned window
+    # keeps only the 40 block (600 px).  The processed view is cropped to
+    # the detected ink, so compare ink AREA, not original-frame indices.
+    assert _ink_pixels(default) == 1200, _ink_pixels(default)
+    assert _ink_pixels(pinned) == 600, "the 120 block is above the 119 ceiling"
     assert not np.array_equal(_decode(pinned["png"]), _decode(default["png"]))
 
 
@@ -131,7 +143,7 @@ def test_dark_slider_keeps_ink_above_the_floor():
     # separates "floor is applied" from "everything vanished".
     gray = _frame(ink=40)
     got = _run(gray, {"bg_dark_thresh": 30}, return_crop=True)
-    assert (_decode(got["processed_png"]) > 0)[DARK_AT]
+    assert _ink_pixels(got) == 600, _ink_pixels(got)
     assert _decode(got["png"]).any()
 
 
@@ -139,21 +151,18 @@ def test_both_sliders_together_form_one_strict_window():
     gray = _frame(ink=40, mid=120)
     # 31 <= gray <= 119: the 40 block in, the 120 block out.
     got = _run(gray, {"bg_dark_thresh": 30, "bg_lum_thresh": 120}, return_crop=True)
-    ink = _decode(got["processed_png"]) > 0
-    assert ink[DARK_AT]
-    assert not ink[MID_AT]
+    assert _ink_pixels(got) == 600, _ink_pixels(got)
 
 
 def test_polarity_selects_which_side_of_the_split_is_ink():
     gray = _frame(ink=40)
     dark = _run(gray, {"ink_polarity": ocr_preprocess.INK_DARK}, return_crop=True)
     bright = _run(gray, {"ink_polarity": ocr_preprocess.INK_BRIGHT}, return_crop=True)
-    dark_ink = _decode(dark["processed_png"]) > 0
-    bright_ink = _decode(bright["processed_png"]) > 0
-    # INK_DARK inks the 600 block pixels; INK_BRIGHT inks the 8,616 paper
-    # pixels.  The split is the same Otsu threshold either way.
-    assert dark_ink.sum() == 600, dark_ink.sum()
-    assert bright_ink.sum() == 96 * 96 - 600, bright_ink.sum()
+    # INK_DARK inks the 600 block pixels (its preview is cropped to that
+    # block); INK_BRIGHT inks the 8,616 paper pixels (its box is the whole
+    # frame).  The split is the same Otsu threshold either way.
+    assert _ink_pixels(dark) == 600, _ink_pixels(dark)
+    assert _ink_pixels(bright) == 96 * 96 - 600, _ink_pixels(bright)
     assert not np.array_equal(_decode(dark["png"]), _decode(bright["png"]))
 
 
@@ -164,7 +173,9 @@ def test_sample_config_wins_over_the_class_config():
     gray = _frame(ink=40, mid=120)
     got = _run(gray, {"bg_lum_thresh": 255}, sample_config={"bg_lum_thresh": 120},
                return_crop=True)
-    assert not (_decode(got["processed_png"]) > 0)[MID_AT]
+    # 119 ceiling: only the 40 block is inked.  The class-level 255 would
+    # have kept both blocks (1,200 px).
+    assert _ink_pixels(got) == 600, _ink_pixels(got)
 
 
 def main() -> int:

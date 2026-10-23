@@ -204,16 +204,18 @@ The `ROI` and `Orig` checkboxes are view toggles:
 
 | ROI | Orig | Scene | ROI rectangle |
 |---|---|---|---|
-| off | off | raw frame | hidden |
-| on | off | raw frame | drawn (green = auto, blue = manual) |
-| off | on | thresholded black-on-white frame | hidden |
-| on | on | thresholded black-on-white frame | drawn |
+| off | off | full **thresholded** frame | drawn (green = auto, blue = manual) |
+| on | off | **cropped thresholded** ROI | hidden |
+| off | on | full raw frame | drawn |
+| on | on | cropped raw ROI | hidden |
 
-`Orig` shows the **Dark/Lum threshold view**: pixels outside the window
-become pure white `255`, while ink stays dark, so the sliders visibly change
-the image.  `ROI` only adds the rectangle on top; without `Orig` the scene
-is the raw frame.  The `.signmatch-slots` below already shows the three
-glyph crops, so the stage never repeats them as a strip.
+`Orig` is the raw/threshold switch: **OFF (default)** shows the Dark/Lum
+threshold view (pixels outside the window become pure white `255`, ink stays
+dark), and **ON** shows the original unprocessed grayscale.  `ROI` is the
+crop switch: **OFF** keeps the full scene with the rectangle drawn on it;
+**ON** zooms the pane to the ROI content and hides the rectangle.  The
+`.signmatch-slots` below already shows the three glyph crops, so the stage
+never repeats them as a strip.
 
 The **Preview stage is a 1:1 square** sized to the card's inner width.  A
 96×96 or 160×160 device frame fills it without the wide side padding the
@@ -238,17 +240,37 @@ ready frame with zero files on disk.
 
 Before splitting, the host sign preview locates the sign board on the
 **native frame** (`find_sign_roi`): the pinned Manual ROI when one is set;
-when Dark/Lum have been tuned, an **ink-cluster** pass filters out
-border-touching, oversized and tiny components and takes the horizontal row
-of three character blobs; otherwise the enclosed bright inner plate is used,
-with a centred 70 % fallback.  It crops that ROI first, removes frame-line/
-noise ink touching its edge, and only then runs the three-glyph projection.
+when Dark/Lum have been tuned, an **ink-cluster** pass ignores components
+within 6 % of the frame edge (fingers/frame/border noise), drops oversized
+and tiny blobs — a thin `1` is allowed — and takes the horizontal row of
+three character blobs.  The ROI is their union plus one uniform 10 % pad on
+all four sides, so the box is tight and symmetric rather than pulled left by
+edge clutter.  Otherwise the enclosed bright inner plate is used, with a
+centred 70 % fallback.  The ROI is cropped first, border-line/noise ink is
+removed, and only then does the three-glyph projection run.
+
+Each slot crop gets a small plate-context margin (8 % of its smaller side,
+minimum 2 px) before the glyph transform.  A stroke-only `1` crop otherwise
+becomes an almost-black tensor and can score as `_background`.  Under
+`NORM_CANON` a narrow glyph (ink bbox `w/h < 0.35`) is additionally widened
+to a 3-4 px stroke **before** the nearest-neighbour fit — a 1 px source
+stroke can otherwise be skipped entirely by the downscale — matching the
+EMNIST `1` samples the model trains on.  The C mirror (`sign_glyph.c`)
+implements the identical margin and widening, so host/device parity is
+preserved.  The `_background` class is also generated from textured whole
+patches (plus a 10 % minority of all-zero blanks) and rejects any centered
+stroke-bar prototype that would collide with `1`.
+
+Webcam frames for glyph projects are center-cropped to 1:1 on ingest, so a
+16:9 MacBook camera behaves like the square MCU camera (no letterbox bars,
+and ROI coordinates are the pixels the model sees).
+
 The response carries `roi_box` (source pixels), `roi_box_norm` / `crop`
 (full-frame fractions), a real `sign_pct`, a thresholded full-frame
-`full_image_b64` and a cropped `processed_image_b64` — both rendered
-**black ink on pure white**.  Each `.signmatch-slot` thumbnail is likewise a
-black-on-white 28×28 display glyph.  Training and the exported device
-front-end still consume one glyph per class as before.
+`full_image_b64`, a cropped threshold `processed_image_b64` and a cropped raw
+`crop_image_b64`.  Every user-facing mask is **black ink on pure white**;
+each `.signmatch-slot` thumbnail is likewise a black-on-white 28×28 display
+glyph.
 
 The output pane is the `.signmatch` banner:
 

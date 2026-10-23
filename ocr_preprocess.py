@@ -44,6 +44,17 @@ GLYPH_SIZE = 28  # model input side (both axes)
 _GLYPH_CANON_FIT = 20
 _GLYPH_CANON_OFFSET = (GLYPH_SIZE - _GLYPH_CANON_FIT) // 2  # 4
 
+# A camera-segmented '1' is often a 1-2 px vertical stroke.  Scaled to the
+# 28x28 canvas under NORM_CANON (longer side -> 20 px) it stays 1-2 px,
+# while the EMNIST '1' samples the model trains on are 3-4 px wide.  That
+# distribution gap made a clean stroke read as `_background`.  Glyphs whose
+# ink bbox is narrower than 35 % of its height get their source stroke
+# widened (polarity-aware horizontal min/max) to at least
+# _GLYPH_TARGET_STROKE output pixels before the nearest-neighbour resize.
+_GLYPH_NARROW_ASPECT_PCT = 35
+_GLYPH_TARGET_STROKE = 3
+_GLYPH_MAX_STROKE_RADIUS = 4
+
 # ── Ink polarity ────────────────────────────────────────────────────────
 # Otsu splits the histogram into a low class [0 .. t] and a high class
 # [t+1 .. 255].  Polarity says WHICH of those two classes is the character.
@@ -661,8 +672,121 @@ def _scale_to_fit(crop: np.ndarray, target: int) -> np.ndarray:
     return nn_resize_u8(crop, nw, nh)
 
 
+def _canon_fit(out_size: int) -> int:
+    """NORM_CANON's long-side target for this canvas (20 at 28x28)."""
+    return _GLYPH_CANON_FIT if out_size == GLYPH_SIZE else max(
+        1, (out_size * _GLYPH_CANON_FIT) // GLYPH_SIZE
+    )
+
+
+def _narrow_stroke_radius(
+    ink: np.ndarray,
+    crop_w: int,
+    crop_h: int,
+    out_size: int,
+    convention: str,
+) -> int:
+    """Horizontal dilation radius for a thin single-stroke glyph, else 0.
+
+    A segmented camera '1' is frequently a 1-2 px bar.  Its ink bbox is
+    therefore much narrower than it is tall (w/h < 0.35), whereas the
+    EMNIST '1' samples used for training are 3-4 px strokes.  After
+    NORM_CANON shrinks the long side to 20 px, that camera stroke can end
+    up 1 px wide — visually a hairline, and the model's `_background`
+    class (built from noisy residuals) is a plausible reading for it.
+
+    This measures the stroke BEFORE the resize and returns the radius of
+    a horizontal min/max filter applied to the SOURCE crop, before the
+    long-side fit.  Widening after the resize would be too late: nearest-
+    neighbour downsampling can skip a 1 px source column entirely (a
+    20/35 scale samples source columns 0, 2, 4, 6, 8, 10, ...), so a
+    hairline can disappear instead of merely staying thin.  The target
+    source width is the width that leaves _GLYPH_TARGET_STROKE pixels
+    after the fit: `ceil(3 * long_side / fit)`.  The estimate is
+    `total_ink / ink_height` — exact for a vertical bar and still the
+    stroke width for a '1' with a small base.  NORM_STRETCH is excluded:
+    it stretches the crop to both axes, so a narrow glyph is already a
+    wide block and needs no help (and its aspect distortion is the
+    convention's defining behaviour).
+
+    Returns 0 for wide glyphs and for strokes already wide enough.
+    Integer arithmetic only; the C mirror (sign_glyph.c) computes the
+    same value.
+    """
+    if convention != NORM_CANON:
+        return 0
+    arr = np.asarray(ink, dtype=bool)
+    if arr.ndim != 2 or arr.size == 0:
+        return 0
+    cols = np.flatnonzero(arr.any(axis=0))
+    rows = np.flatnonzero(arr.any(axis=1))
+    if cols.size == 0 or rows.size == 0:
+        return 0
+    bw = int(cols[-1] - cols[0] + 1)
+    bh = int(rows[-1] - rows[0] + 1)
+    if bw <= 0 or bh <= 0:
+        return 0
+    if bw * 100 > _GLYPH_NARROW_ASPECT_PCT * bh:
+        return 0
+    total = int(arr[int(rows[0]):int(rows[-1]) + 1,
+                    int(cols[0]):int(cols[-1]) + 1].sum())
+    if total <= 0:
+        return 0
+    # Round-half-up mean ink pixels per ink row = stroke width (integer).
+    stroke = max(1, (2 * total + bh) // (2 * bh))
+    long_side = max(int(crop_w), int(crop_h))
+    if long_side <= 0:
+        return 0
+    fit = _canon_fit(int(out_size))
+    # Source width that leaves at least 3 px after the long-side fit.
+    target_src = (_GLYPH_TARGET_STROKE * long_side + fit - 1) // fit
+    if stroke >= target_src:
+        return 0
+    return min(
+        _GLYPH_MAX_STROKE_RADIUS,
+        (target_src - stroke + 1) // 2,
+    )
+
+
+def _thicken_narrow_stroke(
+    crop: np.ndarray, radius: int, polarity: int
+) -> np.ndarray:
+    """Widen a glyph's stroke horizontally by `radius` pixels each side.
+
+    A 1-D min filter (INK_DARK: dark ink grows into the bright plate) or
+    max filter (INK_BRIGHT: bright ink grows into the dark page).  The
+    columns added on either side are filled with the plate tone (255 for
+    dark ink, 0 for bright ink) so the filter has background to grow into;
+    without them a tight crop would clip the expansion at its own edge.
+    Only the horizontal axis is filtered — the glyph's height (and the
+    CANON centre-of-mass shift) must stay unchanged.
+
+    Integer comparisons only; sign_glyph.c mirrors this loop exactly.
+    """
+    r = int(radius)
+    if r <= 0 or crop.size == 0:
+        return crop
+    arr = np.asarray(crop, dtype=np.uint8)
+    h, w = arr.shape
+    fill = 255 if int(polarity) != INK_BRIGHT else 0
+    padded = np.full((h, w + 2 * r), fill, dtype=np.uint8)
+    padded[:, r:r + w] = arr
+    out = np.empty_like(padded)
+    for x in range(padded.shape[1]):
+        lo = max(0, x - r)
+        hi = min(padded.shape[1], x + r + 1)
+        window = padded[:, lo:hi]
+        if int(polarity) == INK_BRIGHT:
+            out[:, x] = window.max(axis=1)
+        else:
+            out[:, x] = window.min(axis=1)
+    return out
+
+
 def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
-                    convention: str = NORM_STRETCH) -> np.ndarray:
+                    convention: str = NORM_STRETCH, *,
+                    narrow_radius: int = 0,
+                    polarity: int = INK_DARK) -> np.ndarray:
     """Fit an ink crop into an out_size x out_size canvas.
 
     NORM_STRETCH — bbox stretched onto the full grid (one factor per axis).
@@ -678,6 +802,15 @@ def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
         integer translation.  This is the ONLY convention that can be
         applied to EMNIST samples as they ship, and it is what makes the
         EMNIST-mixing strategy work at all.
+
+    narrow_radius / polarity — before the CANON resize, thicken the
+        source crop with `_thicken_narrow_stroke`, so a hairline camera
+        '1' reaches the 3-4 px stroke width of its EMNIST counterparts
+        (and cannot be skipped by the nearest-neighbour downscale).
+        `preprocess_glyph` computes the radius from the ink mask (see
+        `_narrow_stroke_radius`); callers that paste a mask for display
+        pass the default 0 and are unchanged.  Ignored under NORM_STRETCH,
+        where the anisotropic scale already widens a narrow glyph.
     """
     arr = np.asarray(crop)
     if arr.size == 0:
@@ -688,7 +821,12 @@ def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
     if convention != NORM_CANON:
         raise ValueError(f"unknown glyph convention: {convention!r}")
 
-    fit = _GLYPH_CANON_FIT if out_size == GLYPH_SIZE else max(1, (out_size * _GLYPH_CANON_FIT) // GLYPH_SIZE)
+    fit = _canon_fit(out_size)
+    # Widen BEFORE the resize.  Nearest-neighbour downsampling samples
+    # every ~long_side/fit-th source column, so a 1 px stroke can be
+    # skipped entirely; a 3-4 px source stroke always survives.
+    if int(narrow_radius) > 0:
+        arr = _thicken_narrow_stroke(arr, int(narrow_radius), int(polarity))
     scaled = _scale_to_fit(arr, fit)
     canvas = _paste_centred(scaled, out_size)
 
@@ -829,7 +967,22 @@ def preprocess_glyph(
             out["glyph"] = np.zeros((out_size, out_size), dtype=np.uint8)
             return out
 
-        glyph = normalise_glyph(np.ascontiguousarray(crop), out_size=out_size, convention=convention)
+        # A narrow single-stroke glyph ('1') keeps its 1-2 px stroke through
+        # NORM_CANON while the EMNIST '1' samples are 3-4 px.  Measure the
+        # ink inside THIS crop and pass a horizontal dilation radius so the
+        # model sees the stroke width it was trained on.
+        ink_crop = ink[y1:y2, x1:x2]
+        narrow_radius = _narrow_stroke_radius(
+            ink_crop, int(x2) - int(x1), int(y2) - int(y1),
+            int(out_size), convention,
+        )
+        glyph = normalise_glyph(
+            np.ascontiguousarray(crop),
+            out_size=out_size,
+            convention=convention,
+            narrow_radius=narrow_radius,
+            polarity=polarity,
+        )
         out["glyph"] = glyph
         out["ok"] = True
         out["empty"] = False
@@ -932,19 +1085,31 @@ def _ink_cluster_roi(
         n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, 8)
     except Exception:
         return None
-    margin = max(1, int(round(min(h, w) * 0.02)))
-    min_area = max(8, int(round(h * w * 0.0015)))
+    # Discard anything that reaches into the outer 6 % of the frame: fingers,
+    # the plastic frame and bottom-left border clutter live there and used to
+    # drag the ROI left (and clip '2' on the right).
+    margin = max(2, int(round(min(h, w) * 0.06)))
+    # A thin '1' can be only ~35-60 px in a 160 frame; the old 0.15 %
+    # floor (38 px) dropped it and left only two candidates.  Keep the
+    # floor low enough for a real stroke, high enough for specks.
+    min_area = max(6, int(round(h * w * 0.0004)))
+    min_height = max(3, int(round(h * 0.10)))
     candidates: List[Dict[str, float]] = []
     for i in range(1, n):
         x, y, cw, ch, area = (int(v) for v in stats[i])
-        if area < min_area or cw < 3 or ch < 3:
+        if area < min_area or cw < 2 or ch < min_height:
             continue
         if x <= margin or y <= margin or x + cw >= w - margin or y + ch >= h - margin:
             continue
-        if cw > 0.65 * w or ch > 0.65 * h:
+        if cw > 0.60 * w or ch > 0.60 * h:
             continue
+        if area > 0.40 * w * h:
+            continue
+        # Narrow does NOT mean noise: a vertical '1' stroke is legitimately
+        # 2-4 px wide, while the old 0.15 floor discarded exactly that
+        # component and left the trio without its middle character.
         aspect = float(cw) / float(max(1, ch))
-        if aspect < 0.15 or aspect > 6.0:
+        if aspect < 0.03 or aspect > 6.0:
             continue
         fill = float(area) / float(max(1, cw * ch))
         if fill < 0.08:
@@ -955,9 +1120,10 @@ def _ink_cluster_roi(
         })
     if not candidates:
         return None
-    # Keep the most substantial blobs; clutter tends to be small.
+    # Keep the most substantial blobs; clutter tends to be small.  16 gives
+    # a hairline '1' room even when several noise blobs outrank it by area.
     candidates.sort(key=lambda c: -c["area"])
-    candidates = candidates[:12]
+    candidates = candidates[:16]
     candidates.sort(key=lambda c: c["cx"])
 
     best = None
@@ -977,10 +1143,14 @@ def _ink_cluster_roi(
                     continue
                 if heights[2] > 2.2 * max(1, heights[0]):
                     continue
+                # Do NOT compare widths: the middle character of "A12" is a
+                # legitimately narrow stroke.  Width is only bounded against
+                # the row height (a huge blob is not a character) and gaps
+                # are measured against the height, which all three share.
                 widths = [c["w"] for c in trio]
-                if max(widths) > 3.5 * max(1, min(widths)):
+                if max(widths) > 3.0 * max(1, med_h):
                     continue
-                if max(gaps) > 2.5 * max(1, max(widths)):
+                if max(gaps) > 2.0 * max(1, med_h):
                     continue
                 x1 = min(c["x"] for c in trio)
                 y1 = min(c["y"] for c in trio)
@@ -1002,20 +1172,15 @@ def _ink_cluster_roi(
                     }
     if best is None:
         return None
-    # A character can break into two blobs (e.g. a detached stroke).  Include
-    # every qualified blob whose centre sits in the same horizontal band as
-    # the selected row; the projection inside the ROI will still split it
-    # into exactly three glyphs.
-    band_top = best["y1"] - 0.8 * best["med_h"]
-    band_bottom = best["y2"] + 0.8 * best["med_h"]
+    # Use ONLY the three selected character blobs.  The old extra sweep over
+    # "anything in the same band" pulled in bottom-left clutter and made the
+    # box lopsided.  Then apply one uniform pad (10 % of the cluster's longer
+    # side, equal on all four edges) so the box is symmetric and leaves a
+    # little board margin around the glyphs without clipping '2' on the right.
     x1, y1, x2, y2 = best["x1"], best["y1"], best["x2"], best["y2"]
-    for c in candidates:
-        if band_top <= c["cy"] <= band_bottom and x1 - 2 * best["med_h"] <= c["cx"] <= x2 + 2 * best["med_h"]:
-            x1 = min(x1, int(c["x"]))
-            y1 = min(y1, int(c["y"]))
-            x2 = max(x2, int(c["x"] + c["w"]))
-            y2 = max(y2, int(c["y"] + c["h"]))
-    pad = max(4, int(round(0.18 * best["med_h"])))
+    cw = max(1, int(x2) - int(x1))
+    ch = max(1, int(y2) - int(y1))
+    pad = max(3, int(round(0.10 * max(cw, ch))))
     x1 = max(0, x1 - pad)
     y1 = max(0, y1 - pad)
     x2 = min(w, x2 + pad)
@@ -1313,14 +1478,28 @@ def preprocess_sign_sequence(
             boxes = list(reversed(boxes))
 
         for idx, (x1, y1, x2, y2) in enumerate(boxes):
-            crop = np.ascontiguousarray(gray[y1:y2, x1:x2])
+            # Give every glyph a little board context.  A thin '1' segmented
+            # to its stroke-only bbox (2-3 px wide) loses the light plate
+            # around it, and the resulting mostly-black tensor can score as
+            # `_background`; a 2 px margin restores the context the model
+            # saw during training.  The margin stays inside the ROI and the
+            # gap between characters is normally wider than 4 px.
+            bw = max(1, int(x2) - int(x1))
+            bh = max(1, int(y2) - int(y1))
+            pad = max(2, (min(bw, bh) * 8 + 50) // 100)
+            px1 = max(0, int(x1) - pad)
+            py1 = max(0, int(y1) - pad)
+            px2 = min(w, int(x2) + pad)
+            py2 = min(h, int(y2) + pad)
+            crop = np.ascontiguousarray(gray[py1:py2, px1:px2])
             if crop.size == 0:
                 res: Dict[str, Any] = {"glyph": blank_glyph.copy(), "ok": False, "empty": True}
             else:
-                # Segmentation is OFF for the slot: the box already IS one
-                # glyph, and re-running the projection inside it could only
-                # re-find the same run — or, on a slot whose ink is a
-                # fragment, drop it below `min_run` and blank the slot.
+                # Segmentation is OFF for the slot: the padded box already
+                # contains one glyph plus its plate context; re-running the
+                # projection inside it could only re-find the same run — or,
+                # on a slot whose ink is a fragment, drop it below `min_run`
+                # and blank the slot.
                 res = preprocess_glyph(
                     crop,
                     out_size=int(out_size),
@@ -1348,13 +1527,14 @@ def preprocess_sign_sequence(
                     "glyph": glyph,
                     "display": display,
                     "ink": res.get("ink"),
-                    "box": [int(x1), int(y1), int(x2), int(y2)],
+                    "box": [int(px1), int(py1), int(px2), int(py2)],
                     "box_norm": [
-                        float(x1) / float(w),
-                        float(y1) / float(h),
-                        float(x2) / float(w),
-                        float(y2) / float(h),
+                        float(px1) / float(w),
+                        float(py1) / float(h),
+                        float(px2) / float(w),
+                        float(py2) / float(h),
                     ],
+                    "ink_box": [int(x1), int(y1), int(x2), int(y2)],
                     "ok": bool(res.get("ok")),
                     "empty": bool(res.get("empty", True)),
                 }

@@ -121,6 +121,34 @@ def _cases():
                    (w // 2, 3, w // 2 + 7, h - 3, 30),
                    (w - 12, 7, w - 3, h - 7, 30)], paper=220))
 
+    # Narrow single-stroke glyphs: the hairline '1' path.  Python widens
+    # these under NORM_CANON (ocr_preprocess._narrow_stroke_radius) and the
+    # C port must produce the same widened canvas.  Cover segmentation on
+    # (training capture), segmentation off (padded sign slot) and both
+    # polarities.
+    for (w, h, x, bw) in [(96, 96, 48, 1), (96, 96, 47, 2),
+                          (160, 160, 80, 2), (96, 96, 10, 3)]:
+        img = np.full((h, w), 230, np.uint8)
+        img[20:h - 20, x:x + bw] = 20
+        seq(f"narrow_stroke_{w}x{h}_{x}_{bw}", img, thresh=100)
+        add(3, f"single_narrow_{w}x{h}_{x}_{bw}", img, thresh=100,
+            polarity=0, seg=1, conv=1)
+        add(3, f"single_narrow_noseg_{w}x{h}_{x}_{bw}", img, thresh=100,
+            polarity=0, seg=0, conv=1)
+        # INK_BRIGHT: the same stroke, inverted.  Exercises the max-filter
+        # branch and the dark (0) plate fill.
+        bright = np.full((h, w), 20, np.uint8)
+        bright[20:h - 20, x:x + bw] = 230
+        seq(f"narrow_bright_{w}x{h}_{x}_{bw}", bright, thresh=100,
+            polarity=1)
+        add(3, f"single_narrow_bright_{w}x{h}_{x}_{bw}", bright,
+            thresh=100, polarity=1, seg=1, conv=1)
+    for (w, h) in [(96, 96), (160, 160)]:
+        img = np.full((h, w), 230, np.uint8)
+        for x in (w // 4, w // 2, 3 * w // 4):
+            img[20:h - 20, x:x + 2] = 20
+        seq(f"three_narrow_strokes_{w}", img, thresh=100)
+
     for i in range(SWEEP):
         w = int(rng.integers(40, 130))
         h = int(rng.integers(40, 130))

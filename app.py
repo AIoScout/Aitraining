@@ -10054,12 +10054,12 @@ function updatePreviewRoiOverlay(crop, isManual, frameMatches = true) {{
   const overlay = document.getElementById('previewRoiOverlay');
   if (!overlay) return;
   const valid = Array.isArray(crop) && crop.length === 4;
-  // The ROI toggle owns the box: ON draws it, OFF hides it.  `crop` is
-  // normalized to the ORIGINAL frame, so it only maps onto a view that
-  // keeps that frame (the raw scene, or the full masked frame from Orig).
-  // The processed crop / sign-split composite has its own coordinates and
-  // passes frameMatches = false.
-  const show = valid && previewShowRoi && frameMatches;
+  // ROI is a crop toggle: ON shows the cropped image itself, so the box is
+  // hidden; OFF shows the full frame and draws the box to locate the ROI.
+  // `crop` is normalized to the ORIGINAL frame, so it only maps onto a view
+  // that keeps that frame (the raw or threshold full frame); cropped views
+  // pass frameMatches = false as a second guard.
+  const show = valid && !previewShowRoi && frameMatches;
   if (!show) {{
     overlay.style.display = 'none';
     return;
@@ -10918,32 +10918,27 @@ function applyPreviewSrcToPane(data) {{
   const hasData = !!data;
   const rawFromData = hasData && data.image_b64 ? `data:image/png;base64,${{data.image_b64}}` : '';
   const roiFromData = hasData && data.processed_image_b64 ? `data:image/png;base64,${{data.processed_image_b64}}` : '';
+  const cropFromData = hasData && data.crop_image_b64 ? `data:image/png;base64,${{data.crop_image_b64}}` : '';
   const fullFromData = hasData && data.full_image_b64 ? `data:image/png;base64,${{data.full_image_b64}}` : '';
   const uploadedSrc = previewSource === 'upload' ? previewUploadImageSrc : '';
   const rawSrc = rawFromData || uploadedSrc || previewLastStaticImageSrc || '';
-  const roiSrc = roiFromData || fullFromData || rawSrc;
   const fullSrc = fullFromData || rawSrc;
-  let src = rawSrc;
-  let fullFrame = true;  // does `src` share the original frame's coordinates?
-  if (hasData && data.sign_ocr) {{
-    // Sign projects: Orig is the threshold view (Dark/Lum window: ink black,
-    // everything else pure white).  ROI only adds the box on top; without
-    // Orig the scene stays raw.  The old composite/slot strip is
-    // intentionally NOT shown here — .signmatch-slots below carries the
-    // three glyphs.
-    src = previewShowRaw ? fullSrc : rawSrc;
+  const rawCropSrc = cropFromData || rawSrc;
+  // ROI is a CROP toggle:
+  //   OFF -> full frame (threshold by default, raw when Orig is on) + box
+  //   ON  -> cropped content inside the ROI (threshold/raw), no box
+  // Orig is the raw/threshold toggle:
+  //   OFF -> thresholded black-on-white view (default, so sliders are visible)
+  //   ON  -> original unprocessed grayscale
+  let src;
+  let fullFrame;
+  if (previewShowRoi) {{
+    src = previewShowRaw ? rawCropSrc : (roiFromData || rawSrc);
+    fullFrame = false;
+  }} else {{
+    src = previewShowRaw ? rawSrc : fullSrc;
     fullFrame = true;
   }}
-  else if (previewShowRaw && previewShowRoi) {{
-    // Cropped AND filtered: the processed tensor.  Its pixels are not the
-    // original frame, so the ROI box cannot be placed on it.
-    src = roiSrc;
-    fullFrame = !roiFromData;
-  }}
-  else if (previewShowRaw) src = fullSrc;
-  // ROI alone keeps the full scene on screen — that is the only view the
-  // normalized search box maps onto; the box itself is drawn below.
-  else if (previewShowRoi) src = rawSrc;
   // `ready` is set even when the pane shows the Input-off empty state, so
   // the FIRST prediction (including a synth plate clicked before any image
   // was selected) must be able to replace that placeholder with a stage.

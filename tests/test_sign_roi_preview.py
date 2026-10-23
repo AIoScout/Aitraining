@@ -192,6 +192,18 @@ def test_user_window_finds_characters_and_renders_white_masks():
         assert display[0, 0] == 255, "slot display background must be white"
         assert int(display.min()) == 0 and int(display.max()) == 255, display
         assert float(display.mean()) > 100.0, float(display.mean())
+        # A tight stroke-only box gets a plate-context margin before the
+        # glyph transform; otherwise a thin '1' tensor scores _background.
+        ink_box = slot.get("ink_box")
+        box = slot.get("box")
+        assert ink_box is not None and box is not None, slot
+        if ink_box[0] > 0:
+            assert box[0] <= ink_box[0] - 2, (box, ink_box)
+        if ink_box[1] > 0:
+            assert box[1] <= ink_box[1] - 2, (box, ink_box)
+        assert box[2] >= ink_box[2] + 2, (box, ink_box)
+        assert box[3] >= ink_box[3] + 2, (box, ink_box)
+        assert float(np.asarray(slot["glyph"]).mean()) > 0.0, slot["char"]
 
     with tempfile.TemporaryDirectory() as td:
         ctrl, _dataset = _workspace(Path(td))
@@ -255,6 +267,19 @@ def test_edit_processed_preview_is_white_masked_and_cropped():
     assert 50 <= manual_arr.shape[0] <= 64 and 50 <= manual_arr.shape[1] <= 64, manual_arr.shape
 
 
+def test_background_class_is_diverse_and_has_no_centered_bars():
+    from ocr_dataset import _glyph_looks_like_stroke_bar, synthesize_background_glyphs
+
+    raw = [np.asarray(Image.open(TEMPLATE_SIGN).convert("L"))]
+    pairs = synthesize_background_glyphs(raw, 80, out_size=28, seed=42)
+    assert len(pairs) == 80, len(pairs)
+    zero_count = sum(1 for glyph, _kind in pairs if int(np.asarray(glyph).max()) == 0)
+    assert zero_count <= 12, f"{zero_count} all-zero background prototypes"
+    assert not any(_glyph_looks_like_stroke_bar(np.asarray(g)) for g, _k in pairs)
+    means = {round(float(np.asarray(g).mean()), 1) for g, _k in pairs}
+    assert len(means) >= 10, means
+
+
 def main() -> int:
     tests = [
         ("ROI ignores desk and frame", test_find_sign_roi_ignores_desk_and_frame),
@@ -263,6 +288,7 @@ def main() -> int:
         ("preview crops board before 3 slots", test_preview_crops_board_before_three_slots),
         ("user window finds characters and white masks", test_user_window_finds_characters_and_renders_white_masks),
         ("Edit processed view is white-masked and cropped", test_edit_processed_preview_is_white_masked_and_cropped),
+        ("background class is diverse and bar-free", test_background_class_is_diverse_and_has_no_centered_bars),
     ]
     results = []
     for name, fn in tests:

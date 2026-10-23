@@ -56,7 +56,7 @@ _SIGN_YES = {
     "processed_image_b64": "cm9p",
     "processed_variant": "sign_search",
     "crop_image_b64": "Y3JvcA==",
-    "full_image_b64": "ZnVsbA==",
+    "full_image_b64": _TINY_PNG_B64,
     "orig_b64": "b3JpZw==",
     "roi_b64": "cm9p",
     "filename": "sign_A12.png",
