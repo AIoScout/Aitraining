@@ -4649,30 +4649,123 @@ def _render_tm_old_frontend_html(
       background: color-mix(in srgb, var(--blue) 16%, transparent);
       font-weight: 700;
     }}
-    /* The checkpoint was satisfied.  Shown in the beat between the user's
-       own press and the next step's card, so the tour answers the click it
-       just received instead of silently swapping the slide underneath it. */
-    .tm-tour-cue.pass {{
-      border-style: solid;
-      border-color: color-mix(in srgb, #16a34a 60%, transparent);
-      background: color-mix(in srgb, #16a34a 16%, transparent);
-      font-weight: 700;
-    }}
+    /* The checkpoint was satisfied.  The tour no longer advances on its own
+       — the user does — so this green pass state lives on the floating orb
+       (`#tmTourOrb.ready`) and in `flashOrb`, not on the card. */
     .tm-tour-actions {{ display: flex; align-items: center; gap: 8px; }}
+    .tm-tour-actions + .tm-tour-actions {{ margin-top: 8px; }}
     .tm-tour-spacer {{ flex: 1 1 auto; }}
     .tm-tour-btn {{
       padding: 7px 12px; border-radius: 8px;
       border: 1px solid var(--line); background: var(--surface-soft);
       color: var(--text); font-size: 12.5px; font-weight: 700; cursor: pointer;
     }}
+    /* The one button that swaps the card for the floating orb spans the
+       whole footer: it is the difference between reading and doing, so it
+       gets the row to itself rather than competing with Skip / Back. */
+    .tm-tour-btn.wide {{ flex: 1 1 100%; text-align: center; }}
     .tm-tour-btn:hover:not(:disabled) {{ border-color: var(--blue); color: var(--blue); }}
     .tm-tour-btn:disabled {{ opacity: 0.45; cursor: default; }}
     .tm-tour-btn.primary {{ background: var(--blue); border-color: var(--blue); color: var(--text-inverse); }}
     .tm-tour-btn.primary:hover:not(:disabled) {{ background: var(--blue); color: var(--text-inverse); filter: brightness(1.06); }}
     .tm-tour-btn.ghost {{ background: transparent; border-color: transparent; color: var(--muted); }}
     .tm-toolbar-tour {{ color: var(--blue); }}
+    /* ── Workflow overview (step 0) ───────────────────────────────────
+       Step 0 is the map rather than a lesson, so instead of prose it lists
+       the whole trip as numbered stages: the user sees where they are
+       going before the guide starts pointing at controls. */
+    .tm-tour-stages {{ list-style: none; margin: 0 0 10px; padding: 0; }}
+    .tm-tour-stages li {{
+      display: flex; gap: 9px; align-items: flex-start;
+      padding: 7px 0; border-top: 1px solid var(--line);
+    }}
+    .tm-tour-stages li:first-child {{ border-top: 0; }}
+    .tm-tour-stage-num {{
+      flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--blue); color: var(--text-inverse);
+      font-size: 11px; font-weight: 800;
+    }}
+    .tm-tour-stage-txt {{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }}
+    .tm-tour-stage-t {{ font-weight: 700; color: var(--text); }}
+    .tm-tour-stage-d {{ color: var(--muted); font-size: 11.5px; line-height: 1.45; }}
+    /* ── Floating orb · Phase B "hands-on" mode ───────────────────────
+       The moment the user starts working, the dim layer and the big card
+       are pushed out of the way and this pill takes over: docked in the
+       bottom-right corner, draggable, gently pulsing, and carrying the
+       LIVE state of whatever they are doing (sample counts, thresholds,
+       training).  It is deliberately small and corner-parked so it never
+       covers the control being used, and it never advances on its own —
+       the user clicks it when they are ready. */
+    #tmTourOrb {{
+      position: fixed;
+      display: none;
+      right: 18px;
+      bottom: 18px;
+      z-index: 4004;
+      max-width: min(420px, calc(100vw - 36px));
+      align-items: center;
+      gap: 9px;
+      padding: 9px 12px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--blue) 55%, var(--line));
+      background: var(--card);
+      color: var(--text);
+      box-shadow: 0 12px 32px rgba(10, 15, 25, 0.38);
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }}
+    #tmTourOrb.on {{ display: inline-flex; }}
+    /* The gentle "I am still here" pulse lives on a pseudo-element so the
+       dark-mode override can keep owning the real drop shadow. */
+    #tmTourOrb::before {{
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      animation: tmTourOrbPulse 2.4s ease-out infinite;
+    }}
+    @keyframes tmTourOrbPulse {{
+      0% {{ box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 55%, transparent); }}
+      70%, 100% {{ box-shadow: 0 0 0 10px color-mix(in srgb, var(--blue) 0%, transparent); }}
+    }}
+    /* The step's own job is done — the badge turns green and stops
+       pulsing, so "you may move on now" is a colour change away from
+       "keep working". */
+    #tmTourOrb.ready {{
+      border-color: #16a34a;
+      background: color-mix(in srgb, #16a34a 14%, var(--card));
+      box-shadow: 0 12px 32px rgba(10, 15, 25, 0.38), 0 0 0 3px color-mix(in srgb, #16a34a 28%, transparent);
+    }}
+    #tmTourOrb.ready::before {{ display: none; }}
+    #tmTourOrb.dragging {{ cursor: grabbing; }}
+    #tmTourOrb.dragging::before {{ display: none; }}
+    .tm-tour-orb-dot {{
+      flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+      background: #16a34a;
+    }}
+    .tm-tour-orb-text {{ flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .tm-tour-orb-text b {{ color: var(--text); font-weight: 800; }}
+    .tm-tour-orb-go {{
+      flex: 0 0 auto; padding: 4px 10px; border-radius: 999px;
+      border: 1px solid transparent; background: var(--blue); color: var(--text-inverse);
+      font-size: 11.5px; font-weight: 800; white-space: nowrap; cursor: pointer;
+    }}
+    #tmTourOrb.ready .tm-tour-orb-go {{ background: #16a34a; }}
+    .tm-tour-orb-help {{
+      flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid var(--line); background: var(--surface-soft);
+      color: var(--muted); font-size: 12px; font-weight: 800; cursor: pointer;
+    }}
+    .tm-tour-orb-help:hover {{ color: var(--text); border-color: var(--blue); }}
     @media (prefers-color-scheme: dark) {{
       #tmTourCard {{ box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); }}
+      #tmTourOrb {{ box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6); }}
+      #tmTourOrb.ready {{ box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 3px color-mix(in srgb, #16a34a 32%, transparent); }}
       #tmTourArrow {{ color: #8ab4f8; }}
       .tm-tour-beacon-ring {{
         border-color: #8ab4f8;
@@ -5103,6 +5196,18 @@ def _render_tm_old_frontend_html(
 <div id="tmTourBeacon" aria-hidden="true">
   <span class="tm-tour-beacon-ring"></span>
   <span class="tm-tour-beacon-hand">👆</span>
+</div>
+<!-- Phase B of every step.  The card explains the step and points at the
+     control; the moment the user starts working, the dim layer and the
+     card step aside and this pill takes over, carrying the live state of
+     whatever they are doing.  The whole pill advances the tour; `?` brings
+     the instruction card back.  It is filled in by the tour engine, so an
+     unstarted tour leaves nothing behind. -->
+<div id="tmTourOrb" role="status" aria-live="polite" title="Click to move to the next step · drag to move me">
+  <span class="tm-tour-orb-dot"></span>
+  <span class="tm-tour-orb-text" id="tmTourOrbText"></span>
+  <button type="button" class="tm-tour-orb-go" id="tmTourOrbGo">Next Step &rarr;</button>
+  <button type="button" class="tm-tour-orb-help" id="tmTourOrbHelp" title="Re-open the instruction card">?</button>
 </div>
 
 <script>
@@ -13891,22 +13996,27 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var IMAGE_STEPS = [
     {{
       chapter: 1,
-      title: 'Welcome to TFLite Training (Image Project)',
-      /* target: null → no cut-out on the welcome step: the card floats
-         centred over a full-screen dimmed workspace, exactly like
-         Adobe's welcome screen. Cutting out the whole .layout box left
-         only a hairline rim dimmed, which read as a bug, not a welcome. */
+      title: 'Your Image Project, End to End',
+      /* Step 0 is the big picture rather than a lesson, so it carries
+         `overview` and a `stages` list instead of a spotlight: the card
+         floats centred over a dimmed workspace (target: null — cutting
+         the whole .layout box out left only a hairline rim dimmed, which
+         read as a bug, not a welcome) and its one button starts the
+         walkthrough. */
       target: null,
       fallback: [],
       placement: 'auto',
-      body: '<p>This workspace builds a tiny embedded image classifier and deploys it to your <b>ESP32-P4</b>. Work left to right, exactly like the lab manual:</p>' +
-        '<ul>' +
-        '<li><b>1 · Sample Area (left)</b> — collect and filter labeled images for every class.</li>' +
-        '<li><b>2 · Training Area (middle)</b> — train a lightweight CNN and read the per-class accuracy.</li>' +
-        '<li><b>3 · Preview &amp; Export (right)</b> — test the quantized model live, then export <code>int8</code> C/C++ files.</li>' +
-        '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>This tour is <b>state-aware</b>: as you press <b>Next →</b> it opens the real panels it talks about, then puts them back.</span></div>' +
-        '<p class="tm-tour-muted">Use <kbd>←</kbd> / <kbd>→</kbd> to step through, <kbd>Esc</kbd> to exit.</p>'
+      overview: true,
+      stages: [
+        {{ t: 'Collect Samples', d: 'Add your classes, then capture labelled images from the webcam, a folder or the ESP32-P4 serial link.' }},
+        {{ t: 'Clean &amp; Crop', d: 'Open the Sample Worktable to set the ROI box and the Dark / Lum thresholds for each class.' }},
+        {{ t: 'Train', d: 'Set the CNN hyperparameters, train the int8 model and read the per-class accuracy.' }},
+        {{ t: 'Test Live', d: 'Watch the preview verdict, and the 3-layer OOD gate throwing out frames that are not your classes.' }},
+        {{ t: 'Export &amp; Deploy', d: 'Build the 5-file C/C++ package that the ESP32-P4 flashes.' }}
+      ],
+      body: '<p>This workspace builds a tiny embedded image classifier and deploys it to your <b>ESP32-P4</b>. Work left to right, exactly like the lab manual.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>The guide <b>points</b> at the real control for every step — and the moment you start working it shrinks into a floating orb in the corner, so it never covers what you are using.</span></div>' +
+        '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
     }},
     {{
       chapter: 1,
@@ -14005,6 +14115,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 2,
       title: 'Capture Labeled Image Samples',
+      live: 'samples',
       target: '[id^="sourceCapture-"]',
       fallback: ['.source-actions', '.source-panel'],
       placement: 'right',
@@ -14057,6 +14168,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 3,
       title: 'Auto ROI vs. Manual ROI Cropping',
+      live: 'thresholds',
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
@@ -14082,6 +14194,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 3,
       title: 'Dark Thr &amp; Lum Thr Noise Filtering',
+      live: 'thresholds',
       target: '#classPreprocessDark',
       fallback: ['.class-preprocess-right', '#classPreprocessModal'],
       placement: 'left',
@@ -14198,6 +14311,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.train-card', '.col-train'],
       placement: 'left',
       advanceTarget: '#trainBtn',
+      live: 'train',
       checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
       body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>). When it finishes, click the green <b>Model Trained · tap for accuracy</b> pill to inspect the per-class score.</p>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>If one class lags far behind the others, it usually needs more samples or a tighter ROI — go back to <b>Edit</b> before re-training.</span></div>'
@@ -14328,18 +14442,25 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var OCR_STEPS = [
     {{
       chapter: 1,
-      title: 'Welcome to Character OCR',
+      title: 'Your Character OCR Project, End to End',
+      /* Step 0 is the big picture rather than a lesson, so it carries
+         `overview` and a `stages` list instead of a spotlight: the card
+         floats centred over a dimmed workspace and its one button starts
+         the walkthrough. */
       target: null,
       fallback: [],
       placement: 'auto',
+      overview: true,
+      stages: [
+        {{ t: 'Set Your Character Set', d: 'Pick which characters this project must read — digits, letters, or the punctuation the firmware knows.' }},
+        {{ t: 'Collect &amp; Crop Samples', d: 'Capture one glyph per crop, then open the Sample Worktable to set the ROI box and the Dark / Lum thresholds.' }},
+        {{ t: 'Binarize the Glyph', d: 'Apply the same integer Otsu the MCU runs, at 28×28, so host and device see byte-identical input.' }},
+        {{ t: 'Transfer-Learn from EMNIST', d: 'Train the int8 classifier, warm-starting from EMNIST with the ink polarity matching your captures.' }},
+        {{ t: 'Preview &amp; Export', d: 'Preview a single glyph, watch the _background rejection class, then export the OCR firmware.' }}
+      ],
       body: '<p>This workspace trains a <b>single-character</b> classifier — one glyph per crop — and ships it to the <b>ESP32-P4</b> as <code>TFLite_OCR</code>.</p>' +
-        '<ul>' +
-        '<li><b>Every class is one character</b>: <code>0–9</code>, <code>A–Z</code> and the punctuation the firmware knows.</li>' +
-        '<li>Each crop is binarized to <b>28×28</b> with the <b>same integer Otsu</b> the MCU runs, so host and device see byte-identical input.</li>' +
-        '<li>A <code>_background</code> rejection class keeps a blank or junk frame from being read as a letter.</li>' +
-        '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Nothing here is read as a <b>sequence</b>: one crop in, one character out. Road signs are a separate project type.</span></div>' +
-        '<p class="tm-tour-muted">Use <kbd>←</kbd> / <kbd>→</kbd> to step through, <kbd>Esc</kbd> to exit.</p>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Nothing here is read as a <b>sequence</b>: one crop in, one character out. Road signs are a separate project type. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
+        '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
     }},
     {{
       chapter: 1,
@@ -14386,6 +14507,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 2,
       title: 'Capture Character Samples',
+      live: 'samples',
       target: '[id^="sourceCapture-"]',
       fallback: ['.source-actions', '.source-panel'],
       placement: 'right',
@@ -14439,6 +14561,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 3,
       title: 'Integer Otsu Binarization &amp; Vertical Projection',
+      live: 'thresholds',
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
@@ -14520,6 +14643,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.train-card', '.col-train'],
       placement: 'left',
       advanceTarget: '#trainBtn',
+      live: 'train',
       checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
       body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>), then open the green accuracy pill for the per-character breakdown.</p>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A character that lags behind the rest usually needs more samples — go back to <b>Edit</b> and re-train.</span></div>'
@@ -14614,23 +14738,30 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var SIGN_OCR_STEPS = [
     {{
       chapter: 1,
-      title: 'Welcome to 3-Character Road Sign Verification',
+      title: 'Your Road Sign Verification, End to End',
+      /* Step 0 is the big picture rather than a lesson, so it carries
+         `overview` and a `stages` list instead of a spotlight: the card
+         floats centred over a dimmed workspace and its one button starts
+         the walkthrough. */
       target: null,
       fallback: [],
       placement: 'auto',
-      body: '<p>This workspace does not classify a whole sign. It <b>verifies a known target</b>, one character at a time:</p>' +
-        '<ol>' +
-        '<li>Locate the sign in the frame.</li>' +
-        '<li>Split it into the <b>3 character slots</b> you declared.</li>' +
-        '<li>Run glyph inference on each slot.</li>' +
-        '<li>Compare the three readings with the target and answer <b>🟢 YES (MATCH)</b> or <b>🔴 NO (NOT MATCH)</b>.</li>' +
-        '</ol>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Because the target is fixed, the model only ever has to learn the handful of characters that appear on it — a very small, very accurate classifier.</span></div>' +
-        '<p class="tm-tour-muted">Use <kbd>←</kbd> / <kbd>→</kbd> to step through, <kbd>Esc</kbd> to exit.</p>'
+      overview: true,
+      stages: [
+        {{ t: 'Set the 3-Char Target Sign', d: 'Type the sign&rsquo;s characters into the three slots, left to right — that target is what the model verifies.' }},
+        {{ t: 'Collect Character Samples', d: 'Capture labelled samples for each character on the sign, one class per distinct character.' }},
+        {{ t: 'Edit &amp; Clean ROI / Thresholds', d: 'Open the Sample Worktable to set the ROI box and the Dark / Lum thresholds for each character.' }},
+        {{ t: 'Train the Model', d: 'Train the small int8 classifier; because the target is fixed it only learns the characters on that sign.' }},
+        {{ t: 'Test YES / NO &amp; Export', d: 'Read the three slots in Preview and answer 🟢 YES (MATCH) or 🔴 NO (NOT MATCH), then export.' }}
+      ],
+      body: '<p>This workspace does not classify a whole sign. It <b>verifies a known target</b>, one character at a time, and answers <b>🟢 YES (MATCH)</b> or <b>🔴 NO (NOT MATCH)</b>.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Because the target is fixed, the model only ever has to learn the handful of characters that appear on it — a very small, very accurate classifier. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
+        '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
     }},
     {{
       chapter: 1,
       title: 'Set the 3 Target Sign Characters, in Order',
+      live: 'signseq',
       target: '#signSeqBar',
       fallback: ['.col-classes', '.signseq-bar'],
       placement: 'right',
@@ -14663,6 +14794,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 2,
       title: 'Capture Samples for the Character',
+      live: 'samples',
       target: '[id^="sourceCapture-"]',
       fallback: ['.source-actions', '.source-panel'],
       placement: 'right',
@@ -14711,6 +14843,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 3,
       title: 'Isolate a Single Character in the Worktable',
+      live: 'thresholds',
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
@@ -14793,6 +14926,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.train-card', '.col-train'],
       placement: 'left',
       advanceTarget: '#trainBtn',
+      live: 'train',
       checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
       body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd>) and check the per-character accuracy pill when the run ends.</p>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A slot that keeps coming back <code>_background</code> needs more of that character, or a tighter ROI.</span></div>'
@@ -14945,6 +15079,11 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var tourIndex = 0;
   var uiBefore = null;
   var placeTimer = null;
+  /* The step the ring currently on screen belongs to.  Placement waits on
+     a frame, so this is the only way to tell a ring that has been
+     re-seated for the new step from the old one still sitting where the
+     last step left it — the headless walk reads it through `place()`. */
+  var placedIndex = -1;
   /* Click-to-advance state.  `advState` mirrors what the card should say
      about the spotlighted control: nothing, "click it", or "it is
      disabled — use Next". */
@@ -14958,6 +15097,24 @@ mountReflowTimers.push(window.setTimeout(() => {{
   /* Geometry of the last `placeTour`, kept so the arrow and the beacon can
      be re-aimed without re-measuring the whole workspace. */
   var placeMark = null;
+  /* Phase B — "hands-on" mode.  `orbMode` means the card and the dim layer
+     are OFF screen and the floating orb is on: the user is working, and
+     from that moment on nothing in the workspace may move the tour.
+     `orbSnapshot` is what the live state looked like the moment they
+     started, so "you have done the step's own work" is a comparison
+     rather than a guess.  `orbFlash*` shows a short acknowledgement
+     ("🛠️ Hands-on mode") before the live badge takes over. */
+  var orbMode = false;
+  var orbSnapshot = null;
+  /* The hand-over froze nothing yet: the step's own screen is still shut,
+     so its live values are not on screen to be the baseline. */
+  var orbBaselineDue = false;
+  var orbWatch = null;
+  var orbSettle = null;
+  var orbFlashText = '';
+  var orbFlashUntil = 0;
+  var orbDragged = false;
+  var orbEventsBound = false;
 
   function autoskipOn() {{
     try {{ return window.localStorage.getItem(AUTOSKIP_KEY) === '1'; }} catch (err) {{ return false; }}
@@ -14992,25 +15149,31 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }}
   }}
 
-  /* ── Click-to-Advance ────────────────────────────────────────────────
-     A step that spotlights a real control should be satisfied by USING
-     that control, not only by pressing Next.  goStep() therefore arms a
-     one-shot listener on the spotlight target:
-       · a button / chip / toolbar keeps its native click — which opens
-         the drawer or modal it belongs to — and the tour advances on a
-         180 ms settle beat, so the two never fight over the layout;
-       · a field, select or slider advances on `change`, debounced
-         350 ms, because a text box fires an event per keystroke;
+  /* ── Explain & Point ─────────────────────────────────────────────────
+     Phase A of every step: the card spotlights one real control and says
+     what to do there.  Using that control is the answer to the card, so
+     goStep() arms a listener on the spotlight target — but the answer is
+     NOT "skip ahead":
+       · a button / chip / toolbar keeps its native click (which opens the
+         drawer or modal it belongs to) and, on a 180 ms settle beat, the
+         card COLLAPSES into the floating orb;
+       · a field, select or slider does the same on `change`, debounced
+         350 ms, because a text box fires an event per keystroke and the
+         user may keep dragging for a while;
        · a control that cannot be used YET (Train before samples, Export
          before training) says so in the card instead of silently
-         swallowing the click — a disabled button never dispatches one,
-         so nothing else could tell the user why it did nothing.
-     The listener is torn down on every step change and in endTour, so no
-     step can inherit the previous one's trigger. */
+         swallowing the click — a disabled button never dispatches one, so
+         nothing else could tell the user why it did nothing.
+     Nothing here moves the tour on.  The step is left when the user says
+     so — by clicking the orb — which is what keeps the tutorial from
+     teleporting out from under someone taking their twentieth photo. */
   var ADV_CLICK_SEL = 'button, [role="button"], a[href], input, select, textarea, ' +
     '.class-preprocess-chip, .chip, .tm-toolbar-btn, .tm-action-btn, .ocr-empty-cta';
   var ADV_SETTLE_MS = 180;
   var ADV_INPUT_MS = 350;
+  /* Beat between the orb being clicked and the next card appearing: long
+     enough to read the acknowledgement, short enough not to feel laggy. */
+  var ORB_ADVANCE_MS = 420;
 
   function unbindTargetAdvance() {{
     if (advTimer) {{ window.clearTimeout(advTimer); advTimer = null; }}
@@ -15028,12 +15191,23 @@ mountReflowTimers.push(window.setTimeout(() => {{
     advTarget = null; advClick = null; advChange = null;
   }}
 
+  /* The user just used the control the card was pointing at.  That is the
+     answer to "explain and point": stop explaining, get the card and the
+     dim layer off the screen, and start carrying the live state instead.
+     The settle beat lets the control finish its own job — opening a
+     drawer, committing a value — before the orb reads the result. */
+  function collapseIntent(delay) {{
+    if (!tourOpen || orbMode) return;
+    if (advTimer) window.clearTimeout(advTimer);
+    advTimer = window.setTimeout(function () {{ advTimer = null; enterOrbMode(); }}, delay || ADV_SETTLE_MS);
+  }}
+
+  /* The one way a step is ever left.  Called from the orb, from Next →,
+     from Skip step →, from a chapter chip and from the arrow keys — never
+     from a workspace event. */
   function advanceLater(delay) {{
     if (advTimer) window.clearTimeout(advTimer);
-    /* Acknowledge the press before the card changes: the user did exactly
-       what the checkpoint asked, and the tour should say so rather than
-       silently swapping the slide out from under their cursor. */
-    flashCheckpointPassed();
+    flashOrb('✅ Moving on&hellip;');
     advTimer = window.setTimeout(function () {{
       advTimer = null;
       if (!tourOpen) return;
@@ -15052,7 +15226,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
      closed modal, a collapsed panel (`phaseTarget`, optionally with
      `phaseIf`).  Nothing is forced open in that case: the step points at
      the control that opens the screen, and the click carries the user in
-     (see `resumeStep`).  Same step index, two phases, no teleporting. */
+     and then hands the workspace over (see `collapseIntent`).  Same step
+     index, two phases, no teleporting. */
   function resolveStepTargets(step) {{
     var out = {{ target: null, control: null, phase: false }};
     if (!step) return out;
@@ -15074,23 +15249,330 @@ mountReflowTimers.push(window.setTimeout(() => {{
     return out;
   }}
 
-  /* Phase two of a `phaseTarget` step.  The user pressed the control that
-     opens the screen — a closed Settings modal, a collapsed Advanced
-     panel — so the step re-seats the spotlight and the arrow onto what
-     they just opened, without moving to a new step.  If the click did not
-     actually open anything the step simply stays in its trigger phase. */
-  function resumeStep() {{
-    if (!tourOpen) return;
+  /* ── Phase B · the floating orb ("hands-on" mode) ─────────────────────
+     The card above explains a step and points at one control.  The moment
+     the user touches it, this takes over.  Three things it exists for:
+       · the dim layer and the card come OFF screen, so every button,
+         slider and modal is reachable while the guide is still running;
+       · the pill carries the LIVE state of the job — sample counts,
+         thresholds, the target sign, training — instead of a static
+         sentence the user has already read;
+       · it never advances anything by itself.  Clicking it is the user
+         saying "done", and `?` brings the card back to re-read.
+     Live state is read through two channels, because the workspace
+     changes in two ways: DOM events for what the user does (input,
+     change, click), and a poll for what the backend pushes back
+     (STATE.counts after a capture, a finished training run) which arrives
+     with no event at all. */
+  var ORB_READY_BADGE = '✅ Step Ready!';
+  var LIVE_SEL = '#classPreprocessDark, #classPreprocessDarkNum, #classPreprocessLum, ' +
+    '#classPreprocessLumNum, #classPreprocessMode, #signSeqSlot-0, #signSeqSlot-1, ' +
+    '#signSeqSlot-2, #advReadingOrder, #advInkPolarity, #previewDarkSlider, ' +
+    '#previewDarkNum, #previewLumSlider, #previewLumNum';
+
+  function orbNode() {{ return byId('tmTourOrb'); }}
+
+  function orbEsc(s) {{
+    return String(s === undefined || s === null ? '' : s).replace(/[&<>"]/g, function (c) {{
+      return {{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }}[c];
+    }});
+  }}
+
+  /* Every class's sample count in one number.  The rejection class the
+     export adds is not something the user collects, so it never shows up
+     in the count the orb reads back to them. */
+  function samplesTotal() {{
+    var total = 0;
+    try {{
+      var counts = (STATE && STATE.counts) || {{}};
+      Object.keys(counts).forEach(function (k) {{
+        if (k === '{BACKGROUND_CLASS_NAME}') return;
+        total += Number(counts[k]) || 0;
+      }});
+    }} catch (err) {{}}
+    return total;
+  }}
+
+  function trainDone() {{
+    var el = byId('trainStatus');
+    if (el && /Model Trained/.test(String(el.textContent || ''))) return true;
+    return !!(STATE && STATE.trainClassAccuracies);
+  }}
+
+  /* The values a step of kind `thresholds` / `signseq` is about, as one
+     comparable string — every slider, select and slot the tour watches. */
+  function liveValues() {{
+    var out = [];
+    try {{
+      Array.prototype.forEach.call(document.querySelectorAll(LIVE_SEL), function (el) {{
+        out.push(String(el.id || el.className || '?') + '=' + String(el.value === undefined ? '' : el.value));
+      }});
+    }} catch (err) {{}}
+    return out.join('|');
+  }}
+
+  /* What "this step's own work" looks like as a value.  A step opts in by
+     declaring `live`: `samples` (its sample count), `train` (whether a run
+     has finished), `thresholds` (every slider / select the worktable and
+     the preview own) or `signseq` (the three target-sign slots).  Only
+     those kinds can flip the badge green — that is what stops an unrelated
+     click from congratulating the user. */
+  function liveSignature(step) {{
+    var kind = (step && step.live) || '';
+    if (kind === 'samples') return 'n=' + samplesTotal();
+    if (kind === 'train') {{
+      /* A model that already exists reads "Model Trained" the moment the
+         workspace loads, so the status line alone cannot say whether the
+         run the user just started has finished — the per-class accuracies
+         the backend pushes at the end of a run can. */
+      var accs = (STATE && STATE.trainClassAccuracies) || null;
+      return 'trained=' + (trainDone() ? '1' : '0') + ';acc=' +
+        (accs ? JSON.stringify(accs) : '');
+    }}
+    if (kind === 'thresholds' || kind === 'signseq') return liveValues();
+    return '';
+  }}
+
+  /* What "the user has done nothing yet" looked like when the workspace
+     was handed over.  A step whose screen is still shut cannot be frozen
+     yet: the card presses its door on the next tick, and the panel's own
+     arrival would otherwise read as the user's work — a green badge
+     before a single slider has been touched.  So the baseline waits for
+     the screen the step documents, and takes its values then. */
+  function armOrbBaseline() {{
+    var step = STEPS[tourIndex] || {{}};
+    if (typeof step.phaseIf === 'function') {{
+      var open = true;
+      try {{ open = !step.phaseIf(); }} catch (err) {{ open = true; }}
+      if (!open) {{ orbBaselineDue = true; return; }}
+    }}
+    orbBaselineDue = false;
+    orbSnapshot = liveSignature(step);
+  }}
+
+  /* The step's live headline plus whether its own work looks done. */
+  function orbState() {{
+    var step = STEPS[tourIndex] || {{}};
+    var kind = step.live || '';
+    var out = {{ text: '', ready: false }};
+    var sig = liveSignature(step);
+    out.ready = !!sig && orbSnapshot !== null && sig !== orbSnapshot;
+    if (kind === 'samples') {{
+      var counts = (STATE && STATE.counts) || {{}};
+      var parts = [];
+      Object.keys(counts).forEach(function (k) {{
+        if (k === '{BACKGROUND_CLASS_NAME}') return;
+        parts.push(orbEsc(k) + ': ' + (Number(counts[k]) || 0));
+      }});
+      out.text = 'Collecting Samples' + (parts.length ? ' (' + parts.join(', ') + ')' : '');
+    }} else if (kind === 'thresholds') {{
+      out.text = 'Adjusting ROI &amp; Thresholds';
+    }} else if (kind === 'signseq') {{
+      var seq = [];
+      for (var i = 0; i < 3; i++) {{
+        var slot = byId('signSeqSlot-' + i);
+        if (slot) seq.push(orbEsc(slot.value || '·'));
+      }}
+      out.text = 'Target Sign: ' + (seq.join(' ') || 'not set');
+    }} else if (kind === 'train') {{
+      out.text = trainDone() ? 'Model Trained' : 'Train Your Model';
+    }} else {{
+      out.text = orbEsc(stripTourTags(step.title || 'This step'));
+    }}
+    return out;
+  }}
+
+  function stripTourTags(html) {{
+    return String(html).replace(/<[^>]*>/g, '').replace(/&amp;/g, '&');
+  }}
+
+  /* Steps that document a screen — Settings, the drawer, the worktable —
+     keep that screen open while the user works, so the pill has to say so
+     instead of pretending the step is over. */
+  function orbScreenHint(step) {{
+    if (!step || typeof step.phaseIf !== 'function') return '';
+    var open = false;
+    try {{ open = !step.phaseIf(); }} catch (err) {{ open = false; }}
+    if (!open) return '';
+    var name = stripTourTags(step.phaseName || 'the panel');
+    return 'Close ' + orbEsc(name) + ' &amp; click here for Next Step &rarr;';
+  }}
+
+  /* A short-lived acknowledgement (hands-on mode, moving on).  It wins
+     over the live badge for a moment, then gets out of the way — the pill
+     must not be a place where text piles up. */
+  function flashOrb(text) {{
+    orbFlashText = String(text || '');
+    orbFlashUntil = orbFlashText ? (Date.now() + 1800) : 0;
+    renderOrb();
+  }}
+
+  function renderOrb() {{
+    var orb = orbNode();
+    if (!orb) return;
+    if (!tourOpen || !orbMode) {{
+      orb.classList.remove('on', 'ready', 'dragging');
+      return;
+    }}
+    var step = STEPS[tourIndex] || {{}};
+    /* A baseline that was still waiting for its screen now has one. */
+    if (orbBaselineDue) armOrbBaseline();
+    var st = orbState();
+    var flashing = !!orbFlashText && Date.now() < orbFlashUntil;
+    var textNode = byId('tmTourOrbText');
+    var goNode = byId('tmTourOrbGo');
+    if (textNode) {{
+      if (flashing) {{
+        textNode.innerHTML = orbFlashText;
+      }} else {{
+        var hint = st.ready ? 'click here to continue &rarr;' : (orbScreenHint(step) || 'Click here for Next Step &rarr;');
+        textNode.innerHTML = (st.ready ? ORB_READY_BADGE + ' ' : '') +
+          '<b>Step ' + (tourIndex + 1) + '/' + STEPS.length + ':</b> ' + st.text + ' · ' + hint;
+      }}
+    }}
+    if (goNode) goNode.innerHTML = st.ready ? '&#9989; Done &mdash; Next Step &rarr;' : 'Next Step &rarr;';
+    orb.classList.add('on');
+    orb.classList.toggle('ready', !!st.ready && !flashing);
+  }}
+
+  function orbEventHook(ev) {{
+    if (!orbMode) return;
+    var t = ev && ev.target;
+    /* The pill's own buttons are not workspace adjustments. */
+    if (t && t.closest && t.closest('#tmTourOrb')) return;
+    /* Let the workspace finish reacting to the event first (opening the
+       drawer, re-rendering the worktable) — then read the result. */
+    if (orbSettle) window.clearTimeout(orbSettle);
+    orbSettle = window.setTimeout(function () {{ orbSettle = null; renderOrb(); }}, 150);
+  }}
+
+  function startOrbWatch() {{
+    if (!orbEventsBound) {{
+      orbEventsBound = true;
+      document.addEventListener('input', orbEventHook, true);
+      document.addEventListener('change', orbEventHook, true);
+      document.addEventListener('click', orbEventHook, true);
+    }}
+    if (!orbWatch) {{
+      orbWatch = window.setInterval(function () {{
+        if (!orbMode) {{ stopOrbWatch(); return; }}
+        renderOrb();
+      }}, 900);
+    }}
+  }}
+
+  function stopOrbWatch() {{
+    if (orbWatch) {{ window.clearInterval(orbWatch); orbWatch = null; }}
+    if (orbSettle) {{ window.clearTimeout(orbSettle); orbSettle = null; }}
+    if (orbEventsBound) {{
+      orbEventsBound = false;
+      document.removeEventListener('input', orbEventHook, true);
+      document.removeEventListener('change', orbEventHook, true);
+      document.removeEventListener('click', orbEventHook, true);
+    }}
+  }}
+
+  /* Every step begins in Phase A — card and ring on, pill off — so leaving
+     a step's hands-on mode is a hard reset rather than a style toggle. */
+  function resetOrb() {{
+    orbMode = false;
+    orbSnapshot = null;
+    orbBaselineDue = false;
+    orbFlashText = '';
+    orbFlashUntil = 0;
+    orbDragged = false;
+    stopOrbWatch();
+    var orb = orbNode();
+    if (orb) {{
+      orb.classList.remove('on', 'ready', 'dragging');
+      orb.style.left = '';
+      orb.style.top = '';
+      orb.style.right = '';
+      orb.style.bottom = '';
+    }}
+  }}
+
+  function enterOrbMode() {{
+    if (!tourOpen || orbMode) return;
+    orbMode = true;
+    /* From here on nothing in the workspace may move the tour: the user is
+       working, and only the pill has a say. */
     unbindTargetAdvance();
     advState = 'off';
-    var step = STEPS[tourIndex];
-    /* Some screens open in two stages — the Settings modal opens, but the
-       EMNIST group inside it is still folded away.  `onResume` is where a
-       step reveals that inner content, so the spotlight lands on the row
-       the step actually talks about instead of the whole modal. */
-    runHook(step && step.onResume, 'onResume');
-    placeTour(step);
+    hideTourMarks();
+    var card = byId('tmTourCard');
+    var spot = byId('tmTourSpotlight');
+    if (card) card.classList.remove('on');
+    if (spot) spot.classList.remove('on', 'dim');
+    armOrbBaseline();
+    flashOrb('🛠️ Hands-on mode — the card is out of your way. Work at your own pace.');
+    startOrbWatch();
+    if (typeof syncFrameHeight === 'function') {{
+      try {{ syncFrameHeight(); }} catch (err) {{}}
+    }}
+  }}
+
+  /* `?` on the pill: back to Phase A for the SAME step, card and all. */
+  function leaveOrbMode() {{
+    if (!tourOpen || !orbMode) return;
+    orbMode = false;
+    stopOrbWatch();
+    orbFlashText = '';
+    orbFlashUntil = 0;
+    var orb = orbNode();
+    if (orb) orb.classList.remove('on', 'ready', 'dragging');
+    var card = byId('tmTourCard');
+    if (card) card.classList.add('on');
     armTargetAdvance(true);
+    schedulePlace();
+  }}
+
+  /* Bound once: the pill's own controls, and dragging it out of the way.
+     The whole pill advances the tour, so a stray click can never do
+     anything else. */
+  function bindOrb() {{
+    var orb = orbNode();
+    if (!orb || orb.__tmOrbBound) return;
+    orb.__tmOrbBound = true;
+    orb.addEventListener('click', function (ev) {{
+      if (orbDragged) {{ orbDragged = false; return; }}
+      var t = ev && ev.target;
+      if (t && t.closest && t.closest('#tmTourOrbHelp')) {{ leaveOrbMode(); return; }}
+      advanceLater(ORB_ADVANCE_MS);
+    }});
+    var drag = null;
+    orb.addEventListener('pointerdown', function (ev) {{
+      if (ev.button !== 0) return;
+      var t = ev.target;
+      if (t && t.closest && t.closest('button')) return;
+      var r = orb.getBoundingClientRect();
+      drag = {{ x: ev.clientX, y: ev.clientY, left: r.left, top: r.top }};
+      try {{ orb.setPointerCapture(ev.pointerId); }} catch (err) {{}}
+    }});
+    orb.addEventListener('pointermove', function (ev) {{
+      if (!drag) return;
+      var dx = ev.clientX - drag.x;
+      var dy = ev.clientY - drag.y;
+      if (!orbDragged && (Math.abs(dx) + Math.abs(dy)) < 5) return;
+      orbDragged = true;
+      orb.classList.add('dragging');
+      var r = orb.getBoundingClientRect();
+      var m = 8;
+      var left = Math.max(m, Math.min(window.innerWidth - r.width - m, drag.left + dx));
+      var top = Math.max(m, Math.min(window.innerHeight - r.height - m, drag.top + dy));
+      orb.style.left = Math.round(left) + 'px';
+      orb.style.top = Math.round(top) + 'px';
+      orb.style.right = 'auto';
+      orb.style.bottom = 'auto';
+    }});
+    var endDrag = function (ev) {{
+      if (!drag) return;
+      drag = null;
+      orb.classList.remove('dragging');
+      try {{ orb.releasePointerCapture(ev.pointerId); }} catch (err) {{}}
+    }};
+    orb.addEventListener('pointerup', endDrag);
+    orb.addEventListener('pointercancel', endDrag);
   }}
 
   function armTargetAdvance(force) {{
@@ -15101,7 +15583,9 @@ mountReflowTimers.push(window.setTimeout(() => {{
       if (advTarget) return;
     }}
     unbindTargetAdvance();
-    if (!tourOpen) {{ setAdvState('off'); return; }}
+    /* Hands-on mode owns the tour from here: the card is off screen, so
+       there is nothing left to arm. */
+    if (!tourOpen || orbMode) {{ setAdvState('off'); return; }}
     var step = STEPS[tourIndex];
     if (!step) {{ setAdvState('off'); return; }}
     var found = resolveStepTargets(step);
@@ -15115,27 +15599,28 @@ mountReflowTimers.push(window.setTimeout(() => {{
     advChange = function (ev) {{
       var t = ev && ev.target;
       if (t && t.disabled) return;
-      advanceLater(ADV_INPUT_MS);
+      collapseIntent(ADV_INPUT_MS);
     }};
     advClick = function (ev) {{
       var t = ev && ev.target;
       var hit = (t && t.closest) ? t.closest(ADV_CLICK_SEL) : null;
       /* Only a real control counts: a click on label text or on the
-         card's padding is not an instruction to move on. */
+         card's padding is not an instruction to start working. */
       if (!hit || hit.disabled) return;
-      advanceLater(ADV_SETTLE_MS);
+      collapseIntent(ADV_SETTLE_MS);
     }};
 
     if (found.phase) {{
       /* The screen this step documents is still shut.  Landing on the
-         control that opens it and pressing it is the lesson, so the click
-         re-seats the step inside rather than skipping past it. */
+         control that opens it and pressing it is the lesson: the press
+         opens the screen and the card collapses onto the pill, leaving
+         the user inside the screen they just opened — same step, no
+         teleport, and nothing to read while they work. */
       var door = function (ev) {{
         var t = ev && ev.target;
         var hit = (t && t.closest) ? t.closest(ADV_CLICK_SEL) : null;
         if (!hit || hit.disabled) return;
-        if (advTimer) window.clearTimeout(advTimer);
-        advTimer = window.setTimeout(function () {{ advTimer = null; resumeStep(); }}, ADV_SETTLE_MS);
+        collapseIntent(ADV_SETTLE_MS);
       }};
       el.addEventListener('click', door, true);
       advClick = door;
@@ -15153,10 +15638,10 @@ mountReflowTimers.push(window.setTimeout(() => {{
       setAdvState('click');
     }}
 
-    /* A step may name further controls that also mean "done with this
-       screen" — the worktable's Save Sample and Close both leave it, and
-       neither is a descendant of the threshold slider the step
-       spotlights, so each needs its own binding. */
+    /* A step may name further controls that also mean "working inside this
+       screen" — the worktable's Save Sample and Close are both part of
+       tuning a class, and neither is a descendant of the threshold slider
+       the step spotlights, so each needs its own binding. */
     (step.advanceAlso || []).forEach(function (sel) {{
       var extra = null;
       try {{ extra = document.querySelector(sel); }} catch (err) {{ extra = null; }}
@@ -15244,12 +15729,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
     beacon.classList.add('on');
   }}
 
-  /* The card carries the cue rather than a floating pill: the user is
-     already reading the card, and a badge there cannot be mistaken for
-     part of the controls it is describing. */
+  /* Phase A's cue lives on the card rather than on a floating pill: the
+     user is already reading the card, and a badge there cannot be mistaken
+     for part of the controls it is describing.  Phase B has no card, so the
+     same call keeps the pill's live badge in step with the state. */
   function updateTourCue() {{
     var box = byId('tmTourCue');
     paintTourMarks();
+    renderOrb();
     if (!box) return;
     if (advState === 'off') {{
       box.className = 'tm-tour-cue';
@@ -15277,23 +15764,19 @@ mountReflowTimers.push(window.setTimeout(() => {{
     box.style.display = 'flex';
   }}
 
-  /* The checkpoint the user was just asked to satisfy has been satisfied.
-     Shown in the settle beat between their own press and the next card, so
-     the tour visibly answers the click it received instead of silently
-     swapping the slide underneath it.  Guarded against the debounced
-     `input` path, which would otherwise re-flash on every keystroke. */
-  function flashCheckpointPassed() {{
-    var box = byId('tmTourCue');
-    if (!box || box.classList.contains('pass')) return;
-    box.className = 'tm-tour-cue pass';
-    box.innerHTML = '<span class="tm-tour-cue-ico">✅</span><span><b>Checkpoint Passed!</b> Moving on&hellip;</span>';
-    box.style.display = 'flex';
-  }}
-
   function placeTour(step) {{
     var spot = byId('tmTourSpotlight');
     var card = byId('tmTourCard');
+    /* A placement is queued on the next frame, so one can still be in
+       flight when the guide closes: re-seating here would put the ring
+       back on screen over a workspace nobody is being guided through. */
+    if (!tourOpen) return;
     if (!spot || !card || !step) return;
+    /* Hands-on mode: the dim layer, the ring and the card are deliberately
+       OFF screen so every control is reachable.  There is nothing to place
+       — and re-placing would put the card back in front of the user. */
+    if (orbMode) return;
+    placedIndex = tourIndex;
     var vw = window.innerWidth || document.documentElement.clientWidth || 0;
     var vh = window.innerHeight || document.documentElement.clientHeight || 0;
     var margin = 14;
@@ -15396,6 +15879,17 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }}, 280);
   }}
 
+  /* Press a door on the beat AFTER the click that asked for it.  The
+     workspace closes its toolbar menus from a document-level click
+     listener, and a nested click fired from inside the card's own button
+     would be undone by that listener the moment the outer event finished
+     bubbling — leaving the user in hands-on mode in front of the very
+     panel the card promised to open. */
+  function pressDoor(el) {{
+    if (!el) return;
+    window.setTimeout(function () {{ try {{ el.click(); }} catch (err) {{}} }}, 0);
+  }}
+
   function bindTourCard() {{
     var card = byId('tmTourCard');
     if (!card) return;
@@ -15410,6 +15904,17 @@ mountReflowTimers.push(window.setTimeout(() => {{
     if (skipBtn) skipBtn.onclick = function () {{ goStep(tourIndex + 1); }};
     var backBtn = byId('tmTourBack');
     if (backBtn) backBtn.onclick = function () {{ goStep(tourIndex - 1); }};
+    var startBtn = byId('tmTourStart');
+    if (startBtn) startBtn.onclick = function () {{
+      /* "Start Doing This" is the same intent as touching the spotlighted
+         control, expressed in words.  A step that lives in a shut screen
+         (Settings, the drawer, the worktable) opens its own door first, so
+         the user is not dropped into hands-on mode staring at a closed
+         panel the card never mentioned. */
+      var door = resolveStepTargets(STEPS[tourIndex]);
+      if (door.phase && door.target) pressDoor(door.target);
+      enterOrbMode();
+    }};
     var nextBtn = byId('tmTourNext');
     if (nextBtn) nextBtn.onclick = function () {{
       var step = STEPS[tourIndex];
@@ -15417,17 +15922,16 @@ mountReflowTimers.push(window.setTimeout(() => {{
       if (res.phase && res.target) {{
         /* The step's own screen is still shut and the card is pointing at
            the button that opens it.  Next → must not walk past that door,
-           so it presses it for the user and re-seats the SAME step inside
-           — which is what the welcome slide promises.  Only if the door
-           refuses to open does it fall through to a plain advance, so the
-           user can never get stuck on this step. */
-        try {{ res.target.click(); }} catch (err) {{}}
-        resumeStep();
-        if (resolveStepTargets(STEPS[tourIndex]).phase) goStep(tourIndex + 1);
+           so it presses it for the user and hands the workspace over —
+           which is what the card promises.  Only if the door refuses to
+           open does the next press advance for real, so the user can never
+           get stuck on this step. */
+        pressDoor(res.target);
+        collapseIntent(ADV_SETTLE_MS);
         return;
       }}
       if (tourIndex >= STEPS.length - 1) endTour('finish');
-      else goStep(tourIndex + 1);
+      else advanceLater(ORB_ADVANCE_MS);
     }};
     var auto = byId('tmTourAutoskip');
     if (auto) auto.onchange = function () {{
@@ -15465,15 +15969,44 @@ mountReflowTimers.push(window.setTimeout(() => {{
     html += '</div>';
     html += '<div class="tm-tour-cue" id="tmTourCue" style="display:none"></div>';
     html += '<div class="tm-tour-body">' + step.body + '</div>';
+    if (step.overview && step.stages && step.stages.length) {{
+      /* Step 0 is the map: the whole trip as numbered stages, so the user
+         knows where the guide is taking them before it starts pointing. */
+      html += '<ol class="tm-tour-stages">';
+      step.stages.forEach(function (s, i) {{
+        html += '<li><span class="tm-tour-stage-num">' + (i + 1) + '</span>' +
+          '<span class="tm-tour-stage-txt"><span class="tm-tour-stage-t">' + s.t + '</span>' +
+          '<span class="tm-tour-stage-d">' + s.d + '</span></span></li>';
+      }});
+      html += '</ol>';
+    }}
     html += '<div class="tm-tour-foot">';
     html += '<div class="tm-tour-chapters">' + chips + '</div>';
     html += '<label class="tm-tour-autoskip"><input type="checkbox" id="tmTourAutoskip"' + (autoskipOn() ? ' checked' : '') + '/><span>Don&rsquo;t show automatically on startup</span></label>';
-    html += '<div class="tm-tour-actions">';
-    html += '<button type="button" class="tm-tour-btn ghost" id="tmTourSkip"' + (last ? ' disabled' : '') + '>Skip step &rarr;</button>';
-    html += '<span class="tm-tour-spacer"></span>';
-    html += '<button type="button" class="tm-tour-btn" id="tmTourBack"' + (tourIndex === 0 ? ' disabled' : '') + '>&larr; Back</button>';
-    html += '<button type="button" class="tm-tour-btn primary" id="tmTourNext">' + (last ? 'Finish &#127881;' : 'Next &rarr;') + '</button>';
-    html += '</div>';
+    if (step.overview) {{
+      /* One door out of the overview: start the guide. */
+      html += '<div class="tm-tour-actions">';
+      html += '<button type="button" class="tm-tour-btn primary wide" id="tmTourNext">Start Step-by-Step Guide &rarr;</button>';
+      html += '</div>';
+    }} else {{
+      /* Phase A.  The wide button below the prose is the point of the whole
+         redesign: it is how the user says "let me work" and gets the card
+         and the dim layer out of the way.  Next Step → shares the row with
+         Skip / Back for the user who has already done this step.  A step
+         with nothing to point at (the closing slide) has no hands-on mode
+         to offer, so it keeps the plain row. */
+      if (step.target || step.phaseTarget) {{
+        html += '<div class="tm-tour-actions">';
+        html += '<button type="button" class="tm-tour-btn primary wide" id="tmTourStart">🛠️ Start Doing This (Minimize to Orb)</button>';
+        html += '</div>';
+      }}
+      html += '<div class="tm-tour-actions">';
+      html += '<button type="button" class="tm-tour-btn ghost" id="tmTourSkip"' + (last ? ' disabled' : '') + '>Skip step &rarr;</button>';
+      html += '<span class="tm-tour-spacer"></span>';
+      html += '<button type="button" class="tm-tour-btn" id="tmTourBack"' + (tourIndex === 0 ? ' disabled' : '') + '>&larr; Back</button>';
+      html += '<button type="button" class="tm-tour-btn" id="tmTourNext">' + (last ? 'Finish &#127881;' : 'Next Step &rarr;') + '</button>';
+      html += '</div>';
+    }}
     html += '</div>';
     card.innerHTML = html;
     bindTourCard();
@@ -15491,7 +16024,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
        to a slide the user has already left. */
     unbindTargetAdvance();
     advState = 'off';
+    resetOrb();
     runHook(STEPS[tourIndex].onEnter, 'onEnter');
+    /* Every step starts in Phase A.  Coming out of hands-on mode the card
+       was taken off screen, so the next step's card has to be put back —
+       otherwise the pill would move the user on to a step nothing
+       explains. */
+    var card = byId('tmTourCard');
+    if (card) card.classList.add('on');
     renderTourCard();
     armTargetAdvance(true);
     schedulePlace();
@@ -15514,6 +16054,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     if (card) card.classList.add('on');
     unbindTargetAdvance();
     advState = 'off';
+    resetOrb();
     runHook(STEPS[0].onEnter, 'onEnter');
     renderTourCard();
     armTargetAdvance(true);
@@ -15527,6 +16068,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     tourOpen = false;
     unbindTargetAdvance();
     advState = 'off';
+    resetOrb();
     if (placeTimer) {{ window.clearTimeout(placeTimer); placeTimer = null; }}
     restoreUi(uiBefore);
     uiBefore = null;
@@ -15591,6 +16133,44 @@ mountReflowTimers.push(window.setTimeout(() => {{
     select: function () {{ return selectCurriculum(); }},
     /* What the card is telling the user about the spotlighted control. */
     cue: function () {{ return advState; }},
+    /* Phase A, for the headless test: placement waits on a frame, so this
+       says which step the ring on screen was measured for, and whether it
+       is a cut-out ring (`dim` is false) or the whole viewport dimmed. */
+    place: function () {{
+      var spot = byId('tmTourSpotlight');
+      return {{
+        index: placedIndex,
+        on: !!(spot && spot.classList.contains('on')),
+        dim: !!(spot && spot.classList.contains('dim'))
+      }};
+    }},
+    /* Phase B, for the headless test: whether the floating orb has taken
+       over, whether the step's own work looks done (the green badge), and
+       what the pill is currently saying. */
+    orb: function () {{
+      var node = orbNode();
+      var card = byId('tmTourCard');
+      var spot = byId('tmTourSpotlight');
+      var text = byId('tmTourOrbText');
+      return {{
+        on: !!orbMode,
+        ready: !!(node && node.classList.contains('ready')),
+        live: orbState(),
+        text: text ? String(text.textContent || '') : '',
+        goText: (function () {{ var g = byId('tmTourOrbGo'); return g ? String(g.textContent || '') : ''; }})(),
+        visible: !!isVisibleNode(node),
+        cardOn: !!(card && card.classList.contains('on')),
+        spotOn: !!(spot && spot.classList.contains('on'))
+      }};
+    }},
+    /* Same intent as the wide button on the card. */
+    handsOn: function () {{ enterOrbMode(); }},
+    /* Click the pill, exactly as a user would. */
+    clickOrb: function () {{ var n = orbNode(); if (n) n.click(); }},
+    /* `?` on the pill: bring the instruction card back for the same step. */
+    askOrb: function () {{ var n = byId('tmTourOrbHelp'); if (n) n.click(); }},
+    stages: function () {{ return (STEPS[0] && STEPS[0].stages) ? STEPS[0].stages.length : 0; }},
+    overview: function () {{ return !!(STEPS[0] && STEPS[0].overview); }},
     /* The directional marks, for the headless test: whether the arrow is
        aimed at the ring and whether the click beacon is on it. */
     marks: function () {{
@@ -15609,6 +16189,9 @@ mountReflowTimers.push(window.setTimeout(() => {{
   function bootTour() {{
     var btn = byId('navTutorial');
     if (btn) btn.onclick = function () {{ startTour(true); }};
+    /* The pill is bound once for the page's lifetime: it comes and goes by
+       class, so re-binding it on every step would only stack listeners. */
+    bindOrb();
     /* Pick the curriculum before touching the seen flag: each project
        type keeps its own, so the answer here depends on which guide
        this workspace would show. */
