@@ -17,9 +17,11 @@ What this script does
    The front matter plus Task 0 and Task 1 are deep-copied straight out of
    the reference .docx (photos, callout textboxes, bullets, numbering and
    hyperlinks all travel with them); only the title suffix, the lab-goal
-   sentence and a photo-placeholder box in Task 0 Part A-(3) are patched.
-   Task 2 is written fresh in middle/high-school language around the ten
-   captured screenshots.
+   sentence, and Task 0 Part A-(3) (sign description updated to the
+   3-character road sign + instructor photo-placeholder box) are patched.
+   Task 2 is REPLACED, not merged: the old Image Project Task 2 is excluded
+   from the copy and a fresh Road Sign (3-Char) walkthrough is written in
+   middle/high-school language around the ten captured screenshots.
 5. Writes the .docx to the repository root and to the OneDrive Student_Helper
    folder.
 
@@ -1073,7 +1075,7 @@ def _photo_placeholder_table(doc) -> Any:
     _set_cell_borders(cell, "D97706", 18)
     p = cell.paragraphs[0]
     p.clear()
-    r = p.add_run("📷 [Photo Placeholder: Physical 3-Character Road Sign Setup]")
+    r = p.add_run("📷 [Insert Physical 3-Character Road Sign Photo Here]")
     r.bold = True
     r.font.name = BODY_FONT
     r.font.size = Pt(11)
@@ -1399,12 +1401,35 @@ class _ReferenceImporter:
                 return
         raise RuntimeError("reference lab-goal paragraph not found")
 
-    def _insert_photo_placeholder(self) -> None:
+    def _patch_task0_signs(self) -> None:
+        """Update Task 0 Part A-(3) for the car-sign kit.
+
+        The signpost now carries the 3-character road sign (A 1 2) instead
+        of the original manual's three rotating road signs, and the
+        placeholder box for the instructor's physical-sign photo is inserted
+        right under the heading.
+        """
+        heading = None
         for el in self._copied:
             if self._para_text(el).startswith("(3) Signpost with three Road Signs"):
-                el.addnext(_photo_placeholder_table(self.doc)._tbl)
+                heading = el
+                break
+        if heading is None:
+            raise RuntimeError("Task 0 Part A-(3) heading not found")
+        self._set_para_text(
+            heading, "(3) Signpost with the 3-Character Road Sign:"
+        )
+        heading.addnext(_photo_placeholder_table(self.doc)._tbl)
+        for el in self._copied:
+            if self._para_text(el).startswith("The three Road Signs are"):
+                self._set_para_text(
+                    el,
+                    "The Road Sign is a 3-character sign, for example A 1 2. "
+                    "It has magnets on one side, so you can attach it to the "
+                    "signpost and take it off easily.",
+                )
                 return
-        raise RuntimeError("Task 0 Part A-(3) heading not found")
+        raise RuntimeError("Task 0 sign description paragraph not found")
 
     # ── entry point ──────────────────────────────────────────────────────
     def run(self) -> None:
@@ -1415,7 +1440,7 @@ class _ReferenceImporter:
         self._copy_block(block)
         self._patch_title()
         self._patch_goal()
-        self._insert_photo_placeholder()
+        self._patch_task0_signs()
 
 
 def build_docx(assets: Dict[str, Path]) -> Path:
@@ -1486,21 +1511,9 @@ def build_docx(assets: Dict[str, Path]) -> Path:
         "will collect example photos of each character, teach the app to recognize them, test "
         "a whole sign, and export your very own model.",
     )
-    _callout_box(
-        doc,
-        "Why one character per card?",
-        [
-            "We collect single letters like A, 1 and 2 separately instead of taking one photo "
-            "of the whole A12 sign, because teaching the AI individual letters lets it "
-            "recognize ANY 3-character combination later! During Preview, the app "
-            "automatically slices the whole sign into 3 boxes and checks each letter one by "
-            "one.",
-        ],
-        icon="💡",
-    )
 
     # ── 1. Start page ───────────────────────────────────────────────────
-    _heading(doc, "1. Opening the App & Choosing 🛑 Road Sign (3-Char)", 4)
+    _heading(doc, "2.1 Start Page & Choosing 🛑 Road Sign (3-Char)", 4)
     _para(
         doc,
         "Launch TFLite Training. The Start Page shows three project cards — choose the 🛑 "
@@ -1511,7 +1524,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _numbered(doc, "Tip: Open Project (.tmproj) reopens a project you saved earlier — you will use it again at the very end of this lab.")
 
     # ── 2. Workspace overview ───────────────────────────────────────────
-    _heading(doc, "2. Understanding the Four Main Areas", 4)
+    _heading(doc, "2.2 Overview of the Workspace", 4)
     _para(doc, "The workspace is like a small factory with four working areas:")
     _figure(doc, assets["02_workspace_overview"], "Figure 2.2 — The workspace: Target Sign Bar, Sample Area, Train Area and Preview Area.")
     _bullet(doc, "Target Sign Bar (top left) — where you type the 3 letters/numbers on your sign (for example A, 1, 2).")
@@ -1527,7 +1540,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     )
 
     # ── 3. Target sign ──────────────────────────────────────────────────
-    _heading(doc, "3. Setting Your 3-Character Target Sign", 4)
+    _heading(doc, "2.3 Setting Your 3-Character Target Sign (A ▸ 1 ▸ 2)", 4)
     _para(
         doc,
         "Type the three characters of your sign into the Target Sign Bar. The character cards "
@@ -1542,11 +1555,27 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # ── 4. Collect samples ──────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "4. Collecting Samples in the Sample Area", 4)
+    _heading(doc, "2.4 Collecting Character Samples in the Sample Area", 4)
     _para(
         doc,
         "The AI needs example photos of every character — around 20 per character is a great "
         "start. You can collect real photos, use the quick Auto-fill shortcut, or both.",
+    )
+    _callout_box(
+        doc,
+        "Student tip: one card = one letter or number",
+        [
+            "Each character card collects photos of ONE letter or number only — never a "
+            "photo of the whole A12 sign. If a whole-sign photo lands on the A card, the AI "
+            "learns the WHOLE sign as “A”, and that never matches a real A.",
+            "Fill a card in one click: ⚙ Settings → Advanced Settings → tick Auto-fill "
+            "empty classes with EMNIST template samples (24 / class) → Save changes. Each "
+            "card instantly receives 24 built-in handwriting examples of its letter or "
+            "number.",
+            "Or collect real photos with Device / Webcam / Upload — one letter at a time "
+            "(see below).",
+        ],
+        icon="💡",
     )
     _para(doc, "The quick way — Auto-fill 24 EMNIST samples:", bold=True)
     _para(
@@ -1584,7 +1613,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # ── 5. Sample Worktable ─────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "5. Preprocessing the Samples (Edit Page: Image Viewer & Sample Worktable)", 4)
+    _heading(doc, "2.5 Preprocessing Samples in the Edit Page", 4)
     _para(
         doc,
         "Click Edit on a character card to open the Edit page. On the left, the Image Viewer "
@@ -1594,8 +1623,10 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _figure(doc, assets["05_sample_worktable_edit"], "Figure 2.5 — The Edit page: Image Viewer (left) and Sample Worktable (right).")
     _para(
         doc,
-        "Dark Thr and Lum Thr work together: they turn very dark shadows or bright background "
-        "areas into clean white space so the AI only focuses on the letter itself.",
+        "Dark Thr and Lum Thr set a brightness range for the letter: any pixel outside the "
+        "range is turned into clean pure white (255), while black letters stay black. Very "
+        "dark shadows or bright background areas disappear, so the AI only focuses on the "
+        "letter itself.",
     )
     _add_table(
         doc,
@@ -1617,7 +1648,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # ── 6. Training ─────────────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "6. Training the Model in the Train Area", 4)
+    _heading(doc, "2.6 Training the Model in the Train Area", 4)
     _para(
         doc,
         "Time to teach the AI! Open the Train Area, click ▸ Advanced to see all the settings, "
@@ -1658,7 +1689,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # ── 7. Preview / testing ────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "7. Testing Your Model in the Preview Area", 4)
+    _heading(doc, "2.7 Testing Your Sign in the Preview Area (🟢 YES — MATCH / 🔴 NO — NOT MATCH)", 4)
     _para(
         doc,
         "The Preview Area is your test bench: it shows the whole sign, splits it into 3 boxes, "
@@ -1672,7 +1703,12 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "🧪 Synth Match — builds a test sign out of YOUR three characters (A 1 2). A well-trained model says YES.")
     _bullet(doc, "🔀 Synth Reversed — the same sign backwards, to double-check the reading direction.")
     _bullet(doc, "❌ Synth Mismatch — swaps in a wrong character. A good model says NO.")
-    _para(doc, "Click Input to start reading, and watch the banner:")
+    _para(doc, "The little toggles and sliders on the Preview card:", bold=True)
+    _bullet(doc, "Input — turns the live reading ON / OFF.")
+    _bullet(doc, "ROI — shows the crop box the app will use.")
+    _bullet(doc, "Orig — shows the full picture before any cleaning.")
+    _bullet(doc, "Dark / Lum sliders — like the worktable, they hide shadows and bright background so the AI can read the sign (start with 0 / 100).")
+    _para(doc, "Turn the Input toggle ON to start reading, and watch the banner:")
     _figure(doc, assets["07a_preview_synth_match"], "Figure 2.7a — 🧪 Synth Match: all three boxes agree → 🟢 YES — MATCH.")
     _figure(doc, assets["07b_preview_synth_mismatch"], "Figure 2.7b — ❌ Synth Mismatch: one box disagrees → 🔴 NO — NOT MATCH.")
     _para(doc, "Reading the 3 character boxes:", bold=True)
@@ -1688,15 +1724,15 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     )
     _para(
         doc,
-        "Fix a failing box: open Edit for that character (Section 5), tidy its samples, and "
-        "train again.",
+        "Fix a failing box: open Edit for that character (Section 2.5), tidy its samples, "
+        "and train again.",
         size=10,
         color="475569",
     )
 
     # ── 8. Export + save ────────────────────────────────────────────────
     _page_break(doc)
-    _heading(doc, "8. Exporting the Model & Saving Your Project (.tmproj)", 4)
+    _heading(doc, "2.8 Exporting the Model & Saving Your Project (.tmproj)", 4)
     _para(
         doc,
         "Happy with the YES / NO answers? Export the trained model and save your project so "
@@ -1733,16 +1769,22 @@ def build_docx(assets: Dict[str, Path]) -> Path:
         color="1D4ED8",
     )
 
-    # Scope guard: this lab stops at the end of Task 2 (Export / Save).
-    # A future edit that slips a Task 3 (firmware flashing / serial
-    # commands) back in should fail the build rather than silently
-    # producing the wrong manual.
+    # Scope guard: this is the standalone Car Sign manual.  It stops at the
+    # end of Task 2 (Export / Save), and the old Image Project Task 2
+    # (Left / Stop / Right road signs) must never leak back in — a future
+    # edit that does should fail the build rather than silently producing
+    # the wrong manual.
     all_text = "\n".join(p.text for p in doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 all_text += "\n" + cell.text
-    for banned in ("Task 3", "TFLite_Sign", "Copy the five files"):
+    for banned in (
+        "Task 3",
+        "TFLite_Sign",
+        "Copy the five files",
+        "“Left”, “Stop”, “Right”",
+    ):
         if banned.lower() in all_text.lower():
             raise RuntimeError(f"manual scope violation: contains {banned!r}")
     our_figures = len(doc.inline_shapes) - inline_before_task2
