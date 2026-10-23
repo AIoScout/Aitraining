@@ -371,6 +371,60 @@ def snap(page, path: Path) -> None:
     log(f"screenshot -> {path.name}")
 
 
+def snap_element(ws, selector: str, path: Path) -> None:
+    """Capture a single element of the workspace.
+
+    Playwright clips to the element's own box, so a modal card is captured
+    at its full rendered width — a fixed pixel crop would slice through
+    labels along the card's edges.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ws.locator(selector).screenshot(path=str(path))
+    log(f"screenshot -> {path.name} (element {selector})")
+
+
+def _assert_fully_visible(page, ws, selectors: Sequence[str], margin: int = 30) -> None:
+    """Fail the build if any of `selectors` is clipped by the page viewport.
+
+    Compares each element's rect (workspace-frame coordinates) against the
+    visible slice of the workspace iframe inside the Streamlit page.
+    """
+    rects = ws.evaluate(
+        """(sels) => {
+          const out = {};
+          for (const sel of sels) {
+            const e = document.querySelector(sel);
+            if (!e) { out[sel] = null; continue; }
+            const r = e.getBoundingClientRect();
+            out[sel] = { top: r.top, bottom: r.bottom };
+          }
+          return out;
+        }""",
+        list(selectors),
+    )
+    frame_top = page.evaluate(
+        """() => {
+          const frame = Array.from(document.querySelectorAll('iframe')).find((f) => {
+            try { return !!(f.contentDocument && f.contentDocument.querySelector('#classes')); }
+            catch (e) { return false; }
+          });
+          return frame ? frame.getBoundingClientRect().top : null;
+        }"""
+    )
+    viewport_h = page.evaluate("window.innerHeight")
+    for sel, rect in rects.items():
+        if rect is None:  # optional element (e.g. hint only present on NO)
+            continue
+        visible_bottom = rect["bottom"] <= viewport_h - frame_top - margin
+        visible_top = rect["top"] >= -frame_top + margin
+        if not (visible_bottom and visible_top):
+            raise RuntimeError(
+                f"{sel} would be clipped in the screenshot: top={rect['top']:.0f} "
+                f"bottom={rect['bottom']:.0f} frame_top={frame_top:.0f} "
+                f"viewport_h={viewport_h}"
+            )
+
+
 def _verify_processed_preview_polarity(ws) -> None:
     """Guard the one screenshot whose polarity matters pedagogically.
 
@@ -568,7 +622,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             ],
         )
         settings_top = ASSET_DIR / "_settings_top.png"
-        snap(page, settings_top)
+        snap_element(ws, "#globalSettingsModal .tm-settings-card", settings_top)
         clear_callouts(ws)
 
         # Bottom view: Advanced -> EMNIST samples + Save.  The modal card is
@@ -597,7 +651,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             ],
         )
         settings_bottom = ASSET_DIR / "_settings_bottom.png"
-        snap(page, settings_bottom)
+        snap_element(ws, "#globalSettingsModal .tm-settings-card", settings_bottom)
         clear_callouts(ws)
 
         click_js(ws, "document.getElementById('settingsSave').click()")
@@ -714,12 +768,18 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             ],
         )
         ocr_panel = ASSET_DIR / "_ocr_panel.png"
-        snap(page, ocr_panel)
+        snap_element(ws, "#globalSettingsModal .tm-settings-card", ocr_panel)
         clear_callouts(ws)
         click_js(ws, "document.getElementById('settingsCancel').click()")
         page.wait_for_timeout(600)
 
         # ── 07a / 07b Synth Match + Mismatch ──────────────────────────────
+        # The Preview card (square stage + three slot cards + hint + note)
+        # is taller than the 900 px viewport; enlarge the viewport so the
+        # whole card fits with a comfortable bottom margin, then assert the
+        # verdict elements are fully visible before snapping.
+        page.set_viewport_size({"width": VIEWPORT["width"], "height": 1200})
+        page.wait_for_timeout(600)
         if ws.evaluate("previewSource") != "upload":
             log("Preview source was not upload; switching through JS")
             ws.evaluate(
@@ -740,6 +800,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
         preview_top = ws_top(ws, "#previewCard")
         scroll_to_iframe_y(page, preview_top, target=20)
         page.wait_for_timeout(350)
+        _assert_fully_visible(page, ws, [".signmatch-main", ".signmatch-slots", "#previewNote"])
         preview_specs = [
             {"number": 1, "selectors": [".preview-synth-group"], "pad": 5},
             {"number": 2, "selectors": [".preview-controls"], "pad": 6},
@@ -760,6 +821,9 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             timeout=240_000,
         )
         page.wait_for_timeout(1200)
+        _assert_fully_visible(
+            page, ws, [".signmatch-main", ".signmatch-slots", ".signmatch-hint", "#previewNote"]
+        )
         add_callouts(ws, preview_specs)
         shots["07b_preview_synth_mismatch"] = ASSET_DIR / "07b_preview_synth_mismatch.png"
         snap(page, shots["07b_preview_synth_mismatch"])
@@ -782,13 +846,15 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
 
         browser.close()
 
-    # Composite 04a (Preview source + Advanced EMNIST controls).
+    # Composite 04a (Preview source + Advanced EMNIST controls).  The two
+    # settings panels are element captures of the full modal card, so pass
+    # no crop box — nothing gets sliced through text.
     shots["04a_settings_emnist_autofill"] = ASSET_DIR / "04a_settings_emnist_autofill.png"
     _pair_panels(
         [
-            (settings_top, (300, 470, 760, 900),
+            (settings_top, None,
              "Settings → Preview: choose Local Image File"),
-            (settings_bottom, (300, 520, 1140, 900),
+            (settings_bottom, None,
              "Settings → Advanced: Auto-fill 24 EMNIST samples"),
         ],
         shots["04a_settings_emnist_autofill"],
@@ -799,7 +865,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
     _pair_panels(
         [
             (training_card, (640, 0, 980, 900), "Training card → Advanced"),
-            (ocr_panel, (680, 0, 1140, 900), "Settings → Training Hyperparameters"),
+            (ocr_panel, None, "Settings → Training Hyperparameters"),
         ],
         shots["06_training_and_advanced"],
     )
@@ -858,7 +924,9 @@ def _pair_panels(
     slot_h = canvas_h - label_h - margin
     x_positions = [margin, margin + slot_w + gap]
     for idx, (path, crop_box, label) in enumerate(panels[:2]):
-        crop = _crop_css(Image.open(path).convert("RGB"), crop_box)
+        crop = Image.open(path).convert("RGB")
+        if crop_box is not None:  # None = the capture is already cropped
+            crop = _crop_css(crop, crop_box)
         scale = min(slot_w / crop.width, slot_h / crop.height)
         crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))),
                            Image.LANCZOS)
@@ -1131,39 +1199,39 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # ── Title block ─────────────────────────────────────────────────────
     _heading(doc, "TFLiteTraining App Manual: Car License Project (3-Char)", 2)
-    _heading(doc, "A) Objective:", 3)
+    _heading(doc, "A) Objective & Briefing:", 3)
     _numbered(doc, "To get familiar with the TFLiteTraining desktop app.")
     _numbered(doc, "To collect character samples, preprocess images with ROI and Darkness/Luminosity thresholds, and train an AI model.")
-    _numbered(doc, "To test 3-character road sign / car plate recognition (🟢 YES — MATCH / 🔴 NO — NOT MATCH) and export the trained model.")
+    _numbered(doc, "To test 3-character car license / sign recognition (🟢 YES — MATCH / 🔴 NO — NOT MATCH) and export the trained model.")
     _para(doc, "Briefing:", bold=True)
     _para(
         doc,
         "In this task, you will learn how to train and export a TensorFlow Lite model through "
         "data collection, image preprocessing, model training, and performance preview. "
-        "Specifically, you will train a model that can read a 3-character road sign / car sign "
+        "Specifically, you will train a model that can read a 3-character car license / sign "
         "in sequence (such as A 1 2) and tell you whether the sign in front of the camera "
         "matches your target (🟢 YES — MATCH or 🔴 NO — NOT MATCH). Please remember to save "
         "your project regularly (File ▾ → Save) to avoid losing your work.",
     )
 
     # ── 2. Opening the project & the four main areas ────────────────────
-    _heading(doc, "2. Opening the Project & the Four Main Areas", 3)
+    _heading(doc, "1. Opening the Project & the Four Main Areas", 3)
     _para(
         doc,
-        "Open the app. On the Start Page, find the 🛑 Car License Project (3-Char) card and "
+        "Open the app. On the Start Page, find the 🚗 Car License Project card and "
         "click Get Started to start a new project, or click Open Project (.tmproj) to open a "
         "saved template/project file.",
     )
-    _figure(doc, assets["01_start_page"], "Figure 1 — Start Page: choose the 🛑 Car License Project (3-Char) card.")
+    _figure(doc, assets["01_start_page"], "Figure 1 — Start Page: choose the 🚗 Car License Project card.")
     _para(doc, "After opening the project, you will see four main areas:")
     _figure(doc, assets["02_workspace_overview"], "Figure 2 — The workspace: the four main areas.")
-    _bullet(doc, "Target Sign Bar (Top Left) – for typing the 3 letters or numbers on your road sign in order (e.g., A, 1, 2).", bold_prefix="Target Sign Bar (Top Left)")
+    _bullet(doc, "Target Sign Bar (Top Left) – for typing the 3 letters or numbers on your car license in order (e.g., A, 1, 2).", bold_prefix="Target Sign Bar (Top Left)")
     _bullet(doc, "Sample Area (Left) – for collecting and preprocessing single-character photos for each character card.", bold_prefix="Sample Area (Left)")
     _bullet(doc, "Train Area (Middle) – for training the AI model by adjusting hyperparameters.", bold_prefix="Train Area (Middle)")
     _bullet(doc, "Preview Area (Right) – for testing the trained model on a 3-character sign and checking the 🟢 YES / 🔴 NO result.", bold_prefix="Preview Area (Right)")
 
     # ── 3. Sample Area Part A ───────────────────────────────────────────
-    _heading(doc, "3. Sample Area — Part A: Setting the Target Sign & Collecting Samples", 3)
+    _heading(doc, "2. Sample Area — Part A: Setting the Target License & Collecting Samples", 3)
     _para(doc, "Setting the 3-Character Target Sign:", bold=True)
     _bullet(doc, "Click each of the three boxes in the Target Sign Bar and type your 3 characters (for example, A, 1, 2). Use the ◀ / ▶ buttons beneath a slot to swap neighbouring characters.")
     _bullet(doc, "If your sign uses the same character twice (like A 1 A), the app automatically keeps just one A card with a “Slots 1 & 3” badge so you only need to collect samples for A once!")
@@ -1174,9 +1242,9 @@ def build_docx(assets: Dict[str, Path]) -> Path:
         "Key rule: one card = one character",
         [
             "Each character card collects photos of ONE single letter/number (not the whole "
-            "3-letter sign at once). This way the AI learns each character separately, and "
-            "during Preview the app slices the whole sign into 3 boxes and checks each one "
-            "by itself.",
+            "3-character license at once). This way the AI learns each character separately, "
+            "and during Preview the app slices the whole license into 3 boxes and checks "
+            "each one by itself.",
         ],
         icon="💡",
     )
@@ -1188,7 +1256,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _figure(doc, assets["04a_settings_emnist_autofill"], "Figure 4a — ⚙ Settings: the Auto-fill 24 EMNIST samples option (left: Preview source, right: Advanced Settings).")
 
     # ── 4. Sample Area Part B: the Edit page ────────────────────────────
-    _heading(doc, "4. Sample Area — Part B: Preprocessing the Samples (Edit Page)", 3)
+    _heading(doc, "3. Sample Area — Part B: Preprocessing the Samples (Edit Page)", 3)
     _para(
         doc,
         "On each character card header there are small icons: the Edit button opens the image "
@@ -1219,7 +1287,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _para(doc, "Please remember to save after any changes!", bold=True, color="B91C1C", size=10)
 
     # ── 5. Train Area ───────────────────────────────────────────────────
-    _heading(doc, "5. Train Area — Setting Hyperparameters & Training", 3)
+    _heading(doc, "4. Train Area — Setting Hyperparameters & Training", 3)
     _para(
         doc,
         "Next, move to the Train Area. After image processing is complete, click ▸ Advanced "
@@ -1238,7 +1306,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
             ["6", "Validation Split", "0.25", "0–0.5", "The part of your photos kept secret for testing."],
             ["7", "Learning Rate", "0.0016", "0 or more", "How big each learning step is. Small steps = careful but slow."],
             ["8", "Mix EMNIST into every class", "On", "on / off", "Mixes built-in handwriting examples with your photos so the AI learns from more variety."],
-            ["9", "Background / noise class", "On", "on / off", "Adds a “no letter here” class, so the AI can tell you when a box is empty."],
+            ["9", "Background / noise class", "Off", "on / off", "Default is Off for the Car License Project so the AI focuses purely on your 3 characters and uses standard OOD/confidence checks; turn On only if you want an extra “no letter” class to replace OOD."],
             ["10", "Fine-tune pre-trained backbone", "On", "on / off", "Starts from a smart pre-learned letter reader so your model trains fast and accurately even with just 20 photos!"],
         ],
         widths=[0.3, 1.55, 1.3, 1.0, 2.35],
@@ -1252,7 +1320,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _figure(doc, assets["06_training_and_advanced"], "Figure 6 — The Train Area → Advanced (left) and ⚙ Settings → Training Hyperparameters (right).")
 
     # ── 6. Preview Area & export ────────────────────────────────────────
-    _heading(doc, "6. Preview Area — Testing 3-Slot Sign Matching & Exporting", 3)
+    _heading(doc, "5. Preview Area — Testing 3-Slot Matching & Exporting", 3)
     _para(doc, "Select the Preview Image Input Source in ⚙ Settings → Preview:")
     _bullet(doc, "Device (MCU) — live pictures from the smart car camera.", bold_prefix="Device (MCU)")
     _bullet(doc, "Webcam — your laptop camera.", bold_prefix="Webcam")
@@ -1265,7 +1333,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _para(doc, "Reading the 3-Slot Sign Match Output:", bold=True)
     _figure(doc, assets["07a_preview_synth_match"], "Figure 7a — 🧪 Synth Match: all three slots agree → 🟢 YES — MATCH.")
     _figure(doc, assets["07b_preview_synth_mismatch"], "Figure 7b — ❌ Synth Mismatch: one slot disagrees → 🔴 NO — NOT MATCH.")
-    _bullet(doc, "The app slices the detected sign horizontally into 3 character slots in your chosen reading direction.")
+    _bullet(doc, "The app slices the detected license horizontally into 3 character slots in your chosen reading direction.")
     _bullet(doc, "Each slot card shows WANT <character>, the character read by the AI, the 28×28 image fed to the model, and the confidence percentage (%).")
     _bullet(doc, "When all 3 slots match your target characters with at least 60% confidence, the banner turns green: 🟢 YES — MATCH. If any slot reads a different character, is below 60%, or is blank (_background), the banner turns red: 🔴 NO — NOT MATCH and explains which slot failed.")
     _para(doc, "Exporting the Model & Saving Your Project:", bold=True)
@@ -1274,7 +1342,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model on the Preview card and File ▾ → Save / Save as.")
     _para(
         doc,
-        "That's it — you collected letters, trained an AI to read them, tested a whole sign, "
+        "That's it — you collected letters, trained an AI to read them, tested a whole license, "
         "and exported your model. Well done!",
         bold=True,
         color="1D4ED8",
