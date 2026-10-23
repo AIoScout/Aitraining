@@ -296,7 +296,7 @@ def test_preview_upload_raw_bytes_and_reuse():
             assert calls[0]["kwargs"].get("bg_dark_thresh") == 3, calls[0]["kwargs"]
             assert calls[0]["kwargs"].get("bg_lum_thresh") == 90, calls[0]["kwargs"]
             assert calls[0]["kwargs"].get("match_min_prob") == 0.6, calls[0]["kwargs"]
-            assert res.get("match_text") == record_controller.SIGN_MATCH_TEXT, res
+            assert str(res.get("match_text") or "").startswith(record_controller.SIGN_MATCH_TEXT), res
             assert res.get("match") is True, res
             assert res.get("orig_b64"), res.keys()
             assert res.get("roi_b64") == "cm9p", res.get("roi_b64")
@@ -337,7 +337,7 @@ def test_preview_upload_json_and_dispatch():
             )
             assert res.get("ok") == "1", res
             assert len(calls) == 1, calls
-            assert res.get("match_text") == record_controller.SIGN_MATCH_TEXT, res
+            assert str(res.get("match_text") or "").startswith(record_controller.SIGN_MATCH_TEXT), res
 
             # An upload with no image and no stored copy is a client error,
             # not a crash and not a silent empty prediction.

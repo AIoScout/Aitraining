@@ -88,7 +88,7 @@ def _assert_a12_yes(res: dict) -> None:
     assert not any(s.get("background") for s in slots), slots
     assert all(not s.get("ood") for s in slots), slots
     assert res.get("match") is True, res
-    assert res.get("match_text") == rc.SIGN_MATCH_TEXT, res.get("match_text")
+    assert str(res.get("match_text") or "").startswith(rc.SIGN_MATCH_TEXT), res.get("match_text")
 
 
 def _assert_png_encoding(path: Path, *, require_bright_page: bool) -> np.ndarray:

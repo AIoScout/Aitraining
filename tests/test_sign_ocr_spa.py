@@ -107,6 +107,122 @@ def assert_background_ood_toggle_defaults_off_and_syncs(page):
     ) is True
 
 
+def assert_license_list_modal_union_and_save(page):
+    """Whitelist UI: union cards, two rows, primary move and Save & Sync."""
+    page.evaluate(
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.classes = ['A', '1', '2', 'B', '8'];
+          STATE.counts = {A: 24, 1: 24, 2: 24, B: 24, 8: 24};
+          STATE.sample_previews = {};
+          STATE.processed_previews = {};
+          STATE.class_preprocess = {};
+          STATE.sample_preprocess = {};
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            sign_sequence: ['A', '1', '2'],
+            sign_sequences: ['A12', 'B18'],
+            reading_order: 'ltr'
+          });
+          STATE.export_enabled = true;
+          render();
+        }"""
+    )
+    page.wait_for_timeout(100)
+    try:
+        page.evaluate("window.tmTour && window.tmTour.close && window.tmTour.close()")
+    except Exception:
+        pass
+    page.wait_for_timeout(80)
+    assert page.evaluate("document.getElementById('navLicenseList').style.display") != "none"
+    assert page.evaluate("document.getElementById('navLicenseCount').textContent") == "2"
+    assert "+ Plates (2)" in page.evaluate("document.getElementById('signSeqPlatesBtn').textContent")
+    assert _class_titles(page) == ["A", "1", "2", "B", "8"], _class_titles(page)
+
+    page.evaluate("openLicenseListModal()")
+    page.wait_for_timeout(50)
+    assert page.evaluate("document.querySelectorAll('[data-license-row]').length") == 2
+    assert page.evaluate(
+        "[0,1,2].map((i) => document.getElementById(`licenseSlot-0-${i}`).value).join('')"
+    ) == "A12"
+    assert page.evaluate(
+        "[0,1,2].map((i) => document.getElementById(`licenseSlot-1-${i}`).value).join('')"
+    ) == "B18"
+
+    page.click("#licenseListAdd")
+    assert page.evaluate("document.querySelectorAll('[data-license-row]').length") == 3
+    page.locator('[data-license-row="2"] button').last.click()
+    assert page.evaluate("document.querySelectorAll('[data-license-row]').length") == 2
+    page.locator('[data-license-row="1"] button').filter(has_text="Set as Primary").click()
+    assert page.evaluate(
+        "[0,1,2].map((i) => document.getElementById(`licenseSlot-0-${i}`).value).join('')"
+    ) == "B18"
+
+    page.evaluate(
+        """() => {
+          window.__licenseBodies = [];
+          const real = window.fetch;
+          window.fetch = async (url, opts) => {
+            if (String(url).includes('/classes/sync_ocr') && opts && opts.body) {
+              const body = JSON.parse(opts.body);
+              window.__licenseBodies.push(body);
+              const counts = {};
+              body.names.forEach((n) => { counts[n] = 24; });
+              return new Response(JSON.stringify({
+                ok: '1', classes: body.names, counts,
+                sample_previews: {}, processed_previews: {}, train_enabled: true,
+                seeded: [], seed_error: ''
+              }), {status: 200, headers: {'Content-Type': 'application/json'}});
+            }
+            return real(url, opts);
+          };
+        }"""
+    )
+    page.click("#licenseListSave")
+    page.wait_for_timeout(400)
+    bodies = page.evaluate("window.__licenseBodies")
+    assert bodies, "Save & Sync sent no /classes/sync_ocr request"
+    body = bodies[-1]
+    assert body["sign_sequences"] == ["B18", "A12"], body
+    assert body["sign_sequence"] == "B18", body
+    assert body["names"] == ["B", "1", "8", "A", "2"], body
+    assert page.evaluate("STATE.train_cfg.sign_sequences.join(',')") == "B18,A12"
+    assert page.evaluate("STATE.train_cfg.sign_sequence.join('')") == "B18"
+    assert page.evaluate("document.getElementById('licenseListModal').classList.contains('open')") is False
+
+
+def assert_multi_plate_class_badges(page):
+    page.evaluate(
+        """() => {
+          STATE.project_type = 'sign_ocr';
+          STATE.classes = ['A', '1', '2', '8'];
+          STATE.counts = {A: 24, 1: 24, 2: 24, 8: 24};
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
+            sign_sequence: ['A', '1', '2'],
+            sign_sequences: ['A12', 'A18'],
+            reading_order: 'ltr'
+          });
+          render();
+        }"""
+    )
+    page.wait_for_timeout(80)
+    badges = page.evaluate(
+        """() => {
+          const out = {};
+          document.querySelectorAll('#classes .class-card').forEach((card) => {
+            const title = card.querySelector('.class-title');
+            const name = title ? String(title.firstChild ? title.firstChild.textContent : title.textContent).trim() : '';
+            const badge = card.querySelector('.signslot-badge');
+            out[name] = badge ? String(badge.textContent).trim() : '';
+          });
+          return out;
+        }"""
+    )
+    assert badges.get("A") == "2 plates · Slot 1", badges
+    assert badges.get("1") == "2 plates · Slot 2", badges
+    assert badges.get("2") == "", badges
+    assert badges.get("8") == "", badges
+
+
 def assert_normalisation_matches_python(page):
     """The JS mirror must agree with ocr_preprocess on every case."""
     js = page.evaluate(
@@ -142,7 +258,8 @@ def _reset_sign_state(page):
           STATE.class_preprocess = {};
           STATE.sample_preprocess = {};
           STATE.train_cfg = Object.assign({}, STATE.train_cfg, {
-            sign_sequence: ['A', '1', 'A'], reading_order: 'ltr'
+            sign_sequence: ['A', '1', 'A'], sign_sequences: null,
+            reading_order: 'ltr'
           });
           signSyncSavedTarget = '';
           render();
@@ -327,7 +444,7 @@ def assert_bar_says_when_no_target_is_set(page):
           STATE.project_type = 'sign_ocr';
           STATE.classes = ['A', '1'];
           STATE.counts = {A: 3, 1: 2};
-          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {sign_sequence: null});
+          STATE.train_cfg = Object.assign({}, STATE.train_cfg, {sign_sequence: null, sign_sequences: null});
           render();
         }"""
     )
@@ -934,6 +1051,8 @@ def main() -> int:
             run("auto-seed fills new empty class", assert_auto_seed_fills_a_new_empty_class, page)
             run("sync_ocr carries auto-fill state", assert_sync_ocr_carries_autofill_state, page)
             run("background/OOD toggle defaults OFF and syncs", assert_background_ood_toggle_defaults_off_and_syncs, page)
+            run("license list union/modal/save", assert_license_list_modal_union_and_save, page)
+            run("multi-plate class badges", assert_multi_plate_class_badges, page)
 
             browser.close()
 

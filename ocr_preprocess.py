@@ -446,6 +446,59 @@ def normalize_sign_sequence(value: Any, length: int = SIGN_SEQUENCE_LEN) -> List
     return chars
 
 
+def normalize_sign_sequences(
+    value: Any, length: int = SIGN_SEQUENCE_LEN
+) -> List[str]:
+    """Coerce a whitelist of allowed plates into unique, complete sequences.
+
+    Accepts:
+      * one sequence as a string ("A12") or a list of characters
+        (["A", "1", "2"]) — the legacy single-target form;
+      * a list of sequences (["A12", "B18"], [["A","1","2"], ...]).
+
+    Every plate is uppercased, padded/truncated by normalize_sign_sequence,
+    and kept only when all `length` characters are real 0-9/A-Z (a plate with
+    a '?' pad is incomplete and is not a valid target).  Duplicates are
+    removed in first-appearance order.  Returns [] for no usable plate; the
+    caller decides whether that is an error.
+    """
+    try:
+        n = max(1, int(length))
+    except Exception:
+        n = SIGN_SEQUENCE_LEN
+    items: List[Any]
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        # A bare character list is the legacy single sequence, not a list of
+        # one-character plates.
+        if len(value) == n and all(
+            not isinstance(v, (list, tuple)) and len(str(v).strip()) <= 1
+            for v in value
+        ):
+            items = [value]
+        else:
+            items = list(value)
+    else:
+        return []
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        if item is None or item == "":
+            continue
+        if not isinstance(item, (str, list, tuple)):
+            continue
+        seq = normalize_sign_sequence(item, length=n)
+        if len(seq) != n or any(c == SIGN_SEQUENCE_PAD for c in seq):
+            continue
+        text = "".join(seq)
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
 def _union_box(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
     """Exclusive-ended bbox covering both inputs."""
     return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))

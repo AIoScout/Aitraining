@@ -196,7 +196,7 @@ def test_template_trains_and_reads_the_signs():
         ok = predict(SIGN_A12, SEQUENCE, "ltr")
         assert ok["match"] is True, ok
         assert [s["label"] for s in ok["slots"]] == SEQUENCE, ok["slots"]
-        assert ok["match_text"] == record_controller.SIGN_MATCH_TEXT
+        assert str(ok["match_text"] or "").startswith(record_controller.SIGN_MATCH_TEXT)
 
         wrong = predict(SIGN_A17, SEQUENCE, "ltr")
         assert wrong["match"] is False, wrong

@@ -187,7 +187,7 @@ def test_thin_one_sign_reads_a12_not_background():
     assert not any(s.get("background") for s in slots), slots
     assert all(float(s.get("prob") or 0.0) >= 0.60 for s in slots), slots
     assert res.get("match") is True, res
-    assert res.get("match_text") == rc.SIGN_MATCH_TEXT, res.get("match_text")
+    assert str(res.get("match_text") or "").startswith(rc.SIGN_MATCH_TEXT), res.get("match_text")
 
     # ROI OFF loads full_image_b64 (frame-sized); ROI ON loads
     # processed_image_b64 / crop_image_b64 (ROI-sized).  The JS test

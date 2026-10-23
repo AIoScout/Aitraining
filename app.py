@@ -4809,6 +4809,7 @@ def _render_tm_old_frontend_html(
     </div>
   </div>
   <button type="button" class="tm-toolbar-btn" id="navSettings" title="Global input settings (camera, serial, FPS, frame)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.19.42.58.74 1.06.91.48.17.99.22 1.51.09"></path></svg></span>Settings</button>
+  <button type="button" class="tm-toolbar-btn" id="navLicenseList" style="display:none" title="Manage allowed 3-character car license plates (1 or more valid targets)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><line x1="7" y1="9" x2="17" y2="9"></line><line x1="7" y1="13" x2="14" y2="13"></line></svg></span>🪪 License List <span id="navLicenseCount" style="display:inline-block;min-width:18px;padding:1px 6px;margin-left:6px;border-radius:9px;background:#DBEAFE;color:#1D4ED8;font-size:11px;font-weight:800;text-align:center;">1</span></button>
   <button type="button" class="tm-toolbar-btn" id="navPreferences" title="Preferences (display limits, caching)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg></span>Preferences</button>
   <button type="button" class="tm-toolbar-btn tm-toolbar-tour" id="navTutorial" title="Interactive tutorial &amp; built-in manual">📖 Tutorial</button>
   <div class="tm-toolbar-sep"></div>
@@ -5072,6 +5073,27 @@ def _render_tm_old_frontend_html(
     <div class="tm-settings-foot">
       <button type="button" class="tm-btn" id="settingsCancel">Cancel</button>
       <button type="button" class="tm-btn primary" id="settingsSave">Save changes</button>
+    </div>
+  </div>
+</div>
+<!-- Allowed License Plates (Car License whitelist) -->
+<div class="tm-settings-modal" id="licenseListModal" role="dialog" aria-modal="true">
+  <div class="tm-settings-card">
+    <div class="tm-settings-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;">
+      <div>
+        <h3>🪪 Allowed License Plates</h3>
+        <p>One or more valid 3-character plates. Classes are the union of their characters; Preview says YES when the plate in view matches any entry.</p>
+      </div>
+      <button type="button" id="licenseListClose" class="tm-btn" style="min-width:34px;padding:6px 10px;" title="Close">✕</button>
+    </div>
+    <div id="licenseListRows" style="display:flex;flex-direction:column;gap:10px;margin:14px 0;"></div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <button type="button" id="licenseListAdd" class="tm-btn">+ Add Allowed License Plate</button>
+      <span id="licenseListHint" style="font-size:12px;color:#475569;"></span>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">
+      <button type="button" id="licenseListCancel" class="tm-btn">Cancel</button>
+      <button type="button" id="licenseListSave" class="tm-btn" style="background:#1D4ED8;color:#fff;border-color:#1D4ED8;">Save &amp; Sync Classes</button>
     </div>
   </div>
 </div>
@@ -5790,6 +5812,7 @@ let previewUploadImageB64 = '';
 let previewUploadFilename = '';
 let previewPredictInFlight = false;
 let previewSynthInFlight = false;
+let previewSynthPlateIndex = 0;
 let previewPredictController = null;
 let previewPredictToken = 0;
 let previewLastPredictData = null;
@@ -8548,6 +8571,7 @@ function buildExportRuntimeConfig() {{
     // trained to read, so it must come from the same TrainConfig state the
     // trainer and the preview use.
     sign_sequence: signSequence().join(''),
+    sign_sequences: signSequences(),
     reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
     // No SPA control yet: the per-slot confidence floor is the server's
     // documented default, and exporting it makes that explicit on-device.
@@ -9013,6 +9037,7 @@ async function seedEmnistSamples(names, opts) {{
         {{session: STATE.session, classes: target, count: 24}},
         isSignOcrProject() ? {{
           sign_sequence: signSequence().join(''),
+          sign_sequences: signSequences(),
           reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         }} : {{}}
       ))
@@ -9207,6 +9232,7 @@ async function fillEmptyClassesWithEmnist() {{
         {{ session: STATE.session, only_empty: true, count: 24 }},
         isSignOcrProject() ? {{
           sign_sequence: signSequence().join(''),
+          sign_sequences: signSequences(),
           reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         }} : {{}}
       ))
@@ -10007,7 +10033,7 @@ async function refreshPreviewPrediction(token) {{
   previewPredictController = new AbortController();
   const note = document.getElementById('previewNote');
   try {{
-    const res = await fetch(`${{baseUrl}}/preview/predict?session=${{encodeURIComponent(STATE.session)}}&source=${{encodeURIComponent(previewSource)}}&preprocess=${{encodeURIComponent(previewPreprocessMode)}}&bg_dark=${{encodeURIComponent(previewThreshUserModified ? String(previewDarkThresh ?? '') : '')}}&bg_lum=${{encodeURIComponent(previewThreshUserModified ? String(previewLumThresh ?? '') : '')}}&ood_sign_min=${{encodeURIComponent(String(previewOodSignPctMin ?? 0.3))}}&ood_sign_max=${{encodeURIComponent(String(previewOodSignPctMax ?? 70.0))}}&ood_max_prob=${{encodeURIComponent(String(previewOodMaxProbMin ?? 0.60))}}&ood_entropy_max=${{encodeURIComponent(String(previewOodEntropyRatioMax ?? 0.70))}}&sign_seq=${{encodeURIComponent(signSequence().join(''))}}&reading=${{encodeURIComponent(String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')))}}&_ts=${{Date.now()}}`, {{ signal: previewPredictController.signal }});
+    const res = await fetch(`${{baseUrl}}/preview/predict?session=${{encodeURIComponent(STATE.session)}}&source=${{encodeURIComponent(previewSource)}}&preprocess=${{encodeURIComponent(previewPreprocessMode)}}&bg_dark=${{encodeURIComponent(previewThreshUserModified ? String(previewDarkThresh ?? '') : '')}}&bg_lum=${{encodeURIComponent(previewThreshUserModified ? String(previewLumThresh ?? '') : '')}}&ood_sign_min=${{encodeURIComponent(String(previewOodSignPctMin ?? 0.3))}}&ood_sign_max=${{encodeURIComponent(String(previewOodSignPctMax ?? 70.0))}}&ood_max_prob=${{encodeURIComponent(String(previewOodMaxProbMin ?? 0.60))}}&ood_entropy_max=${{encodeURIComponent(String(previewOodEntropyRatioMax ?? 0.70))}}&sign_seq=${{encodeURIComponent(signSequence().join(''))}}&sign_seqs=${{encodeURIComponent(signSequences().join(','))}}&reading=${{encodeURIComponent(String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')))}}&_ts=${{Date.now()}}`, {{ signal: previewPredictController.signal }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Preview failed.');
     previewLastPredictData = data;
@@ -10422,7 +10448,7 @@ function previewContextBarSignature() {{
   // pills, and the bar otherwise only rebuilds when the source or option
   // lists change.
   const sign = isSignOcrProject()
-    ? `1:${{signSequence().join('')}}:${{String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))}}:${{STATE.export_enabled ? '1' : '0'}}`
+    ? `1:${{signSequence().join('')}}:${{signSequences().join(',')}}:${{String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))}}:${{STATE.export_enabled ? '1' : '0'}}`
     : '0';
   return `${{previewContextSource()}}|${{(STATE.webcam_options || []).length}}|${{(STATE.serial_ports || []).length}}|${{sign}}`;
 }}
@@ -10483,6 +10509,23 @@ function renderPreviewContextBar() {{
       if (isSignOcrProject()) {{
         const group = document.createElement('span');
         group.className = 'preview-synth-group';
+        const plateSeqs = signSequences();
+        if (plateSeqs.length > 1) {{
+          const plateSel = document.createElement('select');
+          plateSel.id = 'previewSynthPlateSelect';
+          plateSel.title = 'Which allowed plate Synth should draw';
+          plateSeqs.forEach((text, idx) => {{
+            const opt = document.createElement('option');
+            opt.value = String(idx);
+            opt.textContent = `Plate #${{idx + 1}} (${{text}})`;
+            plateSel.appendChild(opt);
+          }});
+          plateSel.value = String(Math.max(0, Math.min(plateSeqs.length - 1, Number(previewSynthPlateIndex) || 0)));
+          plateSel.onchange = () => {{
+            previewSynthPlateIndex = Math.max(0, Math.min(plateSeqs.length - 1, Number(plateSel.value) || 0));
+          }};
+          group.appendChild(plateSel);
+        }}
         const defs = [
           ['match', '🧪 Synth Match', 'Combine current 3 target characters into a synthetic sign image', 'previewSynthMatchBtn'],
           ['reversed', '🔀 Synth Reversed', 'Combine in reversed order to test LTR/RTL direction', 'previewSynthRevBtn'],
@@ -10601,6 +10644,8 @@ async function handleSynthesizeSignPreview(variant, opts) {{
         // The target is the SPA's editor state; the server persists it but
         // this request must test what is on screen right now.
         sign_sequence: signSequence().join(''),
+        sign_sequences: signSequences(),
+        plate_index: Number(previewSynthPlateIndex ?? 0),
         reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         bg_dark: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : '',
         bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 100) : '',
@@ -11620,6 +11665,50 @@ function normalizeSignSequence(value) {{
   return chars.slice(0, SIGN_SEQUENCE_LEN);
 }}
 
+// JS mirror of ocr_preprocess.normalize_sign_sequences: the complete,
+// unique 3-character whitelist, first-appearance order.  Incomplete plates
+// (a '?' pad) are not targets and are dropped here; the editable primary
+// lives on in sign_sequence so the bar can still show a half-typed plate.
+function normalizeSignSequences(value) {{
+  const raw = Array.isArray(value)
+    ? value.slice()
+    : (value == null || value === '' ? [] : String(value).split(','));
+  const singleCharList = raw.length === SIGN_SEQUENCE_LEN && raw.every(
+    (v) => !Array.isArray(v) && String(v == null ? '' : v).trim().length <= 1
+  );
+  const items = singleCharList ? [raw] : raw;
+  const out = [];
+  const seen = {{}};
+  items.forEach((item) => {{
+    if (item == null) return;
+    const seq = normalizeSignSequence(item);
+    if (seq.some((c) => c === SIGN_SEQUENCE_PAD)) return;
+    const text = seq.join('');
+    if (!/^[0-9A-Z]{{3}}$/.test(text) || seen[text]) return;
+    seen[text] = true;
+    out.push(text);
+  }});
+  return out;
+}}
+
+function signSequences() {{
+  const cfg = STATE.train_cfg || {{}};
+  const seqs = normalizeSignSequences(cfg.sign_sequences);
+  const primary = normalizeSignSequence(cfg.sign_sequence);
+  if (!primary.some((c) => c === SIGN_SEQUENCE_PAD)) {{
+    // sign_sequences[0] is ALWAYS the primary.  A stale first entry (e.g.
+    // an older boot payload, or a test/editor that wrote sign_sequence
+    // directly) must not survive beside the new primary; any other plate
+    // that happens to equal it is deduped too.
+    const primaryText = primary.join('');
+    const at = seqs.indexOf(primaryText);
+    if (at > 0) seqs.splice(at, 1);
+    if (seqs.length) seqs[0] = primaryText;
+    else seqs.push(primaryText);
+  }}
+  return seqs;
+}}
+
 function signSequence() {{
   const cfg = STATE.train_cfg || {{}};
   return normalizeSignSequence(cfg.sign_sequence);
@@ -11639,9 +11728,16 @@ function signSequenceIsSet() {{
 // keeps one, and neither has to know about the other.
 function signSequenceClasses() {{
   const out = [];
-  signSequence().forEach((c) => {{
-    if (c !== SIGN_SEQUENCE_PAD && out.indexOf(c) === -1) out.push(c);
+  signSequences().forEach((text) => {{
+    for (const c of text) {{
+      if (c !== SIGN_SEQUENCE_PAD && out.indexOf(c) === -1) out.push(c);
+    }}
   }});
+  if (!out.length) {{
+    signSequence().forEach((c) => {{
+      if (c !== SIGN_SEQUENCE_PAD && out.indexOf(c) === -1) out.push(c);
+    }});
+  }}
   return out;
 }}
 
@@ -11655,21 +11751,259 @@ const SIGN_SLOT_RE = /^[0-9A-Z]$/;
 // class without hiding the fact that it is matched twice.
 function signSlotPositions(ch) {{
   const out = [];
-  signSequence().forEach((c, idx) => {{ if (c === ch) out.push(idx + 1); }});
+  signSequences().forEach((text) => {{
+    for (let idx = 0; idx < text.length; idx++) {{
+      if (text[idx] === ch && out.indexOf(idx + 1) === -1) out.push(idx + 1);
+    }}
+  }});
+  if (!out.length) {{
+    signSequence().forEach((c, idx) => {{ if (c === ch && out.indexOf(idx + 1) === -1) out.push(idx + 1); }});
+  }}
+  out.sort((a, b) => a - b);
   return out;
 }}
 
 function signSlotLabel(ch) {{
+  const seqs = signSequences();
+  if (seqs.length > 1) {{
+    const plates = seqs.filter((text) => text.indexOf(ch) !== -1).length;
+    if (plates > 1) {{
+      const pos = signSlotPositions(ch);
+      const posText = pos.length === 1
+        ? `Slot ${{pos[0]}}`
+        : (pos.length === 2
+          ? `Slots ${{pos[0]}} & ${{pos[1]}}`
+          : `Slots ${{pos.slice(0, -1).join(', ')}} & ${{pos[pos.length - 1]}}`);
+      return `${{plates}} plates · ${{posText}}`;
+    }}
+  }}
   const pos = signSlotPositions(ch);
   if (pos.length < 2) return '';
   if (pos.length === 2) return `Slots ${{pos[0]}} & ${{pos[1]}}`;
   return `Slots ${{pos.slice(0, -1).join(', ')}} & ${{pos[pos.length - 1]}}`;
 }}
 
+// Replace the whole whitelist (the License List modal's Save & Sync path).
+// The first plate is the primary, so sign_sequence always stays sequences[0].
+function setSignSequences(list) {{
+  const seqs = normalizeSignSequences(list);
+  if (!seqs.length) return false;
+  const next = Object.assign({{}}, STATE.train_cfg || {{}});
+  next.sign_sequences = seqs.slice();
+  next.sign_sequence = normalizeSignSequence(seqs[0]);
+  STATE.train_cfg = next;
+  adoptSignSequenceClasses();
+  render();
+  scheduleSignClassSync(0);
+  try {{
+    if (previewInputOn && typeof startPreviewPredictLoop === 'function') startPreviewPredictLoop();
+  }} catch (e) {{}}
+  return true;
+}}
+
 // Focus survives the rebuilds a sequence edit causes.  render() clears
 // #classes and renderSignSequenceBar() refills the bar; either would drop the
 // caret the user is typing through.  A snapshot is taken before the DOM is
 // cleared and restored on the new input with the same id.
+// ── Allowed License Plates modal (gatekeeper whitelist) ──────────────────
+let licenseListOpen = false;
+let licenseDraft = [];
+
+function licenseDraftText(row) {{
+  return String((licenseDraft[row] == null ? '' : licenseDraft[row]))
+    .toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, SIGN_SEQUENCE_LEN);
+}}
+function licenseDraftChars(row) {{
+  const text = licenseDraftText(row);
+  const out = text.split('');
+  while (out.length < SIGN_SEQUENCE_LEN) out.push('');
+  return out;
+}}
+function renderLicenseListModal() {{
+  const modal = document.getElementById('licenseListModal');
+  if (!modal) return;
+  modal.classList.toggle('open', !!licenseListOpen);
+  if (!licenseListOpen) return;
+  const host = document.getElementById('licenseListRows');
+  if (!host) return;
+  if (!Array.isArray(licenseDraft) || !licenseDraft.length) licenseDraft = [''];
+  licenseDraft = licenseDraft.map((_, i) => licenseDraftText(i));
+  host.innerHTML = '';
+  licenseDraft.forEach((text, row) => {{
+    const rowEl = document.createElement('div');
+    rowEl.setAttribute('data-license-row', String(row));
+    rowEl.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid #E2E8F0;border-radius:10px;background:#F8FAFC;';
+    const label = document.createElement('span');
+    label.style.cssText = 'min-width:102px;font-weight:700;font-size:13px;color:#0F172A;';
+    label.textContent = row === 0 ? 'Plate #1 · Primary' : `Plate #${{row + 1}}`;
+    rowEl.appendChild(label);
+    const chars = licenseDraftChars(row);
+    for (let slot = 0; slot < SIGN_SEQUENCE_LEN; slot++) {{
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'signseq-slot' + (chars[slot] ? '' : ' empty');
+      inp.id = `licenseSlot-${{row}}-${{slot}}`;
+      inp.value = chars[slot] || '';
+      inp.maxLength = 1;
+      inp.placeholder = SIGN_SEQUENCE_PAD;
+      inp.autocomplete = 'off';
+      inp.autocapitalize = 'characters';
+      inp.spellcheck = false;
+      inp.title = `Plate #${{row + 1}} position ${{slot + 1}}`;
+      inp.onfocus = () => {{ try {{ inp.select(); }} catch (e) {{}} }};
+      inp.oninput = () => {{
+        const raw = String(inp.value || '').trim().toUpperCase();
+        const nextCh = SIGN_SLOT_RE.test(raw.slice(0, 1)) ? raw.slice(0, 1) : '';
+        inp.value = nextCh;
+        const nextChars = licenseDraftChars(row);
+        nextChars[slot] = nextCh;
+        licenseDraft[row] = nextChars.join('').replace(/\?+$/, '');
+        if (nextCh && slot < SIGN_SEQUENCE_LEN - 1) {{
+          const following = document.getElementById(`licenseSlot-${{row}}-${{slot + 1}}`);
+          if (following) {{ following.focus(); try {{ following.select(); }} catch (e) {{}} }}
+        }}
+        const hint = document.getElementById('licenseListHint');
+        if (hint) {{
+          const seqs = normalizeSignSequences(licenseDraft);
+          const union = [];
+          seqs.forEach((t) => {{ for (const c of t) if (union.indexOf(c) === -1) union.push(c); }});
+          hint.textContent = `${{seqs.length}} complete plate(s) · classes: ${{union.join(' ') || '—'}}`;
+        }}
+      }};
+      rowEl.appendChild(inp);
+    }}
+    const left = document.createElement('button');
+    left.type = 'button';
+    left.className = 'signseq-move-left';
+    left.textContent = '◀';
+    left.title = 'Swap positions 1 and 2';
+    left.disabled = !(licenseDraft[row] || '').length;
+    left.onclick = () => {{
+      const c = licenseDraftChars(row);
+      const t = c[0]; c[0] = c[1]; c[1] = t;
+      licenseDraft[row] = c.join('').replace(/\?+$/, '');
+      renderLicenseListModal();
+    }};
+    const right = document.createElement('button');
+    right.type = 'button';
+    right.className = 'signseq-move-right';
+    right.textContent = '▶';
+    right.title = 'Swap positions 2 and 3';
+    right.disabled = !(licenseDraft[row] || '').length;
+    right.onclick = () => {{
+      const c = licenseDraftChars(row);
+      const t = c[1]; c[1] = c[2]; c[2] = t;
+      licenseDraft[row] = c.join('').replace(/\?+$/, '');
+      renderLicenseListModal();
+    }};
+    rowEl.appendChild(left);
+    rowEl.appendChild(right);
+    if (row > 0) {{
+      const primaryBtn = document.createElement('button');
+      primaryBtn.type = 'button';
+      primaryBtn.className = 'tm-btn';
+      primaryBtn.textContent = '⭐ Set as Primary';
+      primaryBtn.title = 'Make this the plate Preview and the device treat as primary';
+      primaryBtn.onclick = () => {{
+        const moved = licenseDraft.splice(row, 1)[0];
+        licenseDraft.unshift(moved);
+        renderLicenseListModal();
+      }};
+      rowEl.appendChild(primaryBtn);
+    }}
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'tm-btn';
+    remove.textContent = '🗑️ Remove';
+    remove.disabled = licenseDraft.length <= 1;
+    remove.onclick = () => {{
+      if (licenseDraft.length <= 1) return;
+      licenseDraft.splice(row, 1);
+      renderLicenseListModal();
+    }};
+    rowEl.appendChild(remove);
+    host.appendChild(rowEl);
+  }});
+  const hint = document.getElementById('licenseListHint');
+  if (hint) {{
+    const seqs = normalizeSignSequences(licenseDraft);
+    const union = [];
+    seqs.forEach((t) => {{ for (const c of t) if (union.indexOf(c) === -1) union.push(c); }});
+    hint.textContent = `${{seqs.length}} complete plate(s) · classes: ${{union.join(' ') || '—'}}`;
+  }}
+}}
+function openLicenseListModal() {{
+  if (!isSignOcrProject()) return;
+  const seqs = signSequences();
+  licenseDraft = (seqs.length ? seqs : [signSequence().join('')]).slice();
+  licenseListOpen = true;
+  renderLicenseListModal();
+}}
+function closeLicenseListModal() {{
+  licenseListOpen = false;
+  const modal = document.getElementById('licenseListModal');
+  if (modal) modal.classList.remove('open');
+}}
+function syncLicenseListNav() {{
+  const btn = document.getElementById('navLicenseList');
+  if (!btn) return;
+  const show = isSignOcrProject();
+  btn.style.display = show ? '' : 'none';
+  if (show) {{
+    const count = document.getElementById('navLicenseCount');
+    if (count) count.textContent = String(Math.max(1, signSequences().length));
+  }}
+}}
+async function saveLicenseList() {{
+  const seqs = normalizeSignSequences(licenseDraft);
+  if (!seqs.length) {{
+    toast('Add at least one complete 3-character plate.');
+    return;
+  }}
+  const names = [];
+  seqs.forEach((text) => {{ for (const c of text) if (names.indexOf(c) === -1) names.push(c); }});
+  const next = Object.assign({{}}, STATE.train_cfg || {{}});
+  next.sign_sequences = seqs.slice();
+  next.sign_sequence = normalizeSignSequence(seqs[0]);
+  STATE.train_cfg = next;
+  applySignClassesState(names);
+  render();
+  const autoSeedOn = !!(autoSeedEmnistSamples
+    || (STATE.train_cfg && STATE.train_cfg.auto_seed_emnist_samples));
+  try {{
+    const res = await fetch(`${{baseUrl}}/classes/sync_ocr`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        session: STATE.session,
+        names: names,
+        sign_sequence: normalizeSignSequence(seqs[0]).join(''),
+        sign_sequences: seqs,
+        reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+        auto_seed_emnist_samples: autoSeedOn,
+      }})
+    }});
+    const data = await res.json().catch(() => ({{ok: '0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to sync license plates.');
+    const nextClasses = Array.isArray(data.classes) && data.classes.length ? data.classes : names;
+    signSyncSavedTarget = `${{names.join('')}}|${{seqs.join(',')}}`;
+    if (!signClassesMatch(nextClasses)) applySignClassesState(nextClasses);
+    if (data.counts || data.sample_previews || typeof data.train_enabled === 'boolean') {{
+      applyRuntimeState(data);
+    }}
+    if (data.seed_error) toast('Auto-fill failed: ' + String(data.seed_error));
+    render();
+    syncLicenseListNav();
+    closeLicenseListModal();
+    toast(`Saved ${{seqs.length}} allowed plate(s).`);
+    try {{
+      if (previewInputOn && typeof startPreviewPredictLoop === 'function') startPreviewPredictLoop();
+    }} catch (e) {{}}
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+  }}
+}}
+
 function signSlotFocusSnapshot() {{
   const el = document.activeElement;
   const id = String((el && el.id) || '');
@@ -11692,6 +12026,17 @@ function restoreSignSlotFocus(snapshot) {{
 function setSignSequence(seq) {{
   const next = Object.assign({{}}, STATE.train_cfg || {{}});
   next.sign_sequence = normalizeSignSequence(seq);
+  const text = next.sign_sequence.join('');
+  const seqs = signSequences();
+  if (!next.sign_sequence.some((c) => c === SIGN_SEQUENCE_PAD)) {{
+    if (seqs.length) seqs[0] = text;
+    else seqs.push(text);
+    next.sign_sequences = seqs;
+  }} else if (Array.isArray(next.sign_sequences)) {{
+    // A half-typed primary is not a valid plate; leave the persisted
+    // whitelist alone until it is complete (the modal is the guided path).
+    next.sign_sequences = seqs;
+  }}
   STATE.train_cfg = next;
   // persistTrainCfgStorage() is deliberately NOT called.  See the note above:
   // the sequence is project content, and letting it join the localStorage
@@ -11820,7 +12165,8 @@ async function syncSignClassesToSequence() {{
   if (!isSignOcrProject()) return;
   const target = signSequenceClasses();
   if (!target.length) return;           // no target: never delete every class
-  const key = target.join('');
+  const seqText = signSequences().join(',');
+  const key = `${{target.join('')}}|${{seqText}}`;
   if (key === signSyncSavedTarget && signClassesMatch(target)) return;
   if (signSyncInFlight) {{ signSyncQueued = true; return; }}
   signSyncInFlight = true;
@@ -11840,6 +12186,7 @@ async function syncSignClassesToSequence() {{
         session: STATE.session,
         names: target,
         sign_sequence: signSequence().join(''),
+        sign_sequences: signSequences(),
         reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         auto_seed_emnist_samples: autoSeedOn,
       }})
@@ -11849,7 +12196,8 @@ async function syncSignClassesToSequence() {{
     // A newer edit may have landed while this request was in flight.  Its
     // response describes the OLD sequence; applying it would make the cards
     // jump back, so ignore it and let the queued pass send the new one.
-    if (signSequenceClasses().join('') !== key) {{
+    if (signSequenceClasses().join('') !== target.join('')
+        || signSequences().join(',') !== seqText) {{
       signSyncQueued = true;
       return;
     }}
@@ -11902,6 +12250,7 @@ function ensureSignSequenceDefault() {{
   if (!ocrIsFreshProject()) return false;
   const next = Object.assign({{}}, STATE.train_cfg || {{}});
   next.sign_sequence = SIGN_DEFAULT_SEQUENCE.slice();
+  next.sign_sequences = [SIGN_DEFAULT_SEQUENCE.join('')];
   STATE.train_cfg = next;
   return true;
 }}
@@ -11944,6 +12293,15 @@ function renderSignSequenceBar(root) {{
   dirTag.className = 'signseq-note';
   dirTag.textContent = rtl ? 'right → left' : 'left → right';
   head.appendChild(dirTag);
+  const platesBtn = document.createElement('button');
+  platesBtn.type = 'button';
+  platesBtn.id = 'signSeqPlatesBtn';
+  platesBtn.className = 'tm-btn';
+  platesBtn.style.cssText = 'margin-left:auto;padding:4px 10px;font-size:12px;';
+  platesBtn.textContent = `+ Plates (${{signSequences().length || 1}})`;
+  platesBtn.title = 'Manage allowed 3-character car license plates';
+  platesBtn.onclick = (e) => {{ if (e) e.stopPropagation(); openLicenseListModal(); }};
+  head.appendChild(platesBtn);
   box.appendChild(head);
 
   // The one-line instruction is the whole tutorial.  Everything below it is an
@@ -12843,12 +13201,16 @@ function resetTrainCfg() {{
   // Read the target BEFORE the reset overwrites it: signSequence() reads
   // STATE.train_cfg, and the defaults carry null there.
   const keptSignSequence = isSignOcrProject() ? signSequence() : null;
+  const keptSignSequences = isSignOcrProject() ? signSequences() : null;
   STATE.train_cfg = Object.assign({{}}, defaults);
   // The target sign sequence is project CONTENT, not a hyperparameter: it says
   // what the project is about, the way the class list does.  A reset that
   // silently dropped it would leave a trained model pointed at nothing, with
   // no way to notice.  Carried across, like the classes are.
-  if (isSignOcrProject()) STATE.train_cfg.sign_sequence = keptSignSequence;
+  if (isSignOcrProject()) {{
+    STATE.train_cfg.sign_sequence = keptSignSequence;
+    STATE.train_cfg.sign_sequences = keptSignSequences;
+  }}
   persistTrainCfgStorage();
   syncAdvancedInlineInputs();
   renderTrainStatus();
@@ -13012,6 +13374,7 @@ function render() {{
   try {{
     renderSignSequenceBar(root);
     restoreSignSlotFocus(signFocus);
+    syncLicenseListNav();
   }} catch (e) {{ console.error('[render] sign sequence bar', e); }}
   // A fresh OCR project presents onboarding instead of two untouched
   // placeholders.  Decided once, before the loop, because the loop's input is
@@ -13403,6 +13766,31 @@ function render() {{
       closeToolbarDropdowns();
       openGlobalSettings();
     }};
+    const navLicenseList = document.getElementById('navLicenseList');
+    if (navLicenseList) navLicenseList.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      closeToolbarDropdowns();
+      openLicenseListModal();
+    }};
+    const licClose = document.getElementById('licenseListClose');
+    if (licClose) licClose.onclick = (e) => {{ if (e) e.stopPropagation(); closeLicenseListModal(); }};
+    const licCancel = document.getElementById('licenseListCancel');
+    if (licCancel) licCancel.onclick = (e) => {{ if (e) e.stopPropagation(); closeLicenseListModal(); }};
+    const licSave = document.getElementById('licenseListSave');
+    if (licSave) licSave.onclick = (e) => {{ if (e) e.stopPropagation(); saveLicenseList(); }};
+    const licAdd = document.getElementById('licenseListAdd');
+    if (licAdd) licAdd.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      licenseDraft.push('');
+      renderLicenseListModal();
+      const row = licenseDraft.length - 1;
+      const first = document.getElementById(`licenseSlot-${{row}}-0`);
+      if (first) first.focus();
+    }};
+    const licModal = document.getElementById('licenseListModal');
+    if (licModal) licModal.onclick = (e) => {{
+      if (e && e.target === licModal) closeLicenseListModal();
+    }};
     const setCancel = document.getElementById('settingsCancel');
     if (setCancel) setCancel.onclick = (e) => {{ if (e) e.stopPropagation(); closeGlobalSettings(); }};
     const setSave = document.getElementById('settingsSave');
@@ -13721,6 +14109,7 @@ window.addEventListener('load', () => {{
     if (isTypingTarget(active) && !insideModal(active)) {{ active.blur(); return; }}
     if (dropdownOpen()) {{ closeNavMenu(); return; }}
     if (classPreprocessOpen) {{ closeClassPreprocessEditor(); return; }}
+    if (typeof licenseListOpen !== 'undefined' && licenseListOpen) {{ closeLicenseListModal(); return; }}
     if (settingsModalOpen()) {{ closeGlobalSettings(); return; }}
     if (preferencesModalOpen()) {{ closePreferences(); return; }}
     if (ocrCharModalOpen) {{ closeOcrCharModal(); return; }}
@@ -14019,6 +14408,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     try {{
       if (fileMenuOpen() || editMenuOpen() || navMenuOpenNow()) return true;
       if (worktableOpen() || settingsOpen() || preferencesOpen()) return true;
+      if (typeof licenseListOpen !== 'undefined' && licenseListOpen) return true;
       if (charModalOpen() || glyphModalOpen()) return true;
       if (drawerOpen()) return true;
     }} catch (err) {{ return false; }}

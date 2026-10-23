@@ -96,6 +96,11 @@ class TrainConfig:
     # all-placeholder sequence both mean "not set yet".
     sign_sequence: Optional[List[str]] = None
 
+    # The gatekeeper whitelist: one or more allowed 3-character plates.
+    # sign_sequence is always sequences[0] for backward compatibility; the
+    # class list is the union of their characters.
+    sign_sequences: Optional[List[str]] = None
+
     # ── OCR / character project ─────────────────────────────────────────
     # Only consulted when project_type == PROJECT_TYPE_OCR; the image
     # project's path never reads them, so their presence cannot perturb an

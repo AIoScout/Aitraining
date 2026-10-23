@@ -109,6 +109,7 @@ from ocr_preprocess import (
     preprocess_glyph,
     preprocess_sign_sequence,
     normalize_sign_sequence,
+    normalize_sign_sequences,
 )
 
 # The sign-OCR preview's two answers, in one place: the SPA renders
@@ -298,6 +299,7 @@ _TRAIN_CFG_COMPLEX_FIELDS = (
     "sample_preprocess",
     "class_names_order",
     "sign_sequence",
+    "sign_sequences",
 )
 
 # Enumerated string fields: a value outside the set is forwarded to code that
@@ -367,6 +369,12 @@ def _coerce_train_cfg_value(name: str, value: Any) -> Tuple[bool, Any]:
             # is dropped so the field falls back to the dataclass default.
             seq = normalize_sign_sequence(value)
             return (True, seq) if any(c != SIGN_SEQUENCE_PAD for c in seq) else (False, None)
+        if name == "sign_sequences":
+            # The whitelist: complete, deduplicated 3-character plates in
+            # first-appearance order.  An empty list is dropped so the
+            # primary `sign_sequence` remains the legacy fallback.
+            seqs = normalize_sign_sequences(value)
+            return (True, seqs) if seqs else (False, None)
         if name == "class_preprocess":
             cfg = normalize_class_preprocess_map(value)
             return (True, cfg) if cfg else (False, None)
@@ -699,7 +707,8 @@ class RecordController:
             and previous_type != PROJECT_TYPE_SIGN_OCR
         ):
             try:
-                seq = self._project_train_cfg(updated.dataset_root).get("sign_sequence")
+                saved = self._project_train_cfg(updated.dataset_root)
+                seq = saved.get("sign_sequences") or saved.get("sign_sequence")
                 if seq:
                     self._enforce_sign_classes(session_id, seq)
             except Exception:
@@ -1127,6 +1136,11 @@ class RecordController:
             ood_max_prob_raw = (qs.get("ood_max_prob") or [""])[0]
             ood_entropy_max_raw = (qs.get("ood_entropy_max") or [""])[0]
             sign_seq_raw = (qs.get("sign_seq") or [""])[0]
+            sign_seqs_raw = (qs.get("sign_seqs") or qs.get("sign_sequences") or [""])[0]
+            sign_seqs_list = (
+                [part.strip() for part in str(sign_seqs_raw).split(",") if part.strip()]
+                if str(sign_seqs_raw).strip() else None
+            )
             reading_raw = (qs.get("reading") or [""])[0]
             match_min_raw = (qs.get("match_min") or [""])[0]
             bg_dark_thresh = int(bg_dark_raw) if str(bg_dark_raw).strip() != "" else None
@@ -1157,6 +1171,7 @@ class RecordController:
                         session_id=session_id,
                         png=predict_png,
                         sign_sequence=sign_seq_raw,
+                        sign_sequences=sign_seqs_list,
                         reading_order=reading_raw,
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
@@ -1735,6 +1750,7 @@ class RecordController:
                         session_id=session_id,
                         png=png,
                         sign_sequence=payload.get("sign_sequence"),
+                        sign_sequences=payload.get("sign_sequences"),
                         reading_order=payload.get("reading_order"),
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
@@ -1860,6 +1876,7 @@ class RecordController:
                         session_id=session_id,
                         png=orig_png,
                         sign_sequence=payload.get("sign_sequence"),
+                        sign_sequences=payload.get("sign_sequences"),
                         reading_order=payload.get("reading_order"),
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
@@ -1947,11 +1964,13 @@ class RecordController:
                     # YES on a plate that is genuinely a different sign.
                     # Retry replacement characters until the reading is
                     # actually wrong.
-                    seq_for_alt, _order = self._sign_preview_sequence(
+                    seq_for_alt, _order, _seqs, _idx = self._sign_preview_sequence(
                         session_id,
                         chars=payload.get("chars"),
                         sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
                         reading_order=payload.get("reading_order") or payload.get("reading"),
+                        sign_sequences=payload.get("sign_sequences"),
+                        plate_index=payload.get("plate_index"),
                     )
                     candidates = [
                         c for c in "56789ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in seq_for_alt
@@ -1976,11 +1995,14 @@ class RecordController:
                         sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
                         reading_order=payload.get("reading_order") or payload.get("reading"),
                         alt_char=alt_char,
+                        sign_sequences=payload.get("sign_sequences"),
+                        plate_index=payload.get("plate_index"),
                     )
                     pred = self._preview_predict_sign_ocr(
                         session_id=session_id,
                         png=synth["png"],
                         sign_sequence=synth["sign_sequence"],
+                        sign_sequences=synth.get("sign_sequences"),
                         reading_order=synth["reading_order"],
                         bg_dark_thresh=_synth_int("bg_dark", "dark"),
                         bg_lum_thresh=_synth_int("bg_lum", "lum"),
@@ -2051,6 +2073,7 @@ class RecordController:
                 # normalises them and falls back to the TrainConfig when the
                 # SPA did not send them (older SPA builds).
                 "sign_sequence": payload.get("sign_sequence"),
+                "sign_sequences": payload.get("sign_sequences"),
                 "reading_order": payload.get("reading_order"),
                 "match_min_prob": _num("match_min_prob", 0.60),
             }
@@ -2201,6 +2224,7 @@ class RecordController:
             session_id = str(payload.get("session") or "").strip()
             names = payload.get("names")
             seq_raw = payload.get("sign_sequence")
+            seqs_raw = payload.get("sign_sequences")
             order_raw = payload.get("reading_order")
             auto_seed_raw = payload.get("auto_seed_emnist_samples")
             if auto_seed_raw is None:
@@ -2213,13 +2237,17 @@ class RecordController:
             # older servers, but taking the sequence here means a client can
             # never sync a class list that disagrees with the target it just
             # committed to the train config.
+            sequences = normalize_sign_sequences(seqs_raw)
+            if not sequences and seq_raw not in (None, ""):
+                sequences = normalize_sign_sequences(seq_raw)
             sequence: Optional[List[str]] = None
-            if seq_raw not in (None, ""):
-                sequence = normalize_sign_sequence(seq_raw)
+            if sequences:
+                sequence = normalize_sign_sequence(sequences[0])
                 derived: List[str] = []
-                for ch in sequence:
-                    if ch != SIGN_SEQUENCE_PAD and ch not in derived:
-                        derived.append(ch)
+                for text in sequences:
+                    for ch in text:
+                        if ch not in derived:
+                            derived.append(ch)
                 if derived:
                     names = derived
             if not isinstance(names, list) or not names:
@@ -2234,10 +2262,9 @@ class RecordController:
                 # synthetic preview drawn by the seeder, a later reopen and
                 # the export all read it from the project's train config.
                 patch: Dict[str, Any] = {}
-                if sequence is not None and any(
-                    ch != SIGN_SEQUENCE_PAD for ch in sequence
-                ):
-                    patch["sign_sequence"] = sequence
+                if sequences:
+                    patch["sign_sequences"] = list(sequences)
+                    patch["sign_sequence"] = normalize_sign_sequence(sequences[0])
                 if order_raw not in (None, ""):
                     order = str(order_raw).strip().lower()
                     if order in ("ltr", "rtl"):
@@ -2286,6 +2313,8 @@ class RecordController:
             }
             if sequence is not None:
                 response["sign_sequence"] = sequence
+            if sequences:
+                response["sign_sequences"] = list(sequences)
             try:
                 # Runtime state is rebuilt AFTER seeding, so counts,
                 # sample_previews and train_enabled describe the files that
@@ -2653,6 +2682,21 @@ class RecordController:
                 out.append(text)
         return out
 
+    @staticmethod
+    def _sign_sequences_classes(sequences: Any) -> List[str]:
+        """Union of unique characters across every allowed plate.
+
+        First-appearance order: ["A12", "B18"] -> ["A", "1", "2", "B", "8"].
+        Duplicate characters (A12 + A18) contribute one class and keep the
+        order in which they first appeared.
+        """
+        out: List[str] = []
+        for text in normalize_sign_sequences(sequences):
+            for ch in text:
+                if ch not in out:
+                    out.append(ch)
+        return out
+
     def _purge_sign_artifact_dirs(
         self, dataset_root: Path, keep: List[str]
     ) -> None:
@@ -2707,7 +2751,7 @@ class RecordController:
             cfg = self._configs.get(session_id)
         if cfg is None:
             raise RuntimeError("missing config")
-        chars = self._sign_sequence_classes(sequence)
+        chars = self._sign_sequences_classes(sequence)
         if not chars:
             return self._classes_load(cfg.dataset_root)
         classes = self._classes_sync_ocr(session_id=session_id, names=chars)
@@ -3186,13 +3230,28 @@ class RecordController:
         # The sequence is a property of the TRAINING RUN, not of the session
         # config: the SPA forwards its live editor state in runtime_config,
         # and the run's train_config.json is the fallback for an older SPA.
+        sign_seqs_src = rc.get("sign_sequences")
         sign_seq_src = rc.get("sign_sequence")
-        if sign_seq_src is None or sign_seq_src == "" or sign_seq_src == []:
+        if (
+            sign_seqs_src in (None, "", [])
+            and (sign_seq_src is None or sign_seq_src == "" or sign_seq_src == [])
+        ):
             train_cfg_saved = self._project_train_cfg(cfg.dataset_root)
+            sign_seqs_src = train_cfg_saved.get("sign_sequences")
             sign_seq_src = train_cfg_saved.get("sign_sequence")
         else:
             train_cfg_saved = None
-        sign_seq = normalize_sign_sequence(sign_seq_src)
+        sign_sequences = normalize_sign_sequences(sign_seqs_src)
+        if not sign_sequences:
+            sign_sequences = normalize_sign_sequences(sign_seq_src)
+        sign_seq = normalize_sign_sequence(
+            sign_sequences[0] if sign_sequences else sign_seq_src
+        )
+        if not sign_sequences:
+            # Legacy/incomplete target: keep the export well-formed (the
+            # device will simply never match a '?' plate) instead of emitting
+            # an empty matrix.
+            sign_sequences = [normalize_sign_sequence(sign_seq)]
         reading_src = rc.get("reading_order")
         if reading_src is None or str(reading_src).strip() == "":
             if train_cfg_saved is None:
@@ -3233,6 +3292,17 @@ class RecordController:
                 sign_class_indices.append(upper_labels.index(str(ch).strip().upper()))
             except ValueError:
                 sign_class_indices.append(-1)
+        # One index row per allowed plate; -1 marks a character that has no
+        # class in this export (the device treats that slot as never matching).
+        sign_class_matrix: List[List[int]] = []
+        for plate in sign_sequences:
+            row: List[int] = []
+            for ch in plate:
+                try:
+                    row.append(upper_labels.index(str(ch).strip().upper()))
+                except ValueError:
+                    row.append(-1)
+            sign_class_matrix.append(row)
         sign_target_lines = []
         if sign_export:
             sign_target_lines = [
@@ -3246,6 +3316,17 @@ class RecordController:
                 "constexpr int kTargetSignClassIndices["
                 + str(int(len(sign_class_indices))) + "] = {"
                 + ", ".join(str(int(i)) for i in sign_class_indices) + "};",
+                "// ── Gatekeeper whitelist (all allowed 3-character plates) ──────",
+                "#define TM_SIGN_MULTI_TARGET_EXPORTED 1",
+                "constexpr int kTargetSignCount = " + str(int(len(sign_sequences))) + ";",
+                "constexpr char kTargetSignSequences[kTargetSignCount][4] = { "
+                + ", ".join(_c_str(str(p)) for p in sign_sequences) + " };",
+                "constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {",
+                *[
+                    "    { " + ", ".join(str(int(v)) for v in row) + " },"
+                    for row in sign_class_matrix
+                ],
+                "};",
                 "constexpr int kSignReadingOrder = " + ("1" if reading_order == "rtl" else "0") + ";",
                 "constexpr float kSignMatchMinProb = " + f"{sign_match_min_prob:.6f}f;",
                 "// 1 = the model's own _background class is the only rejector",
@@ -3799,11 +3880,12 @@ class RecordController:
             # otherwise be injected with EMNIST samples at the next training
             # and become a real model output.
             if resolved_type == PROJECT_TYPE_SIGN_OCR:
-                seq_src = state_cfg.get("sign_sequence")
+                seq_src = state_cfg.get("sign_sequences") or state_cfg.get("sign_sequence")
                 if not seq_src:
-                    seq_src = self._project_train_cfg(
+                    saved = self._project_train_cfg(
                         dataset_root, project_state=project_state
-                    ).get("sign_sequence")
+                    )
+                    seq_src = saved.get("sign_sequences") or saved.get("sign_sequence")
                 try:
                     self._enforce_sign_classes(session_id, seq_src)
                     # The enforcement may have normalized/added classes;
@@ -4834,6 +4916,14 @@ class RecordController:
             "labels": list(labels),
             "has_background_class": bool(has_background_class),
             "sign_background_replace_ood": bool(sign_background_replace_ood),
+            "sign_sequence": (
+                normalize_sign_sequence(meta.get("sign_sequence"))
+                if isinstance(meta, dict) and meta.get("sign_sequence") else None
+            ),
+            "sign_sequences": (
+                normalize_sign_sequences(meta.get("sign_sequences"))
+                if isinstance(meta, dict) else []
+            ),
             "preprocess_mode": str(meta.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL) if isinstance(meta, dict) else PREPROCESS_MODE_AUTO_BY_LABEL,
             "crop_mode": str(meta.get("crop_mode") or CROP_MODE_CENTER) if isinstance(meta, dict) else CROP_MODE_CENTER,
             "manual_roi": normalize_manual_roi(meta.get("manual_roi")) if isinstance(meta, dict) else None,
@@ -5273,8 +5363,10 @@ class RecordController:
         chars: Any = None,
         sign_sequence: Any = None,
         reading_order: Any = None,
-    ) -> Tuple[List[str], str]:
-        """Resolve the target sequence and direction for a synth request.
+        sign_sequences: Any = None,
+        plate_index: Any = None,
+    ) -> Tuple[List[str], str, List[str], int]:
+        """Resolve (plate, direction, whitelist, plate index) for a synth request.
 
         The SPA's editor state is the authority when it sends one; a
         background caller (auto-fill, post-training) has no request payload,
@@ -5285,20 +5377,30 @@ class RecordController:
         """
         from ocr_dataset import TEMPLATE_SIGN_CHARS
 
-        def _has_target(value: Any) -> bool:
-            return any(c != SIGN_SEQUENCE_PAD for c in normalize_sign_sequence(value))
-
         with self._lock:
             cfg = self._configs.get(session_id)
         if cfg is None:
             raise RuntimeError("missing config")
         saved = self._project_train_cfg(Path(cfg.dataset_root))
-        if chars is not None and _has_target(chars):
-            seq = normalize_sign_sequence(chars)
-        elif sign_sequence is not None and _has_target(sign_sequence):
-            seq = normalize_sign_sequence(sign_sequence)
-        else:
-            seq = normalize_sign_sequence(saved.get("sign_sequence"))
+        seqs = normalize_sign_sequences(sign_sequences)
+        if not seqs:
+            seqs = normalize_sign_sequences(sign_sequence)
+        if not seqs and chars is not None:
+            seqs = normalize_sign_sequences(chars)
+        if not seqs:
+            seqs = normalize_sign_sequences(saved.get("sign_sequences"))
+        if not seqs:
+            seqs = normalize_sign_sequences(saved.get("sign_sequence"))
+        if not seqs:
+            raise ValueError(
+                "set the project's 3-character target sign before synthesizing a preview"
+            )
+        try:
+            idx = int(plate_index) if plate_index is not None else 0
+        except (TypeError, ValueError):
+            idx = 0
+        idx = max(0, min(len(seqs) - 1, idx))
+        seq = normalize_sign_sequence(seqs[idx])
         bad = [c for c in seq if len(str(c)) != 1 or str(c).upper() not in TEMPLATE_SIGN_CHARS]
         if bad:
             raise ValueError(
@@ -5308,7 +5410,7 @@ class RecordController:
         order = str(reading_order or saved.get("reading_order") or "ltr").strip().lower()
         if order not in ("ltr", "rtl"):
             order = "ltr"
-        return seq, order
+        return seq, order, list(seqs), idx
 
     def _synthesize_sign_preview_png(
         self,
@@ -5319,6 +5421,8 @@ class RecordController:
         reading_order: Any = None,
         seed: Optional[int] = None,
         alt_char: Any = None,
+        sign_sequences: Any = None,
+        plate_index: Any = None,
     ) -> Dict[str, Any]:
         """Draw a composite 3-character sign and make it the active preview.
 
@@ -5347,11 +5451,13 @@ class RecordController:
             raise RuntimeError("missing config")
         if not self._is_sign_ocr_session(session_id):
             raise ValueError("sign synthesis is only available in a sign_ocr project")
-        seq, order = self._sign_preview_sequence(
+        seq, order, seqs, plate_idx = self._sign_preview_sequence(
             session_id,
             chars=chars,
             sign_sequence=sign_sequence,
             reading_order=reading_order,
+            sign_sequences=sign_sequences,
+            plate_index=plate_index,
         )
         kind = str(variant or "match").strip().lower()
         if kind not in self.SIGN_SYNTH_VARIANTS:
@@ -5399,6 +5505,8 @@ class RecordController:
             "variant": kind,
             "chars": physical,
             "sign_sequence": list(seq),
+            "sign_sequences": list(seqs),
+            "plate_index": int(plate_idx),
             "reading_order": order,
         }
 
@@ -5407,6 +5515,7 @@ class RecordController:
         session_id: str,
         *,
         sign_sequence: Any = None,
+        sign_sequences: Any = None,
         reading_order: Any = None,
         replace_synthetic: bool = False,
     ) -> bool:
@@ -5430,6 +5539,7 @@ class RecordController:
                 session_id,
                 variant="match",
                 sign_sequence=sign_sequence,
+                sign_sequences=sign_sequences,
                 reading_order=reading_order,
             )
             return True
@@ -5441,6 +5551,7 @@ class RecordController:
         session_id: str,
         png: bytes,
         sign_sequence: Any = None,
+        sign_sequences: Any = None,
         reading_order: Any = None,
         bg_dark_thresh: Optional[int] = None,
         bg_lum_thresh: Optional[int] = None,
@@ -5463,7 +5574,6 @@ class RecordController:
         each must clear `match_min_prob`.  A sign reader that says YES when
         two of three characters matched is worse than one that says no.
         """
-        seq = normalize_sign_sequence(sign_sequence)
         order = str(reading_order or "").strip().lower()
         if order not in ("ltr", "rtl"):
             order = "ltr"
@@ -5474,6 +5584,19 @@ class RecordController:
 
         model = self._preview_load_model(session_id=session_id)
         labels: List[str] = list(model.get("labels") or [])
+        # Allowed plates: the live editor list wins, then the run meta (so a
+        # reopened project uses the whitelist it was trained against), then
+        # the legacy single target.  seq[0] is the primary plate and only
+        # supplies slot COUNT / labels; the actual matching below checks every
+        # plate in `seqs`.
+        seqs = normalize_sign_sequences(sign_sequences)
+        if not seqs:
+            seqs = normalize_sign_sequences(sign_sequence)
+        if not seqs:
+            seqs = normalize_sign_sequences(model.get("sign_sequences"))
+        if not seqs:
+            seqs = normalize_sign_sequences(model.get("sign_sequence"))
+        seq = normalize_sign_sequence(seqs[0]) if seqs else normalize_sign_sequence(sign_sequence)
         has_background_class = any(
             str(x).strip().lower() == BACKGROUND_CLASS_NAME.lower()
             for x in labels
@@ -5659,16 +5782,18 @@ class RecordController:
                             f"{ENTROPY_RATIO_MAX:.2f}"
                         )
             in_distribution = not slot_ood
-            matched = bool(
+            # A slot is READABLE independent of which plate we compare it to:
+            # ink, a real (non-background) label, the confidence floor, and
+            # the OOD gates.  The plate loop below only decides which target
+            # character that reading has to equal.
+            accepted = bool(
                 labels
                 and not is_background
                 and label
-                and label.upper() == target.upper()
                 and prob >= SLOT_MIN
                 and bool(slot.get("ok"))
                 and in_distribution
             )
-            all_match = all_match and matched
             if slot_ood:
                 ood_reasons.append(f"slot {i + 1}: {slot_ood_reason}")
             full_box = _to_full_box(slot.get("box"))
@@ -5683,10 +5808,11 @@ class RecordController:
             slots.append(
                 {
                     "index": int(i),
-                    "char": target,
+                    "char": str(target),
                     "label": label,
                     "prob": float(prob),
-                    "match": bool(matched),
+                    "accepted": bool(accepted),
+                    "match": False,
                     "background": bool(is_background),
                     "ood": bool(slot_ood),
                     "ood_reason": str(slot_ood_reason),
@@ -5701,12 +5827,55 @@ class RecordController:
             display = np.asarray(slot.get("display", glyph), dtype=np.uint8)
             slot_pngs.append(_to_png_bytes(Image.fromarray(display, mode="L")))
 
-        if not labels:
-            # No trained model yet: the reading is still worth showing (the
-            # split is useful on its own), but nothing can match.
-            all_match = False
+        # ── compare the three readings against EVERY allowed plate ───────
+        # An exact 3-for-3 plate wins immediately.  If none is exact, keep the
+        # closest one (most slots hit) for the WANT headers so a NO is still
+        # explainable against the plate the user was testing.
+        all_match = False
+        chosen_index = -1
+        chosen_hits = [False] * len(slots)
+        if labels and seqs and len(slots) >= 3:
+            best_score = -1
+            for pi, plate in enumerate(seqs):
+                hits = [
+                    bool(slots[s].get("accepted"))
+                    and str(slots[s].get("label") or "").upper() == plate[s].upper()
+                    for s in range(3)
+                ]
+                score = sum(1 for h in hits if h)
+                if score == 3:
+                    chosen_index = pi
+                    chosen_hits = hits
+                    all_match = True
+                    break
+                if score > best_score:
+                    best_score = score
+                    chosen_index = pi
+                    chosen_hits = hits
+        if chosen_index >= 0:
+            chosen_plate = list(seqs[chosen_index])
+        else:
+            chosen_plate = list(seq) if len(seq) >= 3 else normalize_sign_sequence(seq)
+        for s_idx, slot_out in enumerate(slots):
+            slot_out["char"] = (
+                str(chosen_plate[s_idx]) if s_idx < len(chosen_plate)
+                else SIGN_SEQUENCE_PAD
+            )
+            slot_out["match"] = bool(
+                all_match or (s_idx < len(chosen_hits) and chosen_hits[s_idx])
+            )
 
-        match_text = SIGN_MATCH_TEXT if all_match else SIGN_NOMATCH_TEXT
+        if all_match:
+            plate_text = "".join(chosen_plate)
+            if len(seqs) > 1:
+                match_text = (
+                    f"{SIGN_MATCH_TEXT} · Plate #{chosen_index + 1} "
+                    f"({plate_text})"
+                )
+            else:
+                match_text = f"{SIGN_MATCH_TEXT} ({plate_text})"
+        else:
+            match_text = SIGN_NOMATCH_TEXT
         # Per-slot readings doubled as the bar labels: the preview's output
         # pane renders a distribution for every other source, and for a sign
         # the interesting distribution IS the three slots.
@@ -5767,7 +5936,12 @@ class RecordController:
             "entropy_ratio": float(max((s["entropy_ratio"] for s in slots), default=0.0)),
             # ── the sign_ocr payload ────────────────────────────────────
             "sign_ocr": True,
-            "sign_sequence": list(seq),
+            "sign_sequence": list(chosen_plate),
+            "sign_sequences": list(seqs),
+            "matched_sequence": "".join(chosen_plate) if all_match else "",
+            "matched_index": int(chosen_index) if all_match else -1,
+            "closest_sequence": "".join(chosen_plate) if (not all_match and seqs) else "",
+            "plate_count": int(len(seqs)),
             "reading_order": order,
             "slots": slots,
             "slot_images_b64": [base64.b64encode(p).decode("ascii") for p in slot_pngs],
@@ -5987,21 +6161,30 @@ class RecordController:
             # so the mixed set, labels.txt and the model output indices all
             # come from exactly the characters the sign prints.
             saved_train_cfg = self._project_train_cfg(sess_cfg.dataset_root)
+            sign_seqs_src = cfg_dict.get("sign_sequences")
+            if sign_seqs_src in (None, "", []):
+                sign_seqs_src = saved_train_cfg.get("sign_sequences")
             sign_seq_src = cfg_dict.get("sign_sequence")
             if sign_seq_src in (None, "", []):
                 sign_seq_src = saved_train_cfg.get("sign_sequence")
             effective_sign_seq: Optional[List[str]] = None
+            effective_sign_sequences: Optional[List[str]] = None
             if project_type == PROJECT_TYPE_SIGN_OCR:
-                # Keep the FULL sequence (a repeated A 1 A is one class but
-                # still three slots); dedupe only for the class list.
-                effective_sign_seq = normalize_sign_sequence(sign_seq_src)
-                sign_chars = self._sign_sequence_classes(effective_sign_seq)
-                if not sign_chars:
+                # The whitelist is the authority; the legacy single target is
+                # folded in when an older client sends only sign_sequence.
+                effective_sign_sequences = normalize_sign_sequences(sign_seqs_src)
+                if not effective_sign_sequences:
+                    effective_sign_sequences = normalize_sign_sequences(sign_seq_src)
+                if not effective_sign_sequences:
                     raise ValueError(
-                        "Set the target sign sequence before training — its "
-                        "characters are the model's classes."
+                        "Add at least one 3-character license plate before "
+                        "training — its characters are the model's classes."
                     )
-                self._enforce_sign_classes(session_id, sign_chars)
+                sign_chars = self._sign_sequences_classes(effective_sign_sequences)
+                self._enforce_sign_classes(session_id, effective_sign_sequences)
+                effective_sign_seq = normalize_sign_sequence(
+                    effective_sign_sequences[0]
+                )
                 # Feature toggle: _background is the ONLY rejector when this
                 # is on; when off the model trains on the target characters
                 # alone and the standard OOD gates do the rejecting.  The
@@ -6094,6 +6277,7 @@ class RecordController:
                 # model was trained to read instead of guessing from the
                 # current editor state.
                 sign_sequence=effective_sign_seq,
+                sign_sequences=effective_sign_sequences,
                 reading_order=str(cfg_dict.get("reading_order") or "ltr"),
                 auto_seed_emnist_samples=bool(auto_seed_samples),
             )
@@ -6166,6 +6350,8 @@ class RecordController:
                 # model that was trained differently.
                 "ocr_background_enabled": bool(cfg.ocr_background_enabled),
                 "sign_background_replace_ood": bool(cfg.sign_background_replace_ood),
+                "sign_sequence": list(cfg.sign_sequence) if cfg.sign_sequence else None,
+                "sign_sequences": list(cfg.sign_sequences) if cfg.sign_sequences else [],
                 "preprocess_mode": str(cfg.preprocess_mode),
                 "crop_mode": str(cfg.crop_mode or CROP_MODE_AUTO_SEARCH),
                 "manual_roi": list(cfg.manual_roi) if cfg.manual_roi is not None else None,
@@ -6206,6 +6392,7 @@ class RecordController:
                         session_id,
                         {
                             "sign_sequence": cfg.sign_sequence,
+                            "sign_sequences": cfg.sign_sequences,
                             "reading_order": cfg.reading_order,
                             "sign_background_replace_ood": bool(cfg.sign_background_replace_ood),
                             "ocr_background_enabled": bool(cfg.ocr_background_enabled),
@@ -6221,6 +6408,7 @@ class RecordController:
                 self._maybe_autostore_synth_preview(
                     session_id,
                     sign_sequence=cfg.sign_sequence,
+                    sign_sequences=cfg.sign_sequences,
                     reading_order=cfg.reading_order,
                     replace_synthetic=True,
                 )
