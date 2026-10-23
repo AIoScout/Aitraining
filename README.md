@@ -315,6 +315,16 @@ For firmware, copy the **5 compile files** next to the sketch:
 `model_settings.cpp`, `model_settings.h`.  The default C array symbol is
 `g_tm_model_data`.
 
+The OCR/sign glyph head is **compact by default**: the shared conv stack is
+followed by a 1x1 Conv2D(16) bottleneck → Flatten → Dense(128) → softmax,
+so a 28×28 INT8 model exports at **~130 KB** instead of ~250 KB.  The cached
+backbone is versioned (`v3`) and anything over 500 KB is rebuilt.  The P4
+sketches request a **320 KB internal-SRAM arena** first, retry once with the
+legacy 8 MB PSRAM arena only if `AllocateTensors()` needs it, print the
+model's operator codes before allocation, and turn every resolver/arena/
+allocation failure into a named `FATAL:` line on USB `Serial`.  The generated
+`model_resolver.h` covers every op in the exported graph.
+
 Sign exports add `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`,
 `kTargetSignSequence`, `kTargetSignClassIndices[3]`, `kSignReadingOrder`
 (0 LTR / 1 RTL), `kSignMatchMinProb` (0.60), and the rejection policy:

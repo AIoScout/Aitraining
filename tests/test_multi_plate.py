@@ -135,6 +135,47 @@ def test_multi_plate_union_autofill_preview_and_export():
         assert "constexpr int kTargetSignClassIndices[3] = {0, 1, 2};" in header, header
 
 
+def test_exported_firmware_model_is_compact_and_resolver_is_complete():
+    """The checked-in TFLite_Sign export must be small and fully resolvable.
+
+    This is the artifact the ESP32-P4 sketch builds from; a missing Add*()
+    entry is an AllocateTensors() failure on hardware, not a warning.
+    """
+    import tensorflow as tf
+    from record_controller import _TFLITE_OP_RESOLVER_MAP
+
+    root = ROOT.parent / "TFLite_Sign"
+    tflite = root / "tm.tflite"
+    assert tflite.exists(), tflite
+    assert tflite.stat().st_size < 200 * 1024, tflite.stat().st_size
+    try:
+        interp = tf.lite.Interpreter(
+            model_content=tflite.read_bytes(),
+            experimental_op_resolver_type=(
+                tf.lite.experimental.OpResolverType
+                .BUILTIN_WITHOUT_DEFAULT_DELEGATES),
+        )
+    except Exception:
+        interp = tf.lite.Interpreter(model_content=tflite.read_bytes())
+    interp.allocate_tensors()
+    ops = []
+    for detail in interp._get_ops_details():
+        op = str(detail.get("op_name") or "")
+        if op and op != "DELEGATE" and op not in ops:
+            ops.append(op)
+    assert ops, "export has no ops?"
+    resolver = (root / "model_resolver.h").read_text(encoding="utf-8")
+    for op in ops:
+        add_fn = _TFLITE_OP_RESOLVER_MAP.get(op)
+        assert add_fn is not None, f"no resolver mapping for {op}"
+        assert f"Add{add_fn}()" in resolver, f"{op} missing from model_resolver.h"
+    settings = (root / "model_settings.h").read_text(encoding="utf-8")
+    assert "TM_SIGN_OCR_MODEL 1" in settings
+    assert "#define TM_SIGN_USE_BACKGROUND_OOD" in settings
+    assert "kBackgroundClassIndex" in settings
+    assert "#define TM_SIGN_MULTI_TARGET_EXPORTED 1" in settings
+
+
 def test_normalize_sign_sequences_matches_the_plates_contract():
     from ocr_preprocess import normalize_sign_sequences
 

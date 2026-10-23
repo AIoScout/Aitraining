@@ -388,6 +388,36 @@ def classifier_head_layers(num_classes: int, cfg: TrainConfig) -> List[Any]:
     ]
 
 
+def glyph_head_layers(num_classes: int, cfg: TrainConfig) -> List[Any]:
+    """Compact head for OCR/sign glyph models: GAP -> Dense -> softmax.
+
+    The legacy Flatten() head turns the 3x3x128 feature map into 1,152
+    inputs, so Dense(128) alone owns 147k weights (~147 KB INT8) and the
+    exported glyph model lands around 250 KB with a multi-MB tensor arena.
+    A 1x1 Conv2D(16) bottleneck keeps a coarse 3x3 spatial layout while
+    reducing Flatten to 144 inputs; Dense(128) then owns 18k weights.  The
+    whole INT8 model stays around 145 KB and the 320 KB internal-SRAM arena
+    fits on the ESP32-P4.  (A global pool was tried first; it lost enough
+    per-position detail that occasional template glyphs collapsed.)
+
+    Image projects keep the Flatten head: their 96x96 scenes carry spatial
+    structure a global average would throw away, and they are not constrained
+    by the P4 sign sketch's SRAM budget.
+    """
+    reg = tf.keras.regularizers.l2(1e-4)
+    dense_units = max(int(cfg.dense_units), 64)
+    return [
+        # 1x1 bottleneck: keep a coarse 3x3 spatial layout (which a global
+        # pool throws away) while cutting Flatten's 1,152 inputs to 144.
+        tf.keras.layers.Conv2D(16, (1, 1), activation="relu", padding="same",
+                               kernel_regularizer=reg, name="bottleneck"),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(dense_units, activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.Dropout(0.35),
+        tf.keras.layers.Dense(num_classes, activation="softmax", name="output"),
+    ]
+
+
 def make_optimizer(cfg: TrainConfig, learning_rate: Optional[float] = None) -> tf.keras.optimizers.Optimizer:
     """Build the configured optimizer, optionally at an overridden LR.
 

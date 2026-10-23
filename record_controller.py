@@ -447,21 +447,33 @@ def missing_train_cfg_fields(saved: Any) -> List[str]:
 _TFLITE_OP_RESOLVER_MAP = {
     "ADD": "Add",
     "AVERAGE_POOL_2D": "AveragePool2D",
+    "CONCATENATION": "Concatenation",
     "CONV_2D": "Conv2D",
     "DEPTHWISE_CONV_2D": "DepthwiseConv2D",
+    "DEQUANTIZE": "Dequantize",
     "FULLY_CONNECTED": "FullyConnected",
+    "LEAKY_RELU": "LeakyRelu",
+    "LOGISTIC": "Logistic",
+    "MAXIMUM": "Maximum",
     "MAX_POOL_2D": "MaxPool2D",
+    "MEAN": "Mean",
+    "MINIMUM": "Minimum",
     "MUL": "Mul",
     "PACK": "Pack",
     "PAD": "Pad",
     "QUANTIZE": "Quantize",
-    "DEQUANTIZE": "Dequantize",
     "REDUCE_MAX": "ReduceMax",
+    "RELU": "Relu",
+    "RELU6": "Relu6",
     "RESHAPE": "Reshape",
+    "RESIZE_BILINEAR": "ResizeBilinear",
     "RSQRT": "Rsqrt",
     "SHAPE": "Shape",
     "SOFTMAX": "Softmax",
     "STRIDED_SLICE": "StridedSlice",
+    "SUB": "Sub",
+    "TANH": "Tanh",
+    "TRANSPOSE": "Transpose",
 }
 
 
@@ -500,7 +512,10 @@ def _generate_model_resolver_h(tflite_bytes: bytes) -> str:
     except Exception:
         pass
     if not ops:
-        ops = ["CONV_2D", "MAX_POOL_2D", "SHAPE", "STRIDED_SLICE", "PACK", "RESHAPE", "FULLY_CONNECTED", "SOFTMAX"]
+        # Conservative superset of the ops the glyph/image heads can emit.
+        # The generated resolver is capacity-exact, so an unused entry costs
+        # one resolver slot, never a missing kernel at AllocateTensors().
+        ops = list(_TFLITE_OP_RESOLVER_MAP.keys())
     # An op with no Add*() mapping is NOT a cosmetic loss: the generated
     # resolver would be missing that kernel, MicroInterpreter::AllocateTensors()
     # would fail on the device, and the only symptom is a sketch that flashes

@@ -85,7 +85,7 @@ from trainer import (
     FitContext,
     TrainConfig,
     TrainStrategy,
-    classifier_head_layers,
+    glyph_head_layers,
     conv_backbone_kwargs,
     conv_backbone_layers,
     load_datasets,
@@ -94,7 +94,7 @@ from trainer import (
 
 # Bump when the backbone's architecture or its training recipe changes, so
 # a cached backbone from an older build is never silently reused.
-BACKBONE_CACHE_VERSION = "v2"
+BACKBONE_CACHE_VERSION = "v3"  # v3: compact GAP head; drop any >500 KB cache
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -241,9 +241,18 @@ def ensure_pretrained_backbone(
         sig = backbone_signature(cfg, conv, polarity)
         out = cache_dir / f"backbone_{sig}.keras"
         if out.exists() and not force:
-            if progress is not None:
-                progress(0.03, "Reusing cached glyph backbone")
-            return out
+            # A cached backbone from the bloated Flatten-head era can be large
+            # (the head is not saved, but the cache is still useful to
+            # invalidate explicitly).  Rebuild anything obviously oversized
+            # instead of silently reusing a multi-hundred-KB artefact.
+            try:
+                if int(out.stat().st_size) <= 500 * 1024:
+                    if progress is not None:
+                        progress(0.03, "Reusing cached glyph backbone")
+                    return out
+                out.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         split = str(cfg.ocr_emnist_split)
         data_root = emnist_cache_dir(app_data_dir)
@@ -273,7 +282,7 @@ def ensure_pretrained_backbone(
         backbone = tf.keras.Sequential(conv_backbone_layers(cfg), name="backbone")
         inp = tf.keras.layers.Input(shape=x.shape[1:], name="input")
         t = backbone(inp)
-        for layer in classifier_head_layers(len(uniq), cfg):
+        for layer in glyph_head_layers(len(uniq), cfg):
             t = layer(t)
         model = tf.keras.Model(inp, t, name="emnist_pretrain")
         model.compile(optimizer=make_optimizer(cfg), loss="sparse_categorical_crossentropy",
@@ -353,7 +362,7 @@ def build_transfer_model(
         backbone = tf.keras.Sequential(conv_backbone_layers(cfg), name="backbone")
     inp = tf.keras.layers.Input(shape=input_shape, name="input")
     x = backbone(inp, training=False)
-    for layer in classifier_head_layers(num_classes, cfg):
+    for layer in glyph_head_layers(num_classes, cfg):
         x = layer(x)
     model = tf.keras.Model(inp, x, name="ocr_transfer")
     return model
