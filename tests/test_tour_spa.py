@@ -10,7 +10,7 @@ The guide is built as the rhythm a person actually works in, so that is what
 is checked:
 
   curricula     the guide selected for a project type is that project's own
-                curriculum: 20 steps for `image`, 16 for `ocr`, 16 for
+                curriculum: 23 steps for `image`, 26 for `ocr`, 28 for
                 `sign_ocr`, with three distinct step lists
   overview      every type opens on step 0 as a Workflow Overview: a card
                 that lists the whole trip as numbered stages, with no
@@ -43,6 +43,17 @@ is checked:
                 samples, `#exportBtn` with no model) reports "disabled"
                 instead of trapping the user, does not advance when clicked,
                 and says in the card what to do instead
+  re-armed      the class column is thrown away and rebuilt after every
+                capture (`#classes.innerHTML = ''`), which replaces the very
+                node the click binding sat on: the guide must re-seat onto
+                the fresh node, so pressing the control still hands over
+  containers    a step whose spotlight is a container rather than the field
+                inside it answers to click AND to input / change — the three
+                events the user's own work produces — and the pill's badge
+                turns green for each of them
+  escape order  Escape belongs to whichever layer is on top: with a modal or
+                the drawer open it closes that layer and leaves the guide
+                running, rather than killing the tour standing behind it
   start page    the three project cards all render before any of them acts,
                 and cancelling the Open Project picker is a silent no-op
 
@@ -71,7 +82,7 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # The curriculum each project type must load.  Hard-coded on purpose: the
 # number of steps is the thing a user notices, so it is the thing the test
 # states, rather than something read back out of the source it checks.
-EXPECTED_STEPS = {"image": 20, "ocr": 16, "sign_ocr": 16}
+EXPECTED_STEPS = {"image": 23, "ocr": 26, "sign_ocr": 28}
 
 # Steps whose real interaction the test performs, keyed by the TARGET
 # selector — that is the string the driver records for a step, not the
@@ -528,6 +539,179 @@ DRIVER = r"""
     OUT.push(rec);
   }
 
+  /* ── support for the three checks below ───────────────────────────── */
+  function stepIndexFor(steps, sel) {
+    for (var i = 1; i < steps.length; i++) {
+      if (steps[i] && steps[i].target === sel) return i;
+    }
+    return -1;
+  }
+
+  /* The step that documents a shut screen, found by the door it points at. */
+  function stepIndexForPhase(steps, door) {
+    for (var i = 1; i < steps.length; i++) {
+      if (steps[i] && steps[i].phaseTarget === door) return i;
+    }
+    return -1;
+  }
+
+  /* Put the workspace back the way the next sub-check expects to find it:
+     whatever screen the previous one left standing, closed. */
+  function resetLayers() {
+    try {
+      if (worktableOpen() && typeof closeClassPreprocessEditor === 'function')
+        closeClassPreprocessEditor();
+    } catch (e) {}
+    try {
+      if (settingsOpen() && typeof closeGlobalSettings === 'function') closeGlobalSettings();
+    } catch (e) {}
+    try {
+      if (drawerOpen() && typeof closeSourcePanel === 'function') closeSourcePanel();
+    } catch (e) {}
+  }
+
+  /* ── a rebuilt class column must not disarm the step ──────────────── */
+  async function walkRebind(t, steps) {
+    var i = stepIndexFor(steps, '.tm-action-toolbar');
+    if (i < 0) return;
+    resetLayers();
+    await wait(200);
+    window.tmTour.start();
+    window.tmTour.goTo(i);
+    await settle(i);
+    await wait(340);
+    var rec = {
+      kind: 'rebind', type: t, i: i, err: null,
+      sel: null, replaced: false, cue: null,
+      orbBefore: orb().on, orb: false, cardOn: true, spotOn: true,
+      ready: false, text: '', index: null
+    };
+    var step = steps[i];
+    var before = resolveTargets(step);
+    var oldNode = before.found ? before.found.el : null;
+    /* Mark the node on screen, so the record can state that the press below
+       really went to a DIFFERENT node than the one the binding was armed on. */
+    if (oldNode) oldNode.__tmPreRender = true;
+    /* Exactly what the workspace does after every capture: the class column
+       is thrown away and built again, replacing the node the binding sat on. */
+    try { render(); } catch (e) { rec.err = String((e && e.message) || e); }
+    await wait(600);
+    await settle(i, 6000);
+    await wait(340);
+    var res = resolveTargets(step);
+    rec.sel = res.found ? res.found.sel : null;
+    rec.replaced = !!(res.found && res.found.el && res.found.el.__tmPreRender !== true);
+    rec.cue = window.tmTour.cue();
+    /* The fresh node must be armed again: pressing it hands over. */
+    doReal(step, res.found, controlOf(step, res.found), 'click');
+    await wait(3000);
+    var ob = orb();
+    rec.orb = ob.on;
+    rec.cardOn = ob.cardOn;
+    rec.spotOn = ob.spotOn;
+    rec.ready = !!(ob.live && ob.live.ready);
+    rec.text = String(ob.text || '').slice(0, 96);
+    rec.index = window.tmTour.current();
+    OUT.push(rec);
+    window.tmTour.close();
+    await wait(160);
+    resetLayers();
+  }
+
+  /* ── a container step answers to click AND to input / change ──────── */
+  async function walkContainerEvents(t, steps) {
+    var i = stepIndexFor(steps, '.tm-action-toolbar');
+    if (i < 0) return;
+    var actions = ['click', 'input', 'change'];
+    for (var k = 0; k < actions.length; k++) {
+      var action = actions[k];
+      resetLayers();
+      await wait(200);
+      window.tmTour.start();
+      window.tmTour.goTo(i);
+      await settle(i);
+      await wait(340);
+      var step = steps[i];
+      var res = resolveTargets(step);
+      var el = res.found ? res.found.el : null;
+      var rec = {
+        kind: 'container', type: t, i: i, action: action,
+        sel: res.found ? res.found.sel : null,
+        isContainer: !!(el && ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON']
+          .indexOf(String(el.tagName || '').toUpperCase()) < 0),
+        indexBefore: window.tmTour.current(), orbBefore: orb().on,
+        orb: false, cardOn: true, spotOn: true, ready: false, text: '', index: null
+      };
+      if (action === 'click') {
+        doReal(step, res.found, controlOf(step, res.found), 'click');
+      } else if (el) {
+        el.dispatchEvent(new Event(action, { bubbles: true }));
+      }
+      await wait(3000);
+      var ob = orb();
+      rec.orb = ob.on;
+      rec.cardOn = ob.cardOn;
+      rec.spotOn = ob.spotOn;
+      rec.ready = !!(ob.live && ob.live.ready);
+      rec.text = String(ob.text || '').slice(0, 96);
+      rec.index = window.tmTour.current();
+      OUT.push(rec);
+      window.tmTour.close();
+      await wait(160);
+    }
+    resetLayers();
+  }
+
+  /* ── Escape closes the open layer, and leaves the guide running ───── */
+  async function walkEscapeLayer(t, steps) {
+    var cases = [
+      { layer: 'settings', door: '#navSettings' },
+      { layer: 'drawer', door: '.tm-action-toolbar button.sample' }
+    ];
+    for (var c = 0; c < cases.length; c++) {
+      var i = stepIndexForPhase(steps, cases[c].door);
+      if (i < 0) continue;
+      resetLayers();
+      await wait(200);
+      window.tmTour.start();
+      window.tmTour.goTo(i);
+      await settle(i);
+      await wait(340);
+      /* Start Doing This presses the step's own door, so the screen the step
+         documents is open and the workspace has been handed over. */
+      var startBtn = byId('tmTourStart');
+      if (startBtn) startBtn.click(); else window.tmTour.handsOn();
+      await wait(1000);
+      var scr = screens();
+      var ob = orb();
+      var rec = {
+        kind: 'escape', type: t, layer: cases[c].layer, i: i,
+        opened: cases[c].layer === 'settings' ? scr.settings : scr.drawer,
+        orbBefore: ob.on, cardBefore: ob.cardOn,
+        closed: false, open: false, index: null
+      };
+      /* Escape, the way a keyboard sends it.  Nothing is focused, so the
+         key goes straight to the layer stack. */
+      try { if (document.activeElement && document.activeElement.blur)
+        document.activeElement.blur(); } catch (e) {}
+      await wait(120);
+      try {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Escape', code: 'Escape', bubbles: true, cancelable: true
+        }));
+      } catch (e) {}
+      await wait(1000);
+      var scr2 = screens();
+      rec.closed = cases[c].layer === 'settings' ? !scr2.settings : !scr2.drawer;
+      rec.open = window.tmTour.isOpen();
+      rec.index = window.tmTour.current();
+      OUT.push(rec);
+      window.tmTour.close();
+      await wait(160);
+      resetLayers();
+    }
+  }
+
   async function walkType(t) {
     try { STATE.project_type = t; } catch (e) {}
     window.tmTour.select();
@@ -549,6 +733,9 @@ DRIVER = r"""
     await wait(140);
     await walkRealControls(t, steps, n);
     await walkAskOrb(t);
+    await walkRebind(t, steps);
+    await walkContainerEvents(t, steps);
+    await walkEscapeLayer(t, steps);
 
     window.tmTour.close();
     await wait(200);
@@ -662,7 +849,10 @@ def run_page(html: str, spec: dict, types) -> dict:
                 "--disable-gpu",
                 "--no-sandbox",
                 "--window-size=1600,1000",
-                "--virtual-time-budget=400000",
+                # Virtual time, not wall clock: the walk is almost entirely
+                # `setTimeout` beats, and the three curricula together now
+                # spend far more than the old budget waiting on them.
+                "--virtual-time-budget=900000",
                 "--dump-dom",
                 url,
             ],
@@ -949,6 +1139,104 @@ def check_real_controls(payload: dict, want_type: str) -> dict:
     return checked
 
 
+def check_rebind(payload: dict, want_type: str) -> None:
+    """Rebuilding the class column must not disarm the step.
+
+    `render()` begins `#classes.innerHTML = ''`, so the node the spotlight was
+    measured against and the node the click binding sat on are both thrown
+    away.  A binding that still looks armed is dead: the guide has to notice
+    and re-arm onto the fresh node, or the control the card is pointing at
+    stops responding — which is exactly what the user sees after a capture.
+    """
+    rows = _records(payload, "rebind")
+    assert len(rows) == 1, rows
+    r = rows[0]
+    assert r["err"] is None, r["err"]
+    assert r["sel"] == ".tm-action-toolbar", (
+        f"{want_type}: the step stopped resolving after the class column was "
+        f"rebuilt (found {r['sel']!r})"
+    )
+    assert r["replaced"] is True, (
+        f"{want_type}: render() did not replace the step's node, so this check "
+        "never exercised a re-armed binding"
+    )
+    assert r["orbBefore"] is False, r
+    assert r["orb"] is True, (
+        f"{want_type}: after the class column was rebuilt, pressing the step's "
+        "own control no longer handed over — the advance binding was still on "
+        "the node render() had thrown away"
+    )
+    assert r["cardOn"] is False and r["spotOn"] is False, r
+    assert r["ready"] is True, (
+        f"{want_type}: the pill's badge stayed grey after a real press on the "
+        f"re-armed control; it reads {r['text']!r}"
+    )
+    assert r["index"] == r["i"], (
+        f"{want_type}: the re-armed control moved the guide to step {r['index']}"
+    )
+
+
+def check_container_events(payload: dict, want_type: str) -> None:
+    """A container step answers to click AND to input / change.
+
+    Most spotlights are containers (`.tm-action-toolbar`) whose real control is
+    a descendant, so gating the binding on the spotlight's own tag left every
+    one of them silent.  Each of the three events the user's own work produces
+    must hand the workspace over and turn the badge green — and none of them
+    may move the tour.
+    """
+    rows = _records(payload, "container")
+    assert len(rows) == 3, rows
+    assert [r["action"] for r in rows] == ["click", "input", "change"], rows
+    for r in rows:
+        assert r["sel"] == ".tm-action-toolbar", r
+        assert r["isContainer"] is True, r
+        assert r["orbBefore"] is False, r
+        assert r["indexBefore"] == r["i"], r
+        assert r["orb"] is True, (
+            f"{want_type}: a real {r['action']} on the container step did not "
+            "hand the workspace over to the pill"
+        )
+        assert r["cardOn"] is False and r["spotOn"] is False, r
+        assert r["ready"] is True, (
+            f"{want_type}: the badge stayed grey after a real {r['action']} on "
+            f"the container; the pill reads {r['text']!r}"
+        )
+        assert r["index"] == r["i"], (
+            f"{want_type}: a real {r['action']} moved the guide to step {r['index']}"
+        )
+
+
+def check_escape_layer(payload: dict, want_type: str) -> None:
+    """Escape closes the layer on top, and leaves the guide running.
+
+    A modal or the source drawer is the topmost layer, so the key belongs to
+    it: Escape must close that and leave the tour exactly where it was,
+    instead of killing the guide standing behind the panel.
+    """
+    rows = _records(payload, "escape")
+    assert len(rows) == 2, rows
+    by_layer = {r["layer"]: r for r in rows}
+    assert set(by_layer) == {"settings", "drawer"}, sorted(by_layer)
+    for layer, r in by_layer.items():
+        assert r["opened"] is True, (
+            f"{want_type}: the {layer} never opened, so Escape had nothing to close"
+        )
+        assert r["orbBefore"] is True and r["cardBefore"] is False, (
+            f"{want_type}: the workspace was not handed over before Escape ({r['layer']})"
+        )
+        assert r["closed"] is True, (
+            f"{want_type}: Escape did not close the {layer} covering the workspace"
+        )
+        assert r["open"] is True, (
+            f"{want_type}: Escape closed the guide instead of the open {layer}"
+        )
+        assert r["index"] == r["i"], (
+            f"{want_type}: Escape moved the guide from step {r['i']} to "
+            f"step {r['index']}"
+        )
+
+
 def check_ask_orb(payload: dict, want_type: str) -> None:
     """`?` on the pill brings the instruction card back for the same step."""
     rows = _records(payload, "ask")
@@ -1157,6 +1445,12 @@ def main() -> int:
             f"{t} real controls hand over without advancing",
             lambda t=t: check_real_controls(reports[t], t),
         )
+        run(f"{t} a rebuilt class column re-arms the step",
+            lambda t=t: check_rebind(reports[t], t))
+        run(f"{t} containers answer to click and to input/change",
+            lambda t=t: check_container_events(reports[t], t))
+        run(f"{t} Escape closes the open layer, not the guide",
+            lambda t=t: check_escape_layer(reports[t], t))
         run(f"{t} `?` re-opens the card", lambda t=t: check_ask_orb(reports[t], t))
         run(f"{t} a closed guide leaves nothing behind",
             lambda t=t: check_closed(reports[t], t))
