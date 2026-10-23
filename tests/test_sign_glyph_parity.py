@@ -149,6 +149,25 @@ def _cases():
             img[20:h - 20, x:x + 2] = 20
         seq(f"three_narrow_strokes_{w}", img, thresh=100)
 
+    # The real-car-sign path: a light board with a dark plastic frame ring,
+    # three interior characters and border clutter inside the 6 % margin.
+    # The interior-ROI search must discard the ring/clutter on BOTH sides.
+    board = np.full((160, 160), 215, np.uint8)
+    board[24:136, 24:136] = 245
+    board[20:28, 20:140] = 30
+    board[132:140, 20:140] = 30
+    board[20:140, 20:28] = 30
+    board[20:140, 132:140] = 30
+    board[66:90, 35:66] = 20       # A-ish block
+    board[65:94, 85:88] = 20       # hairline 1
+    board[66:89, 100:124] = 20     # 2-ish block
+    board[145:155, 2:30] = 15      # bottom-left border clutter
+    board[0:6, 60:90] = 25         # top border clutter
+    seq("board_ring_and_clutter", board, thresh=59)
+    seq("board_ring_and_clutter_otsu", board)
+    seq("board_ring_and_clutter_bright", 255 - board, thresh=196,
+        polarity=1)
+
     for i in range(SWEEP):
         w = int(rng.integers(40, 130))
         h = int(rng.integers(40, 130))
@@ -259,6 +278,18 @@ def _check_info(name, out_dir, want):
             errs.append(f"box {got_box} != None")
     elif got_box != tuple(int(v) for v in want_box):
         errs.append(f"box {got_box} != {want_box}")
+    if "roi_box" in want:
+        want_roi = want.get("roi_box")
+        got_roi = None if head.get("roi") in (None, "-") else tuple(
+            int(v) for v in str(head["roi"]).split(","))
+        if want_roi is None:
+            if got_roi is not None:
+                errs.append(f"roi {got_roi} != None")
+        elif got_roi != tuple(int(v) for v in want_roi):
+            errs.append(f"roi {got_roi} != {want_roi}")
+        if "pct" in head and "sign_pct" in want:
+            if abs(float(head["pct"]) - float(want["sign_pct"])) > 1e-4:
+                errs.append(f"pct {head['pct']} != {want['sign_pct']}")
     return head, slots, errs
 
 
@@ -336,21 +367,18 @@ def _run_corpus():
                     convention=(ocr.NORM_CANON if c["conv"]
                                 else ocr.NORM_STRETCH),
                     thresh=(None if c["thresh"] < 0 else c["thresh"]),
-                    dark_thr=c["dark"])
+                    dark_thr=c["dark"], find_roi=True)
                 head, slots, errs = _check_info(name, tmp, {
                     "thresh": want["thresh"], "box": want["sign_box"],
                     "ok": want["ok"], "empty": want["empty"],
+                    "roi_box": want.get("roi_box") if c["seg"] else None,
+                    "sign_pct": want.get("sign_pct", 0.0),
                 })
                 if c["seg"]:
-                    t = int(want["thresh"])
-                    if t == 0 and c["thresh"] < 0:
-                        ink = np.zeros(data.shape, bool)
-                    else:
-                        ink = ocr.binarize_ink(data, t,
-                                               polarity=c["polarity"])
-                        if c["dark"] > 0:
-                            ink &= data >= np.uint8(min(255, int(c["dark"])))
-                    nb = len(ocr.segment_glyph_boxes(ink,
+                    # The C pipeline reports its raw run count AFTER the
+                    # interior-ROI cleanup (find_roi), so compare against the
+                    # same filtered mask Python returned.
+                    nb = len(ocr.segment_glyph_boxes(want["ink"],
                                                      min_run=c["min_run"]))
                     if nb != int(head["nb"]):
                         errs.append(f"nb {head['nb']} != {nb}")

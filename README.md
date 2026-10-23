@@ -108,12 +108,16 @@ filed under `A` trains `A` on the whole sign, not on `A`.
 Click **Edit** on a class card to open the modal:
 
 - **Original Sample** (left) with the green/blue ROI box, and **Processed
-  Preview** (right) — for glyph projects this is the `28×28` thresholded
-  glyph, shown **black ink on pure white and cropped to the ROI** (manual
-  ROI = the user box, auto = the segmented glyph box).  The model tensor
-  keeps its own polarity; only the user-facing preview is inverted.
-  The modal is centred and both image stages are clean 1:1 squares.
-- `Preprocess Mode`: **Auto (find sign)** or **Manual ROI**.
+  Preview** (right) — for glyph projects this is the thresholded glyph, shown
+  **black ink on pure white and cropped to the ROI**.  In **Auto** the box is
+  found live from the current `Dark Thr`/`Lum Thr` window: the mask is
+  border-frame/speck cleaned, the horizontal character band is selected, and
+  one uniform 10 % pad is added (the same `find_interior_ink_roi` the device
+  sequence mirrors).  Manual ROI uses the user box.  The model tensor keeps
+  its own polarity; only the user-facing preview is inverted.  The modal is
+  centred and both image stages are clean 1:1 squares.
+- `Preprocess Mode`: **Auto (find sign)** or **Manual ROI**.  Auto updates the
+  green box and the Processed crop on every Dark/Lum change.
 - `Dark Thr` (0–100, default 0) and `Lum Thr` (50–255, default 100).
 - Manual ROI fields `ROI X1/Y1/X2/Y2` (0–1); drag on the original image.
 - `Current Sample`, `Delete Sample`, sample thumbnails, `Save Sample` /
@@ -313,7 +317,11 @@ For firmware, copy the **5 compile files** next to the sketch:
 
 Sign exports add `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`,
 `kTargetSignSequence`, `kTargetSignClassIndices[3]`, `kSignReadingOrder`
-(0 LTR / 1 RTL) and `kSignMatchMinProb` (0.60) to `model_settings.h`.
+(0 LTR / 1 RTL), `kSignMatchMinProb` (0.60), and the rejection policy:
+`TM_SIGN_USE_BACKGROUND_OOD`, `kSignBackgroundReplacesOod`, and
+`kBackgroundClassIndex` (-1 when no `_background` class was trained).  The
+legacy `TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR` /
+`kSignBackgroundIsTheOnlyRejector` spellings are emitted too.
 Exporting also stamps `<workspace>/deployed.json`, pinning Preview to the
 model that was just exported.
 

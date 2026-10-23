@@ -25,6 +25,7 @@ Requires the AItraining venv (TensorFlow):
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -189,8 +190,60 @@ def test_stale_class_dirs_are_pruned_and_background_defaults_off():
         _assert_preview_polarity(SIGN_A12.read_bytes())
 
         header = _export_header(ctrl, dataset)
+        assert "#define TM_SIGN_USE_BACKGROUND_OOD 0" in header, header
+        assert "constexpr bool kSignBackgroundReplacesOod = false;" in header, header
+        assert "constexpr int kBackgroundClassIndex = -1;" in header, header
         assert "#define TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR 0" in header, header
         assert "constexpr bool kSignBackgroundIsTheOnlyRejector = false;" in header, header
+
+
+def test_edit_auto_roi_tracks_thresholds_and_crops_processed_pane():
+    """The Edit worktable's Auto mode must find the interior band live.
+
+    This is the modal path (`/preprocess/preview` -> _preprocess_preview),
+    not the Preview card: it feeds classPreprocessAutoCrop and the
+    black-on-white Processed pane.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        _open_template(ctrl)
+        # A full A 1 2 board with border noise, filed as one class sample.
+        Image.fromarray(_thin_one_frame(), mode="L").save(
+            dataset / "A" / "board.png"
+        )
+
+        def preview(cfg):
+            return ctrl._preprocess_preview("s", "A", "board.png", cfg)
+
+        default = preview({})
+        tuned = preview(
+            {"mode": "auto_by_label", "bg_dark_thresh": 0, "bg_lum_thresh": 59}
+        )
+        for res in (default, tuned):
+            crop = res.get("crop")
+            assert isinstance(crop, list) and len(crop) == 4, res
+            assert crop != [0.0, 0.0, 1.0, 1.0], res
+            roi = res.get("auto_roi")
+            assert isinstance(roi, list) and len(roi) == 4, res
+            x1, y1, x2, y2 = roi
+            assert x1 < 60 and x2 > 100, roi           # frames A..2
+            assert y1 < 65 and y2 > 90, roi
+            proc = np.asarray(
+                Image.open(BytesIO(base64.b64decode(res["processed_image_b64"])))
+            )
+            assert proc.shape == (y2 - y1, x2 - x1), (proc.shape, roi)
+            assert set(np.unique(proc)).issubset({0, 255}), np.unique(proc)
+            assert int(proc.min()) == 0 and int(proc.max()) == 255
+            assert int(proc[0, 0]) == 255, "threshold background must be white"
+            # The green box maps the ROI onto the ORIGINAL sample.
+            assert abs(crop[0] - x1 / 160.0) < 1e-6, (crop, roi)
+            assert abs(crop[2] - x2 / 160.0) < 1e-6, (crop, roi)
+
+        # The live Dark/Lum window really moves the auto box and the crop.
+        assert default["auto_roi"] != tuned["auto_roi"], (
+            default["auto_roi"], tuned["auto_roi"]
+        )
+        assert default["processed_image_b64"] != tuned["processed_image_b64"]
 
 
 def test_project_open_prunes_stale_classes_from_dataset_and_cache():
@@ -247,6 +300,9 @@ def test_background_toggle_on_trains_the_rejector_and_still_reads_a12():
         _assert_preview_polarity(SIGN_A12.read_bytes())
 
         header = _export_header(ctrl, dataset)
+        assert "#define TM_SIGN_USE_BACKGROUND_OOD 1" in header, header
+        assert "constexpr bool kSignBackgroundReplacesOod = true;" in header, header
+        assert "constexpr int kBackgroundClassIndex = 3;" in header, header
         assert "#define TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR 1" in header, header
         assert "constexpr bool kSignBackgroundIsTheOnlyRejector = true;" in header, header
 

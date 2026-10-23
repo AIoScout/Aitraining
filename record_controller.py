@@ -104,6 +104,7 @@ from ocr_preprocess import (
     NORM_CANON,
     NORM_STRETCH,
     SIGN_SEQUENCE_PAD,
+    find_interior_ink_roi,
     find_sign_roi,
     preprocess_glyph,
     preprocess_sign_sequence,
@@ -3251,6 +3252,20 @@ class RecordController:
                 "//     (OOD Layers 1-3 are bypassed on the device).",
                 "// 0 = no _background class; the standard OOD gates + the",
                 "//     per-slot kSignMatchMinProb floor do the rejecting.",
+                "#define TM_SIGN_USE_BACKGROUND_OOD "
+                + ("1" if sign_background_is_only_rejector else "0"),
+                "constexpr bool kSignBackgroundReplacesOod = "
+                + ("true" if sign_background_is_only_rejector else "false")
+                + ";",
+                "// Index of \"_background\" in kCategoryLabels, or -1 when the",
+                "// run trained without the reject class.",
+                "constexpr int kBackgroundClassIndex = "
+                + str(int(next(
+                    (i for i, x in enumerate(labels)
+                     if str(x).strip().lower() == "_background"),
+                    -1,
+                ))) + ";",
+                "// Legacy spellings kept for sketches built before the rename.",
                 "#define TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR "
                 + ("1" if sign_background_is_only_rejector else "0"),
                 "constexpr bool kSignBackgroundIsTheOnlyRejector = "
@@ -4310,9 +4325,11 @@ class RecordController:
             return self._preprocess_image_png_ocr(png, class_config, sample_config, return_crop, out_size)
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
         mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
-        # User-adjustable thresholds from class-level config (shared across samples)
-        bg_dark_thresh = int(class_cfg.get("bg_dark_thresh", 0)) if class_cfg else 0
-        bg_lum_thresh  = int(class_cfg.get("bg_lum_thresh", 100)) if class_cfg else 100
+        # The Edit worktable sends per-sample slider values in `sample_config`;
+        # those MUST win over the class record or the live Dark/Lum drag never
+        # moves the auto crop (it kept redrawing the class-level window).
+        bg_dark_thresh = int(config.get("bg_dark_thresh", 0) or 0)
+        bg_lum_thresh  = int(config.get("bg_lum_thresh", 100) or 100)
         # Always B-G; keep RGB colour information.
         img = Image.open(_bytes_io(png)).convert("RGB")
         roi = None
@@ -4380,6 +4397,7 @@ class RecordController:
         column sums, nearest-neighbour by an exact rational index map.
         """
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
+        mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
         polarity = int(config.get("ink_polarity", INK_DARK))
         # NORM_CANON, not NORM_STRETCH: the OCR project mixes EMNIST into
         # every training set, EMNIST ships as 28x28, and CANON is the
@@ -4473,11 +4491,53 @@ class RecordController:
         #                    the model consumes)
         #   crop_png      -> the pre-decision region (what the camera saw)
         box = result.get("box")
-        # Manual ROI: the user's crop IS the view, so show the whole manual
-        # ROI mask.  Auto: show the segmented glyph box.
+        ox, oy = roi_origin
         ink = result.get("ink")
-        if ink is not None:
-            ink_arr = np.asarray(ink, dtype=bool)
+        ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
+        # ── Auto ROI for the Edit worktable ───────────────────────────────
+        # The Preview card already has find_sign_roi; the per-sample editor
+        # has only one glyph, so it needs the generic interior-band search:
+        # threshold window -> component/border cleanup -> tight padded box.
+        # This is the box the SPA draws in green, and the processed pane is
+        # re-cut from it so Dark/Lum drags update BOTH live.
+        auto_roi = None
+        if mode != PREPROCESS_MODE_MANUAL_ROI:
+            auto_roi = find_interior_ink_roi(
+                gray, thresh=pinned, dark_thr=floor, polarity=polarity,
+            )
+        if (
+            isinstance(auto_roi, dict)
+            and str(auto_roi.get("method") or "") == "interior_ink"
+            and ink_arr is not None
+        ):
+            ax1, ay1, ax2, ay2 = (int(v) for v in auto_roi["box"])
+            auto_ink = auto_roi.get("ink")
+            if auto_ink is not None and np.asarray(auto_ink).shape == ink_arr.shape:
+                view = np.asarray(auto_ink, dtype=bool)[ay1:ay2, ax1:ax2]
+            else:
+                view = ink_arr[ay1:ay2, ax1:ax2]
+            if view.size:
+                display = np.where(view, 0, 255).astype(np.uint8)
+                mp_png = _to_png_bytes(Image.fromarray(display, mode="L"))
+            else:
+                mp_png = png_bytes
+            cp_crop = np.ascontiguousarray(gray[ay1:ay2, ax1:ax2])
+            if cp_crop.size:
+                cp_png = _to_png_bytes(Image.fromarray(cp_crop, mode="L"))
+            else:
+                cp_png = png_bytes
+            crop_norm = [
+                (ax1 + ox) / full_w if full_w else 0.0,
+                (ay1 + oy) / full_h if full_h else 0.0,
+                (ax2 + ox) / full_w if full_w else 1.0,
+                (ay2 + oy) / full_h if full_h else 1.0,
+            ]
+            return {"png": png_bytes, "crop": crop_norm,
+                    "processed_png": mp_png, "crop_png": cp_png,
+                    "auto_roi": [ax1, ay1, ax2, ay2],
+                    "sign_pct": float(auto_roi.get("sign_pct") or 0.0)}
+        # Fallback: the segmented glyph box (or the whole manual ROI).
+        if ink_arr is not None:
             view = ink_arr
             if mode != PREPROCESS_MODE_MANUAL_ROI and box is not None:
                 ix1, iy1, ix2, iy2 = (int(v) for v in box)
@@ -4492,7 +4552,6 @@ class RecordController:
         # was given, which is the ROI crop in manual mode.  Report it in
         # FULL-frame coordinates so the UI's rectangle lands on the pixels it
         # actually describes.
-        ox, oy = roi_origin
         crop_norm = [0.0, 0.0, 1.0, 1.0]
         cp_png = png_bytes
         if box is not None:
@@ -4507,7 +4566,8 @@ class RecordController:
                     (x2 + ox) / full_w,
                     (y2 + oy) / full_h,
                 ]
-        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png}
+        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png,
+                "auto_roi": None, "sign_pct": 0.0}
 
     def _rebuild_processed_cache(
         self,
@@ -4601,6 +4661,8 @@ class RecordController:
         return {
             "image_b64": base64.b64encode(result["png"]).decode("ascii"),
             "crop": result.get("crop"),
+            "auto_roi": result.get("auto_roi"),
+            "sign_pct": float(result.get("sign_pct") or 0.0),
             "processed_image_b64": base64.b64encode(result.get("processed_png", result["png"])).decode("ascii"),
         }
 

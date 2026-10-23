@@ -1194,6 +1194,164 @@ def _ink_cluster_roi(
     }
 
 
+# ── Interior ink ROI (sign search, mirrored by sign_glyph.c) ────────────
+# The device cannot run OpenCV or the full three-blob heuristic.  This is a
+# deterministic component search both sides can reproduce: 8-connected
+# components, a 6 % outer margin and huge-frame filters, then the horizontal
+# band with the most components (the row of characters).  The union of that
+# band plus one uniform 10 % pad is the ROI.  `preprocess_sign_sequence(...,
+# find_roi=True)` and `TFLite_Sign/sign_glyph.c` use it before the split.
+_INTERIOR_MARGIN_PCT = 6
+_INTERIOR_MAX_COMPONENTS = 256
+
+
+def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
+    """Filtered 8-connected ink components, in raster-scan label order.
+
+    Same integer bounds as the C port: an outer margin of 6 % of the shorter
+    side, tiny specks, components wider than 85 % or taller than 60 % of the
+    frame, and blobs covering >40 % of the area are discarded.  Thin
+    single-stroke characters are kept; only frame-scale debris is removed.
+    """
+    cv2 = _cv2_module()
+    arr = np.asarray(ink, dtype=bool)
+    if cv2 is None or arr.ndim != 2 or arr.size == 0:
+        return []
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
+    min_area = max(6, (h * w * 4 + 5000) // 10000)
+    try:
+        n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            arr.astype(np.uint8), 8
+        )
+    except Exception:
+        return []
+    out: List[Dict[str, int]] = []
+    for i in range(1, n):
+        x, y, cw, ch, area = (int(v) for v in stats[i])
+        if area < min_area:
+            continue
+        if x <= margin or y <= margin or x + cw >= w - margin or y + ch >= h - margin:
+            continue
+        if cw * 100 > 85 * w or ch * 100 > 60 * h:
+            continue
+        if area * 100 > 40 * w * h:
+            continue
+        out.append({
+            "x": x, "y": y, "w": cw, "h": ch, "area": area,
+        })
+        if len(out) >= _INTERIOR_MAX_COMPONENTS:
+            break
+    return out
+
+
+def _choose_interior_band(
+    candidates: List[Dict[str, int]], w: int, h: int
+) -> Optional[Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]]:
+    """(padded ROI, tight band) for the horizontal row of components.
+
+    A frame line is a lone component; the character row is several (or one
+    for a single-character sample).  Ties go to the larger total ink area,
+    then to the earlier raster component, so the answer is deterministic and
+    the C port can reproduce it exactly.  The tight band is what survives to
+    the split (the pad must stay white); the padded ROI is the box the UI
+    draws and the OOD sign_pct measures.
+    """
+    if not candidates:
+        return None
+    best_idx = 0
+    best_key: Optional[Tuple[int, int]] = None
+    for i, anchor in enumerate(candidates):
+        ah = max(1, int(anchor["h"]))
+        acy2 = 2 * int(anchor["y"]) + ah
+        band2 = 2 * ah  # +/- 1.0 * height
+        count = 0
+        total = 0
+        for c in candidates:
+            cy2 = 2 * int(c["y"]) + int(c["h"])
+            if abs(cy2 - acy2) > band2:
+                continue
+            count += 1
+            total += int(c["area"])
+        key = (count, total)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_idx = i
+    anchor = candidates[best_idx]
+    ah = max(1, int(anchor["h"]))
+    acy2 = 2 * int(anchor["y"]) + ah
+    band2 = 2 * ah
+    x1 = y1 = 1 << 30
+    x2 = y2 = -1
+    for c in candidates:
+        cy2 = 2 * int(c["y"]) + int(c["h"])
+        if abs(cy2 - acy2) > band2:
+            continue
+        x1 = min(x1, int(c["x"]))
+        y1 = min(y1, int(c["y"]))
+        x2 = max(x2, int(c["x"]) + int(c["w"]))
+        y2 = max(y2, int(c["y"]) + int(c["h"]))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    cw = x2 - x1
+    ch = y2 - y1
+    pad = max(2, (max(cw, ch) * 10 + 50) // 100)
+    tight = (int(x1), int(y1), int(x2), int(y2))
+    roi = (
+        max(0, x1 - pad),
+        max(0, y1 - pad),
+        min(int(w), x2 + pad),
+        min(int(h), y2 + pad),
+    )
+    return roi, tight
+
+
+def find_interior_ink_roi(
+    src: np.ndarray,
+    *,
+    thresh: Optional[int] = None,
+    dark_thr: int = 0,
+    polarity: int = INK_DARK,
+) -> Dict[str, Any]:
+    """Tight interior ROI around the character row, for the Edit worktable.
+
+    Applies the same binarisation the glyph front-end uses (explicit
+    `thresh`, else exact Otsu), optionally the Dark Thr floor, then the
+    component/band search above.  Returns `{box, method, sign_pct, threshold}`;
+    an empty result reports the full frame and method "none" so callers can
+    fall back rather than drawing a bogus one-pixel box.
+    """
+    gray = rgb_to_lum_u8(src)
+    if gray.ndim != 2 or gray.size == 0:
+        return {"box": [0, 0, 1, 1], "method": "empty",
+                "sign_pct": 0.0, "threshold": 0}
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    t = int(otsu_threshold_u8(gray)) if thresh is None else int(thresh)
+    if t <= 0 and thresh is None:
+        ink = np.zeros(gray.shape, dtype=bool)
+    else:
+        ink = binarize_ink(gray, t, polarity=polarity)
+        if int(dark_thr) > 0:
+            ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+    band = _choose_interior_band(_interior_ink_components(ink), w, h)
+    if band is None:
+        return {"box": [0, 0, w, h], "tight_box": None, "method": "none",
+                "ink": ink, "sign_pct": float(ink.mean() * 100.0) if ink.size else 0.0,
+                "threshold": int(t)}
+    (x1, y1, x2, y2), (tx1, ty1, tx2, ty2) = band
+    # Keep only the selected character band; the pad around it must stay
+    # pure white in the user-facing crop (a frame line crossing the pad used
+    # to leave a black corner there).
+    selected = np.zeros_like(ink)
+    selected[ty1:ty2, tx1:tx2] = ink[ty1:ty2, tx1:tx2]
+    roi_ink = selected[y1:y2, x1:x2]
+    pct = float(roi_ink.mean() * 100.0) if roi_ink.size else 0.0
+    return {"box": [int(x1), int(y1), int(x2), int(y2)],
+            "tight_box": [int(tx1), int(ty1), int(tx2), int(ty2)],
+            "method": "interior_ink", "ink": selected, "sign_pct": pct,
+            "threshold": int(t)}
+
+
 def find_sign_roi(
     src: np.ndarray,
     manual_roi: Any = None,
@@ -1395,6 +1553,7 @@ def preprocess_sign_sequence(
     dark_thr: int = 0,
     clean_border: bool = False,
     border_margin: Optional[int] = None,
+    find_roi: bool = False,
 ) -> Dict[str, Any]:
     """One sign frame -> one 28x28 glyph PER CHARACTER of the label.
 
@@ -1435,6 +1594,9 @@ def preprocess_sign_sequence(
         "glyphs": [blank_glyph.copy() for _ in range(n)],
         "sign_box": None,
         "sign_box_norm": None,
+        "roi_box": None,
+        "roi_method": "input",
+        "sign_pct": 0.0,
         "ink": None,
         "thresh": 0,
         "ok": False,
@@ -1459,8 +1621,38 @@ def preprocess_sign_sequence(
             ink = binarize_ink(gray, t, polarity=polarity)
             if dark_thr > 0:
                 ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
-            if clean_border:
+            # The component ROI search below IS the border cleanup when it is
+            # enabled; running the OpenCV component filter as well would make
+            # the Python side differ from the C port (which cannot run cv2).
+            if clean_border and not find_roi:
                 ink = clean_sign_ink(ink, margin=border_margin)
+
+        if find_roi and apply_segmentation:
+            components = _interior_ink_components(ink)
+            # A sign needs more than one character component; a single
+            # component means the frame is a tight capture (or the characters
+            # touch), where cropping to it could discard edge glyphs.  Fall
+            # back to the whole frame and let the split reconcile.
+            band = _choose_interior_band(components, w, h) if len(components) >= 2 else None
+            if band is not None:
+                roi, tight = band
+                rx1, ry1, rx2, ry2 = roi
+                tx1, ty1, tx2, ty2 = tight
+                # Keep only the selected character components; the padded
+                # ROI is white around them so a frame line crossing the pad
+                # cannot become a fourth projection run.
+                band_ink = np.zeros_like(ink)
+                band_ink[ty1:ty2, tx1:tx2] = ink[ty1:ty2, tx1:tx2]
+                ink = band_ink
+                out["roi_box"] = [int(rx1), int(ry1), int(rx2), int(ry2)]
+                out["roi_method"] = "interior_ink"
+        if out["roi_box"] is None:
+            out["roi_box"] = [0, 0, int(w), int(h)]
+        rx1, ry1, rx2, ry2 = (int(v) for v in out["roi_box"])
+        roi_ink = ink[ry1:ry2, rx1:rx2]
+        out["sign_pct"] = (
+            float(roi_ink.mean() * 100.0) if roi_ink.size else 0.0
+        )
         out["ink"] = ink
 
         boxes: List[Tuple[int, int, int, int]]
