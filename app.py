@@ -3677,14 +3677,22 @@ def _render_tm_old_frontend_html(
     .preview-stage {{
       position: relative;
       width: 100%;
-      height: 100%;
+      max-width: 420px;
+      aspect-ratio: 1 / 1;
+      height: auto;
+      margin: 0 auto;
       overflow: hidden;
+      background: var(--surface-soft);
     }}
     .preview-stage img {{
       width: 100%;
       height: 100%;
+      max-height: none;
       object-fit: contain;
       display: block;
+      /* The device streams 96x96 / 160x160 frames.  Do not let the browser's
+         smooth upscale hide individual pixels while debugging a sign. */
+      image-rendering: pixelated;
     }}
     .class-preprocess-grid {{
       display: grid;

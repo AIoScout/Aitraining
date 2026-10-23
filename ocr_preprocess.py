@@ -867,6 +867,222 @@ def preprocess_glyph_capture(src: np.ndarray, out_size: int = GLYPH_SIZE,
 # ════════════════════════════════════════════════════════════════════════
 # 7. Sign sequences — the multi-glyph front-end
 # ════════════════════════════════════════════════════════════════════════
+def _manual_roi_pixels(roi: Any, h: int, w: int) -> Optional[Tuple[int, int, int, int]]:
+    """Normalize the editor's 0..1 ROI (or an explicit pixel box)."""
+    try:
+        vals = [float(v) for v in roi]
+    except Exception:
+        return None
+    if len(vals) != 4:
+        return None
+    if all(0.0 <= v <= 1.0 for v in vals):
+        x1, y1, x2, y2 = (
+            int(round(vals[0] * w)),
+            int(round(vals[1] * h)),
+            int(round(vals[2] * w)),
+            int(round(vals[3] * h)),
+        )
+    else:
+        x1, y1, x2, y2 = [int(round(v)) for v in vals]
+    x1 = max(0, min(w - 1, x1))
+    y1 = max(0, min(h - 1, y1))
+    x2 = max(x1 + 1, min(w, x2))
+    y2 = max(y1 + 1, min(h, y2))
+    return (x1, y1, x2, y2)
+
+
+def _cv2_module():
+    """OpenCV is used only for the host-side sign-board locator.
+
+    The integer glyph/split path does not depend on it; importing lazily keeps
+    the parity tests and the device mirror free of an OpenCV dependency.
+    """
+    try:
+        import cv2  # type: ignore
+        return cv2
+    except Exception:
+        return None
+
+
+def find_sign_roi(
+    src: np.ndarray,
+    manual_roi: Any = None,
+    *,
+    min_area_frac: float = 0.015,
+) -> Dict[str, Any]:
+    """Locate the bright road-sign plate inside a clutter frame.
+
+    The device frame is a whole scene: a bright sign plate on a dark plastic
+    frame, with wheels/sensors/desk clutter around it.  Running Otsu plus a
+    vertical projection over that whole frame finds the *frame edge* and the
+    clutter, not the three characters.  This first stage finds the inner
+    bright plate; the caller crops it before the projection split.
+
+    Returns a dict with:
+      box        [x1, y1, x2, y2] in source pixels (exclusive end)
+      method     "manual" | "bright_plate" | "center_fallback"
+      score      candidate score (0 for manual/fallback)
+      threshold  bright-mask threshold used (unused for manual)
+      area_frac  plate area / frame area for a detected plate
+    """
+    gray = rgb_to_lum_u8(src)
+    if gray.ndim != 2 or gray.shape[0] < 1 or gray.shape[1] < 1:
+        return {"box": [0, 0, 1, 1], "method": "empty", "score": 0.0,
+                "threshold": 0, "area_frac": 0.0}
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+
+    if manual_roi is not None:
+        box = _manual_roi_pixels(manual_roi, h, w)
+        if box is not None:
+            return {"box": [int(v) for v in box], "method": "manual", "score": 1.0,
+                    "threshold": 0, "area_frac": float((box[2] - box[0]) * (box[3] - box[1])) / float(max(1, h * w))}
+
+    cv2 = _cv2_module()
+    if cv2 is not None:
+        try:
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            t, _ = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            t = int(t)
+            # A flat frame or a weird Otsu split: fall back to a high
+            # percentile so "bright plate" still means something.
+            if t < 16:
+                t = int(np.percentile(blur, 70))
+            if t > 245:
+                t = int(np.percentile(blur, 55))
+            bright = (blur >= t).astype(np.uint8) * 255
+            # Small closing only: a kernel wide enough to bridge an 8 px
+            # dark sign frame would merge the plate with the desk behind it.
+            k = max(3, int(round(min(h, w) * 0.02)))
+            if k % 2 == 0:
+                k += 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+            closed = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel, iterations=1)
+            cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN,
+                                       np.ones((3, 3), np.uint8), iterations=1)
+            n, _labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, 8)
+            best = None
+            for i in range(1, n):
+                x, y, cw, ch, area = (int(v) for v in stats[i])
+                if cw <= 0 or ch <= 0:
+                    continue
+                area_frac = float(area) / float(max(1, h * w))
+                if area_frac < min_area_frac:
+                    continue
+                if cw < max(8, int(round(0.10 * w))) or ch < max(8, int(round(0.10 * h))):
+                    continue
+                aspect = float(cw) / float(max(1, ch))
+                if aspect < 0.20 or aspect > 5.0:
+                    continue
+                fill = float(area) / float(max(1, cw * ch))
+                if fill < 0.25:
+                    continue
+                cx, cy = float(centroids[i][0]), float(centroids[i][1])
+                dist = float(np.hypot(cx - w / 2.0, cy - h / 2.0))
+                center = max(0.0, 1.0 - 0.5 * dist / max(1.0, 0.5 * np.hypot(w, h)))
+                border = x <= 0 or y <= 0 or x + cw >= w or y + ch >= h
+                # A tight capture (the 96x96 template sign) is one bright
+                # plate covering the whole frame; a cluttered scene's desk
+                # is also border-touching but is split by the dark sign
+                # frame / clutter.  Accept a border component only when it
+                # really is the frame-filling plate; otherwise prefer the
+                # enclosed candidate and fall back to the centre box.
+                if border and area_frac < 0.80:
+                    continue
+                score = area_frac * (0.40 + 0.60 * fill) * center
+                if border:
+                    score *= 0.90
+                if area_frac > 0.90:
+                    score *= 0.95
+                if best is None or score > best["score"]:
+                    pad = max(1, int(round(0.025 * min(cw, ch))))
+                    x1 = max(0, x - pad)
+                    y1 = max(0, y - pad)
+                    x2 = min(w, x + cw + pad)
+                    y2 = min(h, y + ch + pad)
+                    best = {
+                        "box": [x1, y1, x2, y2],
+                        "method": "bright_plate",
+                        "score": float(score),
+                        "threshold": t,
+                        "area_frac": area_frac,
+                    }
+            if best is not None:
+                return best
+        except Exception:
+            pass
+
+    # Deterministic fallback: the sign is normally centred; a 70 % centre
+    # box beats returning [0, 0, 1, 1] and feeding the projection the desk.
+    x1 = int(round(0.15 * w))
+    y1 = int(round(0.15 * h))
+    x2 = int(round(0.85 * w))
+    y2 = int(round(0.85 * h))
+    return {"box": [x1, y1, x2, y2], "method": "center_fallback", "score": 0.0,
+            "threshold": 0, "area_frac": float((x2 - x1) * (y2 - y1)) / float(max(1, h * w))}
+
+
+def clean_sign_ink(
+    ink: np.ndarray,
+    *,
+    margin: Optional[int] = None,
+    min_area: Optional[int] = None,
+) -> np.ndarray:
+    """Remove border-touching frame lines and tiny specks from a sign ROI.
+
+    The sign's plastic frame is a long, dark component touching the ROI edge;
+    if it survives into the vertical projection it becomes the widest "run"
+    and steals one of the three slots.  The genuine characters are interior
+    components.  A speck of sensor noise is also removed by area.
+
+    If the cleanup would remove ALL ink (a genuinely tight sign crop), the
+    original mask is returned: an empty slot is worse than a noisy one.
+    """
+    arr = np.asarray(ink, dtype=bool)
+    if arr.ndim != 2 or arr.size == 0:
+        return arr
+    h, w = arr.shape
+    if margin is None:
+        margin = max(1, int(round(min(h, w) * 0.02)))
+    if min_area is None:
+        min_area = max(4, int(round(h * w * 0.0005)))
+    cv2 = _cv2_module()
+    if cv2 is None:
+        out = arr.copy()
+        if margin > 0:
+            out[:margin, :] = False
+            out[-margin:, :] = False
+            out[:, :margin] = False
+            out[:, -margin:] = False
+        return out
+    try:
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(arr.astype(np.uint8), 8)
+        keep = np.zeros_like(arr, dtype=bool)
+        for i in range(1, n):
+            x, y, cw, ch, area = (int(v) for v in stats[i])
+            if area < min_area:
+                continue
+            touches = (
+                (1 if x <= margin else 0)
+                + (1 if y <= margin else 0)
+                + (1 if x + cw >= w - margin else 0)
+                + (1 if y + ch >= h - margin else 0)
+            )
+            if touches:
+                # The plastic frame is a thin line/ring on the ROI edge; it
+                # usually touches 2-4 sides.  A real glyph can sit close to
+                # one edge in a tight capture, so a single-side,
+                # character-sized component is kept.
+                thin = max(3, int(round(min(h, w) * 0.04)))
+                if touches >= 2 or cw <= thin or ch <= thin:
+                    continue
+            keep |= (labels == i)
+        if not keep.any():
+            return arr
+        return keep
+    except Exception:
+        return arr
+
+
 def preprocess_sign_sequence(
     src: np.ndarray,
     sign_sequence: Any = None,
@@ -877,6 +1093,8 @@ def preprocess_sign_sequence(
     convention: str = NORM_CANON,
     thresh: Optional[int] = None,
     dark_thr: int = 0,
+    clean_border: bool = False,
+    border_margin: Optional[int] = None,
 ) -> Dict[str, Any]:
     """One sign frame -> one 28x28 glyph PER CHARACTER of the label.
 
@@ -941,6 +1159,8 @@ def preprocess_sign_sequence(
             ink = binarize_ink(gray, t, polarity=polarity)
             if dark_thr > 0:
                 ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+            if clean_border:
+                ink = clean_sign_ink(ink, margin=border_margin)
         out["ink"] = ink
 
         boxes: List[Tuple[int, int, int, int]]

@@ -104,6 +104,7 @@ from ocr_preprocess import (
     NORM_CANON,
     NORM_STRETCH,
     SIGN_SEQUENCE_PAD,
+    find_sign_roi,
     preprocess_glyph,
     preprocess_sign_sequence,
     normalize_sign_sequence,
@@ -5250,21 +5251,33 @@ class RecordController:
         src_img = Image.open(_bytes_io(png)).convert("L")
         gray = np.asarray(src_img, dtype=np.uint8)
         full_h, full_w = gray.shape[:2]
-        roi_px = (
-            manual_roi_to_pixels(full_h, full_w, model.get("manual_roi"))
-            if str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI
-            else None
-        )
-        origin_x, origin_y = 0, 0
-        if roi_px is not None:
-            rx1, ry1, rx2, ry2 = roi_px
-            sub = gray[ry1:ry2, rx1:rx2]
-            if sub.size:
-                gray = np.ascontiguousarray(sub)
-                origin_x, origin_y = rx1, ry1
 
+        # ── Stage 1: locate the sign plate on the NATIVE frame ────────────
+        # The device streams 160x160 (or 96x96); the glyph model is 28x28.
+        # Never resize the scene to the glyph size before this point: the
+        # split needs the original pixel resolution.  Manual ROI wins when
+        # the sign is pinned; otherwise the bright inner plate is detected
+        # so the desk/wheels/frame never enter the vertical projection.
+        manual_roi = None
+        if str(config.get("mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
+            manual_roi = config.get("manual_roi")
+        if manual_roi is None and str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
+            manual_roi = model.get("manual_roi")
+        roi_info = find_sign_roi(gray, manual_roi=manual_roi)
+        rx1, ry1, rx2, ry2 = (int(v) for v in roi_info["box"])
+        rx1 = max(0, min(full_w - 1, rx1))
+        ry1 = max(0, min(full_h - 1, ry1))
+        rx2 = max(rx1 + 1, min(full_w, rx2))
+        ry2 = max(ry1 + 1, min(full_h, ry2))
+        roi_gray = np.ascontiguousarray(gray[ry1:ry2, rx1:rx2])
+        origin_x, origin_y = rx1, ry1
+
+        # ── Stage 2: threshold + strip the frame/noise + split 3 glyphs ───
+        # clean_border removes ink components touching the ROI edge (the
+        # plastic frame and its vertical bars) and tiny specks before the
+        # projection sees them.  `out_size` is only the per-glyph canvas.
         reading = preprocess_sign_sequence(
-            gray,
+            roi_gray,
             sign_sequence=seq,
             reading_order=order,
             out_size=int(w),
@@ -5273,6 +5286,7 @@ class RecordController:
             convention=convention,
             thresh=pinned,
             dark_thr=floor,
+            clean_border=True,
         )
 
         def _to_full_box(box: Any) -> Any:
@@ -5323,6 +5337,15 @@ class RecordController:
                 and bool(slot.get("ok"))
             )
             all_match = all_match and matched
+            full_box = _to_full_box(slot.get("box"))
+            full_box_norm = None
+            if full_box is not None and full_w > 0 and full_h > 0:
+                full_box_norm = [
+                    float(full_box[0]) / float(full_w),
+                    float(full_box[1]) / float(full_h),
+                    float(full_box[2]) / float(full_w),
+                    float(full_box[3]) / float(full_h),
+                ]
             slots.append(
                 {
                     "index": int(i),
@@ -5332,8 +5355,9 @@ class RecordController:
                     "match": bool(matched),
                     "background": bool(is_background),
                     "empty": bool(slot.get("empty", True)),
-                    "box": _to_full_box(slot.get("box")),
-                    "box_norm": slot.get("box_norm"),
+                    "box": full_box,
+                    "box_norm": full_box_norm,
+                    "roi_box_norm": slot.get("box_norm"),
                 }
             )
             slot_pngs.append(_to_png_bytes(Image.fromarray(glyph, mode="L")))
@@ -5356,9 +5380,8 @@ class RecordController:
         # the same picture with no second implementation.
         sign_box = _to_full_box(reading.get("sign_box"))
         # The ROI overlay and the class-edit preview both read `crop` as
-        # FULL-frame fractions, and the reading's own box_norm is relative
-        # to the Manual ROI crop when one is active — so it is re-derived
-        # from the translated pixel box rather than passed through.
+        # FULL-frame fractions.  The sign board ROI is the meaningful box
+        # here: `sign_box` is only the union of the three glyphs.
         sign_box_norm = None
         if sign_box is not None and full_w > 0 and full_h > 0:
             sign_box_norm = [
@@ -5367,14 +5390,30 @@ class RecordController:
                 float(sign_box[2]) / float(full_w),
                 float(sign_box[3]) / float(full_h),
             ]
-        composite_png = self._sign_ocr_composite(gray, reading, origin_x, origin_y)
+        roi_box = [int(rx1), int(ry1), int(rx2), int(ry2)]
+        roi_box_norm = [
+            float(rx1) / float(full_w) if full_w > 0 else 0.0,
+            float(ry1) / float(full_h) if full_h > 0 else 0.0,
+            float(rx2) / float(full_w) if full_w > 0 else 1.0,
+            float(ry2) / float(full_h) if full_h > 0 else 1.0,
+        ]
+        ink = reading.get("ink")
+        sign_pct = (
+            float(np.asarray(ink, dtype=np.uint8).mean() * 100.0)
+            if ink is not None and np.asarray(ink).size
+            else 0.0
+        )
+        composite_png = self._sign_ocr_composite(roi_gray, reading, 0, 0)
 
         return {
             "labels": slot_labels,
             "probs": slot_probs,
             "top_label": match_text,
             "top_prob": float(min((s["prob"] for s in slots), default=0.0)),
-            "crop": sign_box_norm,
+            "crop": roi_box_norm,
+            "roi_box": roi_box,
+            "roi_box_norm": roi_box_norm,
+            "roi_method": str(roi_info.get("method") or ""),
             "model_source": str(model.get("model_source") or "latest"),
             "processed_image_b64": base64.b64encode(composite_png).decode("ascii"),
             "crop_image_b64": "",
@@ -5382,7 +5421,7 @@ class RecordController:
             "processed_variant": "sign-sequence",
             "ood": False,
             "ood_reason": "",
-            "sign_pct": 0.0,
+            "sign_pct": float(sign_pct),
             "max_prob": float(min((s["prob"] for s in slots), default=0.0)),
             "entropy_ratio": 0.0,
             # ── the sign_ocr payload ────────────────────────────────────

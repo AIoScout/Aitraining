@@ -206,6 +206,12 @@ The `ROI` and `Orig` checkboxes are view toggles:
 | off | on | full masked frame | hidden |
 | on | on | processed crop / sign split | hidden |
 
+The **Preview stage is a 1:1 square** sized to the card's inner width.  A
+96×96 or 160×160 device frame fills it without the wide side padding the
+old stage produced, and `image-rendering: pixelated` keeps the small stream
+crisp when it is scaled up.  The ROI rectangle is positioned against the
+rendered image content (object-fit letterbox offsets), never the wide pane.
+
 The card's `Dark` / `Lum` sliders retune the Preview mask live without
 retraining.
 
@@ -220,6 +226,16 @@ In the **Local Image File** source a sign project also shows:
 They are disabled until a target is set and a model is trained.  Auto-fill
 and a finished training run also store a synthetic plate, so Preview has a
 ready frame with zero files on disk.
+
+Before splitting, the host sign preview locates the sign board on the
+**native frame** (`find_sign_roi`): the pinned Manual ROI when one is set,
+otherwise the enclosed bright inner plate, with a centred 70 % fallback.  It
+crops that plate first, removes frame-line/noise ink touching the ROI edge,
+and only then runs the three-glyph projection.  The response carries
+`roi_box` (source pixels), `roi_box_norm` / `crop` (full-frame fractions) and
+a real `sign_pct`; the green ROI rectangle therefore wraps the sign plate on
+the original 160×160 scene instead of the whole frame.  Training and the
+exported device front-end still consume one glyph per class as before.
 
 The output pane is the `.signmatch` banner:
 

@@ -186,6 +186,76 @@ def assert_both_toggles_show_the_processed_crop(page):
     assert state["src"] == _url(PROCESSED), state
 
 
+def assert_square_stage_keeps_the_frame_sharp(page):
+    """A 160x160 device frame fills a 1:1 stage; the ROI box stays on it."""
+    raw160 = _png_b64((160, 160), (180, 180, 180))
+    payload = {
+        "ok": "1",
+        "labels": ["A", "1", "2"],
+        "probs": [0.9, 0.05, 0.05],
+        "top_label": "A",
+        "top_prob": 0.9,
+        "image_b64": raw160,
+        "processed_image_b64": PROCESSED,
+        "crop_image_b64": "",
+        "full_image_b64": "",
+        "processed_variant": "sign-sequence",
+        "crop": [0.15625, 0.15625, 0.84375, 0.84375],
+        "sign_ocr": True,
+        "sign_sequence": ["A", "1", "2"],
+        "reading_order": "ltr",
+        "match": True,
+        "match_text": "🟢 YES — MATCH",
+        "match_min_prob": 0.6,
+        "slots": [
+            {"char": "A", "label": "A", "prob": 0.98, "match": True},
+            {"char": "1", "label": "1", "prob": 0.97, "match": True},
+            {"char": "2", "label": "2", "prob": 0.99, "match": True},
+        ],
+        "slot_images_b64": ["", "", ""],
+    }
+    _set_toggle(page, "previewRoiToggle", True)
+    _set_toggle(page, "previewRawToggle", False)
+    _apply(page, payload)
+    page.wait_for_function(
+        "(() => { const i = document.getElementById('previewImage');"
+        " return i && i.complete && i.naturalWidth === 160; })()",
+        timeout=5000,
+    )
+    _apply(page, payload)
+    stage = page.evaluate(
+        """() => {
+          const s = document.querySelector('#previewPane .preview-stage').getBoundingClientRect();
+          const ov = document.getElementById('previewRoiOverlay');
+          return {
+            w: s.width, h: s.height,
+            display: ov.style.display,
+            left: parseFloat(ov.style.left || 'NaN'),
+            top: parseFloat(ov.style.top || 'NaN'),
+            width: parseFloat(ov.style.width || 'NaN'),
+            height: parseFloat(ov.style.height || 'NaN'),
+          };
+        }"""
+    )
+    # 160x160 device frames get a clean square stage, not a wide letterbox.
+    assert abs(stage["w"] - stage["h"]) < 1.5, stage
+    assert stage["display"] == "block", stage
+    assert abs(stage["left"] - stage["w"] * 0.15625) < 1.0, stage
+    assert abs(stage["top"] - stage["h"] * 0.15625) < 1.0, stage
+    assert abs(stage["width"] - stage["w"] * 0.6875) < 1.0, stage
+    assert abs(stage["height"] - stage["h"] * 0.6875) < 1.0, stage
+    # The box must hug the image content, never the full wide pane.
+    assert stage["width"] < stage["w"] * 0.80, stage
+
+    # ROI + Orig shows the processed sign/3-slot composite; the full-frame
+    # rectangle cannot describe that image, so it stays hidden.
+    _set_toggle(page, "previewRawToggle", True)
+    _apply(page, payload)
+    state = _state(page)
+    assert state["display"] == "none", state
+    assert state["src"] == _url(PROCESSED), state
+
+
 def assert_input_off_keeps_the_box_visible(page):
     # With Input OFF no prediction arrives to redraw the overlay; the
     # deferred render must re-apply the cached one instead of hiding it.
@@ -248,6 +318,7 @@ def main() -> int:
             run("ROI OFF hides the box again", assert_roi_off_again_hides_the_box, page)
             run("Orig shows the masked frame without a box", assert_orig_shows_the_masked_frame_without_a_box, page)
             run("ROI + Orig shows the processed crop", assert_both_toggles_show_the_processed_crop, page)
+            run("160x160 frame gets a square stage", assert_square_stage_keeps_the_frame_sharp, page)
             run("Input OFF keeps the box visible", assert_input_off_keeps_the_box_visible, page)
 
             browser.close()
