@@ -5732,10 +5732,14 @@ class RecordController:
         roi_gray = np.ascontiguousarray(gray[ry1:ry2, rx1:rx2])
         origin_x, origin_y = rx1, ry1
 
-        # ── Stage 2: threshold + strip the frame/noise + split 3 glyphs ───
-        # clean_border removes ink components touching the ROI edge (the
-        # plastic frame and its vertical bars) and tiny specks before the
-        # projection sees them.  `out_size` is only the per-glyph canvas.
+        # ── Stage 2: threshold + split 3 glyphs ───────────────────────────
+        # NO second border-cleaning pass here.  `roi_gray` is already the
+        # sign interior returned by find_sign_roi; running clean_sign_ink on
+        # the cropped ROI treats any glyph near the box edge as "border
+        # clutter" and erases it (the `'A'` / broken-`'1'` bug).  The ROI
+        # finder strips the outer frame, so the exact `roi_box` content is
+        # what the split must see.  All slot crops are clamped inside
+        # roi_gray, so no pixel outside `roi_box` can reach a slot.
         reading = preprocess_sign_sequence(
             roi_gray,
             sign_sequence=seq,
@@ -5746,9 +5750,9 @@ class RecordController:
             convention=convention,
             thresh=pinned,
             dark_thr=floor,
-            clean_border=True,
+            clean_border=False,
         )
-        # OOD Layer 1's input: the cleaned ink share of the sign ROI.  Same
+        # OOD Layer 1's input: the ink share of the intact sign ROI.  Same
         # number the image project calls sign_pct, so spmin/spmax mean the
         # same thing in both workspaces.
         ink = reading.get("ink")
@@ -5806,6 +5810,7 @@ class RecordController:
             slot_max_prob = 0.0
             slot_entropy_ratio = 1.0
             slot_ood = False
+            slot_entropy_only = False
             slot_ood_reason = ""
             if raw_out is not None and raw_out.size:
                 slot_max_prob, slot_entropy_ratio = _raw_ood_metrics(raw_out)
@@ -5825,25 +5830,27 @@ class RecordController:
                         )
                     elif slot_entropy_ratio > ENTROPY_RATIO_MAX:
                         slot_ood = True
+                        slot_entropy_only = True
                         slot_ood_reason = (
                             f"entropy_ratio={slot_entropy_ratio:.3f} > "
                             f"{ENTROPY_RATIO_MAX:.2f}"
                         )
-            in_distribution = not slot_ood
             # A slot is READABLE independent of which plate we compare it to:
             # ink, a real (non-background) label, the confidence floor, and
-            # the OOD gates.  The plate loop below only decides which target
-            # character that reading has to equal.
+            # the OOD gates.  The entropy gate alone is NOT decisive: the
+            # plate loop below accepts an entropy-flagged slot when its top
+            # class is that plate's target character and prob >= SLOT_MIN.
+            # A correct 3-way reading used to be reported as NO solely
+            # because the model's class distribution can push entropy above
+            # 0.70 even when every top class is right.
             accepted = bool(
                 labels
                 and not is_background
                 and label
                 and prob >= SLOT_MIN
                 and bool(slot.get("ok"))
-                and in_distribution
+                and (not slot_ood or slot_entropy_only)
             )
-            if slot_ood:
-                ood_reasons.append(f"slot {i + 1}: {slot_ood_reason}")
             full_box = _to_full_box(slot.get("box"))
             full_box_norm = None
             if full_box is not None and full_w > 0 and full_h > 0:
@@ -5864,6 +5871,7 @@ class RecordController:
                     "background": bool(is_background),
                     "ood": bool(slot_ood),
                     "ood_reason": str(slot_ood_reason),
+                    "_entropy_only": bool(slot_entropy_only),
                     "max_prob": float(slot_max_prob),
                     "entropy_ratio": float(slot_entropy_ratio),
                     "empty": bool(slot.get("empty", True)),
@@ -5913,6 +5921,20 @@ class RecordController:
                 all_match or (s_idx < len(chosen_hits) and chosen_hits[s_idx])
             )
 
+        # Rebuild the OOD failure list from the FINAL per-slot verdict.  An
+        # entropy-only flag that was overridden by a correct target match is
+        # not a failure; reporting it on a YES was the contradictory banner
+        # ("each at 60% or better ... OOD: slot 2: entropy_ratio").
+        ood_reasons = []
+        for s_idx, slot_out in enumerate(slots):
+            if slot_out.get("match") and slot_out.get("_entropy_only"):
+                slot_out["ood"] = False
+                slot_out["ood_reason"] = ""
+            slot_out.pop("_entropy_only", None)
+            if slot_out.get("ood") and not slot_out.get("match"):
+                reason = str(slot_out.get("ood_reason") or "")
+                ood_reasons.append(f"slot {s_idx + 1}: {reason}")
+
         if all_match:
             plate_text = "".join(chosen_plate)
             if len(seqs) > 1:
@@ -5955,10 +5977,10 @@ class RecordController:
         # separately and keeps its own polarity.
         inside_full = (gray >= bg_dark) & (gray <= bg_lum)
         full_display = np.where(inside_full, 0, 255).astype(np.uint8)
-        if ink_arr is not None and ink_arr.size:
-            processed_display = np.where(ink_arr, 0, 255).astype(np.uint8)
-        else:
-            processed_display = full_display[ry1:ry2, rx1:rx2].copy()
+        # ROI CHECKED must show the EXACT pixels inside the green box drawn
+        # on the full view — not a re-cleaned mask.  Same array, same slice:
+        # whatever is visible inside the box unchecked is visible checked.
+        processed_display = full_display[ry1:ry2, rx1:rx2].copy()
         full_png = _to_png_bytes(Image.fromarray(full_display, mode="L"))
         processed_png = _to_png_bytes(Image.fromarray(processed_display, mode="L"))
         raw_crop_png = _to_png_bytes(Image.fromarray(roi_gray, mode="L"))

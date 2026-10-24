@@ -297,14 +297,21 @@ Before splitting, the host sign preview locates the sign board on the
 box-averaged 96×96 frame (160×160 capture), exactly the input the MCU's
 front-end sees; uploads/synth images keep their own size: the pinned Manual
 ROI when one is set;
-when Dark/Lum have been tuned, an **ink-cluster** pass ignores components
-within 6 % of the frame edge (fingers/frame/border noise), drops oversized
+when Dark/Lum have been tuned, an **ink-cluster** pass strips frame-scale
+lines and frame-thickness corner debris but **keeps a character near the
+plate/frame edge** (the old 6 % margin drop erased `'A'`), drops oversized
 and tiny blobs — a thin `1` is allowed — and takes the horizontal row of
 three character blobs.  The ROI is their union plus one uniform 10 % pad on
 all four sides, so the box is tight and symmetric rather than pulled left by
-edge clutter.  Otherwise the enclosed bright inner plate is used, with a
-centred 70 % fallback.  The ROI is cropped first, border-line/noise ink is
-removed, and only then does the three-glyph projection run.
+edge clutter, then clamped to the white plate interior so the dark surround
+cannot enter the crop.  Otherwise the enclosed bright inner plate is used,
+with a centred 70 % fallback.
+
+The three-glyph projection runs on that **exact ROI crop**.  There is no
+second border-cleaning pass on the cropped box: checking `ROI` displays the
+same pixels visible inside the unchecked green box, and a broken `'1'`
+keeps both strokes.  Only frame-scale outer-surround components are ever
+removed.
 
 Each slot crop gets a small plate-context margin (8 % of its smaller side,
 minimum 2 px) before the glyph transform.  A stroke-only `1` crop otherwise
@@ -339,7 +346,11 @@ The output pane is the `.signmatch` banner:
   red = fail.  The `WANT` characters come from the closest configured plate
   when no plate is an exact match.
 - A red banner names the failing slot(s) and the reason (wrong glyph,
-  `_background`, no glyph, or below the 0.60 floor).
+  `_background`, no glyph, below the 0.60 floor, or the exact OOD gate that
+  fired).  If `entropy_ratio` is the **only** gate that failed and the slot's
+  top class is the plate's target character at `prob >= min_prob`, the slot
+  is accepted: a correct but merely uncertain reading must not produce a
+  false NO.  `sign_pct` and `max_prob` still reject.
 - Idle states: `◻ SET THE TARGET SIGN` and `◻ NO MODEL YET`.
 
 `Preview Image Input Source`, the four OOD gates (`sign_pct` min/max, max

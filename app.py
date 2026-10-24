@@ -9968,9 +9968,17 @@ function renderSignMatch(data) {{
     const fails = slots.filter((s) => s && !s.match);
     const reasons = fails.map((s, i) => {{
       const idx = Number(s.index != null ? s.index : i) + 1;
+      const got = s.label
+        ? `read "${{String(s.label)}}" at ${{Math.round(Number(s.prob || 0) * 1000) / 10}}%`
+        : 'produced no glyph';
+      // If an OOD gate fired, name THAT gate: a correct character below the
+      // entropy floor must not be explained as a confidence failure.
+      if (s.ood && s.ood_reason) {{
+        return `slot ${{idx}} ${{got}} — rejected by OOD (${{String(s.ood_reason)}})`;
+      }}
       if (s.background) return `slot ${{idx}} came back as background`;
-      if (!s.label) return `slot ${{idx}} produced no glyph`;
-      return `slot ${{idx}} read "${{String(s.label)}}" at ${{Math.round(Number(s.prob || 0) * 1000) / 10}}%`;
+      if (s.empty) return `slot ${{idx}} contained no ink`;
+      return `slot ${{idx}} ${{got}} (wanted "${{String(s.char || SIGN_SEQUENCE_PAD)}}")`;
     }});
     const hint = document.createElement('div');
     hint.className = 'signmatch-hint';

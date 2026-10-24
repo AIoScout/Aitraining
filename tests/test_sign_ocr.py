@@ -452,13 +452,14 @@ def test_predictor_keeps_labels_in_reading_order_under_rtl():
 def test_predictor_boxes_are_full_frame_even_under_manual_roi():
     # With a Manual ROI the reading is taken on a sub-image; the boxes the SPA
     # draws must be in FULL-frame pixels or the overlay lands in the wrong
-    # place.  The ROI here is the whole frame, so the boxes must still match
-    # what the same frame gives with no ROI at all.
+    # place.  Pin the manual ROI to the auto ROI's own pixels: the same crop
+    # must produce the same full-frame slot boxes.
     ctrl = FakeController([_raw_for(0), _raw_for(1), _raw_for(0)])
     plain = _predict(ctrl)
     ctrl2 = FakeController([_raw_for(0), _raw_for(1), _raw_for(0)])
-    ctrl2._preview_load_model = _with_roi(ctrl2, (0.0, 0.0, 1.0, 1.0))
+    ctrl2._preview_load_model = _with_roi(ctrl2, tuple(plain["roi_box_norm"]))
     roi = _predict(ctrl2)
+    assert roi["roi_box"] == plain["roi_box"], (roi["roi_box"], plain["roi_box"])
     assert [s["box"] for s in roi["slots"]] == [s["box"] for s in plain["slots"]]
     assert roi["crop"] == plain["crop"]
 

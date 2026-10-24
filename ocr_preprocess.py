@@ -1138,9 +1138,11 @@ def _ink_cluster_roi(
         n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, 8)
     except Exception:
         return None
-    # Discard anything that reaches into the outer 6 % of the frame: fingers,
-    # the plastic frame and bottom-left border clutter live there and used to
-    # drag the ROI left (and clip '2' on the right).
+    # Strip the plastic frame / holder border and frame-thickness corner
+    # debris, but NOT a character that merely sits close to the frame edge:
+    # the old unconditional 6 % margin drop removed 'A' in tight plate
+    # captures and left the trio without its first character.  See
+    # _is_outer_frame_debris for the exact (C-mirrored) rule.
     margin = max(2, int(round(min(h, w) * 0.06)))
     # A thin '1' can be only ~35-60 px in a 160 frame; the old 0.15 %
     # floor (38 px) dropped it and left only two candidates.  Keep the
@@ -1152,7 +1154,7 @@ def _ink_cluster_roi(
         x, y, cw, ch, area = (int(v) for v in stats[i])
         if area < min_area or cw < 2 or ch < min_height:
             continue
-        if x <= margin or y <= margin or x + cw >= w - margin or y + ch >= h - margin:
+        if _is_outer_frame_debris(x, y, cw, ch, w, h, margin):
             continue
         if cw > 0.60 * w or ch > 0.60 * h:
             continue
@@ -1258,13 +1260,48 @@ _INTERIOR_MARGIN_PCT = 6
 _INTERIOR_MAX_COMPONENTS = 256
 
 
+def _is_outer_frame_debris(x: int, y: int, cw: int, ch: int,
+                           w: int, h: int, margin: int) -> bool:
+    """True only for frame-scale / outer-surround components.
+
+    A character may legitimately sit within a few pixels of the frame edge
+    (a tight plate capture), so the old unconditional outer-margin drop is
+    gone: it erased `'A'` while leaving the plate.  What is still removed is
+    the plastic frame / holder border — a line that is thin in one axis and
+    spans most of the frame — plus corner debris that is thin in BOTH axes
+    and touches the outer margin.  A thin `'1'` stroke (tall but less than
+    70 % of the frame) and a detached bottom fragment (wide enough in one
+    axis) both survive.
+
+    Mirrored bit-for-bit by `is_outer_frame_debris()` in sign_glyph.c.
+    """
+    if w <= 0 or h <= 0:
+        return False
+    thin_w = max(4, (w * 6 + 50) // 100)
+    thin_h = max(4, (h * 6 + 50) // 100)
+    # Frame lines: thin in one axis, spanning >= 70 % of the other.
+    if ch <= thin_h and cw * 100 >= 70 * w:
+        return True
+    if cw <= thin_w and ch * 100 >= 70 * h:
+        return True
+    touches_outer = (
+        x <= margin or y <= margin
+        or x + cw >= w - margin or y + ch >= h - margin
+    )
+    # Corner / frame-thickness debris at the outer edge.
+    if touches_outer and cw <= thin_w and ch <= thin_h:
+        return True
+    return False
+
+
 def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
     """Filtered 8-connected ink components, in raster-scan label order.
 
-    Same integer bounds as the C port: an outer margin of 6 % of the shorter
-    side, tiny specks, components wider than 85 % or taller than 60 % of the
-    frame, and blobs covering >40 % of the area are discarded.  Thin
-    single-stroke characters are kept; only frame-scale debris is removed.
+    Same integer bounds as the C port: tiny specks, frame lines / outer
+    corners (`_is_outer_frame_debris`), components wider than 85 % or taller
+    than 60 % of the frame, and blobs covering >40 % of the area are
+    discarded.  Thin single-stroke characters — including one close to the
+    frame edge — are kept; only frame-scale debris is removed.
     """
     cv2 = _cv2_module()
     arr = np.asarray(ink, dtype=bool)
@@ -1284,7 +1321,7 @@ def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
         x, y, cw, ch, area = (int(v) for v in stats[i])
         if area < min_area:
             continue
-        if x <= margin or y <= margin or x + cw >= w - margin or y + ch >= h - margin:
+        if _is_outer_frame_debris(x, y, cw, ch, w, h, margin):
             continue
         if cw * 100 > 85 * w or ch * 100 > 60 * h:
             continue
@@ -1405,6 +1442,87 @@ def find_interior_ink_roi(
             "threshold": int(t)}
 
 
+def _clamp_box_to_bright_plate(gray: np.ndarray, box: Any) -> Optional[List[int]]:
+    """Shrink a character-cluster box to the bright plate that contains it.
+
+    The ink-cluster ROI is the union of the three character blobs plus a
+    10 % pad.  When a character sits close to the plate edge, that pad can
+    cross the white plate and pull the dark plastic frame / holder border
+    into the box.  The split then sees a vertical line as a fourth run and
+    merges it into slot 1 (`|A`), and the ROI view differs from the white
+    board the user sees.
+
+    This finds the bright connected component under the box (the white sign
+    plate) and returns its bounding box, inset by 1 px to step inside the
+    blurred plate edge.  The characters are dark holes inside that component,
+    so the bbox still contains all of them.  Returns None when no bright
+    component covers at least half the box and its centre — the caller then
+    keeps the original box rather than guessing.
+    """
+    cv2 = _cv2_module()
+    arr = np.asarray(gray)
+    if cv2 is None or arr.ndim != 2 or arr.size == 0:
+        return None
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    try:
+        bx1, by1, bx2, by2 = (int(v) for v in box)
+    except Exception:
+        return None
+    bx1 = max(0, min(w - 1, bx1)); by1 = max(0, min(h - 1, by1))
+    bx2 = max(bx1 + 1, min(w, bx2)); by2 = max(by1 + 1, min(h, by2))
+    area_box = max(1, (bx2 - bx1) * (by2 - by1))
+    cx, cy = (bx1 + bx2) // 2, (by1 + by2) // 2
+    try:
+        blur = cv2.GaussianBlur(arr, (5, 5), 0)
+        t, _ = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        t = int(t)
+        if t < 16:
+            t = int(np.percentile(blur, 70))
+        if t > 245:
+            t = int(np.percentile(blur, 55))
+        bright = (blur >= t).astype(np.uint8) * 255
+        k = max(3, int(round(min(h, w) * 0.02)))
+        if k % 2 == 0:
+            k += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        closed = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel, iterations=1)
+        cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN,
+                                   np.ones((3, 3), np.uint8), iterations=1)
+        n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(cleaned, 8)
+    except Exception:
+        return None
+    candidates = []
+    for i in range(1, n):
+        x, y, cw, ch, _area = (int(v) for v in stats[i])
+        if cw <= 2 or ch <= 2:
+            continue
+        if not (x <= cx < x + cw and y <= cy < y + ch):
+            continue
+        ix1, iy1 = max(x, bx1), max(y, by1)
+        ix2, iy2 = min(x + cw, bx2), min(y + ch, by2)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        if inter * 2 < area_box:
+            continue
+        # Prefer the SMALLEST bright component containing the centre: the
+        # white plate is enclosed by the dark frame, while the desk/background
+        # outside it is a much larger bright component whose bbox also
+        # contains everything.
+        candidates.append((cw * ch, x, y, cw, ch))
+    if not candidates:
+        return None
+    _, x, y, cw, ch = min(candidates, key=lambda c: c[0])
+    inset = 1 if (cw > 4 and ch > 4) else 0
+    px1 = max(bx1, x + inset)
+    py1 = max(by1, y + inset)
+    px2 = min(bx2, x + cw - inset)
+    py2 = min(by2, y + ch - inset)
+    if px2 <= px1 or py2 <= py1:
+        return None
+    if (px1, py1, px2, py2) == (bx1, by1, bx2, by2):
+        return None   # already inside the plate: keep the tight ROI
+    return [int(px1), int(py1), int(px2), int(py2)]
+
+
 def find_sign_roi(
     src: np.ndarray,
     manual_roi: Any = None,
@@ -1446,6 +1564,15 @@ def find_sign_roi(
     if dark_thr is not None and lum_thr is not None:
         ink_roi = _ink_cluster_roi(gray, int(dark_thr), int(lum_thr))
         if ink_roi is not None:
+            # The trio pad may cross the white plate when a glyph sits near
+            # its edge; clamp to the plate interior so the crop cannot carry
+            # the dark surround / holder border into the split.
+            clamped = _clamp_box_to_bright_plate(gray, ink_roi["box"])
+            if clamped is not None:
+                ink_roi["box"] = [int(v) for v in clamped]
+                ink_roi["area_frac"] = float(
+                    (clamped[2] - clamped[0]) * (clamped[3] - clamped[1])
+                ) / float(max(1, h * w))
             return ink_roi
 
     cv2 = _cv2_module()
@@ -1505,11 +1632,16 @@ def find_sign_roi(
                 if area_frac > 0.90:
                     score *= 0.95
                 if best is None or score > best["score"]:
-                    pad = max(1, int(round(0.025 * min(cw, ch))))
-                    x1 = max(0, x - pad)
-                    y1 = max(0, y - pad)
-                    x2 = min(w, x + cw + pad)
-                    y2 = min(h, y + ch + pad)
+                    # Step INSIDE the white plate.  The connected component
+                    # IS the bright interior; padding outward used to pull
+                    # the dark plastic frame / holder border into the ROI,
+                    # which then bled into slot 1 as `|A`.  A 1 px inset
+                    # removes the blurred plate edge without touching ink.
+                    inset = 1 if (cw > 4 and ch > 4) else 0
+                    x1 = x + inset
+                    y1 = y + inset
+                    x2 = x + cw - inset
+                    y2 = y + ch - inset
                     best = {
                         "box": [x1, y1, x2, y2],
                         "method": "bright_plate",
@@ -1538,12 +1670,13 @@ def clean_sign_ink(
     margin: Optional[int] = None,
     min_area: Optional[int] = None,
 ) -> np.ndarray:
-    """Remove border-touching frame lines and tiny specks from a sign ROI.
+    """Remove frame-scale border lines and tiny specks from a sign ROI.
 
-    The sign's plastic frame is a long, dark component touching the ROI edge;
-    if it survives into the vertical projection it becomes the widest "run"
-    and steals one of the three slots.  The genuine characters are interior
-    components.  A speck of sensor noise is also removed by area.
+    Only the plastic frame / holder border (a line spanning most of the ROI
+    in one axis) and frame-thickness corner debris are removed.  A character
+    that merely sits close to the ROI edge — or a detached fragment of a
+    broken `'1'` — is kept: erasing those was the bug that deleted `'A'`
+    from the ROI view.  See `_is_outer_frame_debris` for the shared rule.
 
     If the cleanup would remove ALL ink (a genuinely tight sign crop), the
     original mask is returned: an empty slot is worse than a noisy one.
@@ -1558,13 +1691,9 @@ def clean_sign_ink(
         min_area = max(4, int(round(h * w * 0.0005)))
     cv2 = _cv2_module()
     if cv2 is None:
-        out = arr.copy()
-        if margin > 0:
-            out[:margin, :] = False
-            out[-margin:, :] = False
-            out[:, :margin] = False
-            out[:, -margin:] = False
-        return out
+        # No component labelling available: do NOT wipe a margin band (that
+        # erases characters).  Leaving the mask untouched is the safe answer.
+        return arr.copy()
     try:
         n, labels, stats, _ = cv2.connectedComponentsWithStats(arr.astype(np.uint8), 8)
         keep = np.zeros_like(arr, dtype=bool)
@@ -1572,20 +1701,8 @@ def clean_sign_ink(
             x, y, cw, ch, area = (int(v) for v in stats[i])
             if area < min_area:
                 continue
-            touches = (
-                (1 if x <= margin else 0)
-                + (1 if y <= margin else 0)
-                + (1 if x + cw >= w - margin else 0)
-                + (1 if y + ch >= h - margin else 0)
-            )
-            if touches:
-                # The plastic frame is a thin line/ring on the ROI edge; it
-                # usually touches 2-4 sides.  A real glyph can sit close to
-                # one edge in a tight capture, so a single-side,
-                # character-sized component is kept.
-                thin = max(3, int(round(min(h, w) * 0.04)))
-                if touches >= 2 or cw <= thin or ch <= thin:
-                    continue
+            if _is_outer_frame_debris(x, y, cw, ch, w, h, margin):
+                continue
             keep |= (labels == i)
         if not keep.any():
             return arr

@@ -168,6 +168,29 @@ def _cases():
     seq("board_ring_and_clutter_bright", 255 - board, thresh=196,
         polarity=1)
 
+    # Regression for the Preview ROI bug: a white plate whose 'A' sits
+    # inside the old 6 % frame margin, and a '1' broken into two strokes.
+    # The outer dark surround must still be stripped, but the edge glyph
+    # and BOTH '1' fragments must survive into their slots, on the host and
+    # the P4 (this case is compared C-vs-Python bit for bit).
+    edge = np.full((160, 160), 20, np.uint8)
+    edge[1:159, 1:159] = 245
+    # A: x=2..26 (2 px inside the plate), y=20..100
+    edge[20:100, 2:8] = 20
+    edge[20:100, 20:26] = 20
+    edge[20:26, 2:26] = 20
+    edge[56:62, 2:26] = 20
+    # 1: broken into a top stroke and a bottom stanza at the same columns
+    edge[20:52, 76:82] = 20
+    edge[60:100, 74:84] = 20
+    # 2: x=120..146, y=20..100
+    edge[20:26, 120:146] = 20
+    edge[20:60, 140:146] = 20
+    edge[56:62, 120:146] = 20
+    edge[56:94, 120:126] = 20
+    edge[94:100, 120:146] = 20
+    seq("edge_A_broken_one", edge, thresh=120)
+
     for i in range(SWEEP):
         w = int(rng.integers(40, 130))
         h = int(rng.integers(40, 130))
