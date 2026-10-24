@@ -33,6 +33,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
@@ -182,6 +183,26 @@ def _cases():
     # the host's _resize_square_box_average_u8 + preprocess.
     for thr_name, thr in (("otsu", -1), ("lum121", 120), ("lum50", 49)):
         add(5, f"a12_capture160_{thr_name}", board160, x0=96, thresh=thr)
+
+    # Real camera captures, when a dataset/ folder is present next to the
+    # app: square frames at their native side, plus the 160->96 chain.
+    dataset_dir = ROOT / "dataset"
+    if dataset_dir.is_dir():
+        loaded = 0
+        for p in sorted(dataset_dir.rglob("*.png")):
+            try:
+                shot = np.asarray(Image.open(p).convert("L"), dtype=np.uint8)
+            except Exception:
+                continue
+            if shot.ndim != 2 or shot.shape[0] != shot.shape[1] or shot.shape[0] < 8:
+                continue
+            tag = "".join(ch if ch.isalnum() else "_" for ch in p.stem)[:40]
+            seq(f"dataset_{loaded}_{tag}", shot, thresh=-1)
+            if shot.shape[0] > 96:
+                add(5, f"dataset_{loaded}_{tag}_96", shot, x0=96, thresh=-1)
+            loaded += 1
+            if loaded >= 12:
+                break
 
     # Regression for the Preview ROI bug: a white plate whose 'A' sits
     # inside the old 6 % frame margin, and a '1' broken into two strokes.
