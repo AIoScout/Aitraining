@@ -14975,7 +14975,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
         {{ t: 'Preview &amp; Export', d: 'Preview a single glyph, watch the _background rejection class, then export the OCR firmware.' }}
       ],
       body: '<p>This workspace trains a <b>single-character</b> classifier — one glyph per crop — and ships it to the <b>ESP32-P4</b> as <code>TFLite_OCR</code>.</p>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Nothing here is read as a <b>sequence</b>: one crop in, one character out. Road signs are a separate project type. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Nothing here is read as a <b>sequence</b>: one crop in, one character out. The <b>🚗 Car License Project</b> is a separate project type. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
         '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
     }},
     {{
@@ -15466,13 +15466,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }}
   ];
 
-  /* ═══ Curriculum 3 · Car License, 3 characters (16 steps) ═══════════
+  /* ═══ Curriculum 3 · 🚗 Car License Project (29 steps) ═══════════════
      A labelled SEQUENCE: find the plate, split it into three slots, read
-     each slot as a glyph, then verify the whole reading. */
+     each slot as a glyph, then verify the whole reading — against one or
+     more allowed plates. */
   var SIGN_OCR_STEPS = [
     {{
       chapter: 1,
-      title: 'Your Car License Verification, End to End',
+      title: 'Your 🚗 Car License Project, End to End',
       /* Step 0 is the big picture rather than a lesson, so it carries
          `overview` and a `stages` list instead of a spotlight: the card
          floats centred over a dimmed workspace and its one button starts
@@ -15482,13 +15483,13 @@ mountReflowTimers.push(window.setTimeout(() => {{
       placement: 'auto',
       overview: true,
       stages: [
-        {{ t: 'Set the 3-Character Target', d: 'Type the sign&rsquo;s three characters into the slots on the left — that target is what the model verifies.' }},
+        {{ t: 'Set the Target Plate', d: 'Type the sign&rsquo;s three characters into the slots on the left — that target is what the model verifies, and 🪪 License List holds one or more allowed plates.' }},
         {{ t: 'Collect &amp; Crop Samples', d: 'Capture one glyph per crop for each character, then open the Sample Worktable to set the ROI box and the Dark / Lum thresholds.' }},
         {{ t: 'Isolate the Glyphs', d: 'Each class learns a single character; the 3-character plate is split into its slots at Preview time, never during training.' }},
         {{ t: 'Order &amp; Train', d: 'Set the reading direction, train the tiny int8 classifier and read the per-character accuracy.' }},
         {{ t: 'Verdict &amp; Export', d: 'Read the three slots and the 🟢 YES / 🔴 NO banner, then export the Car License firmware package.' }}
       ],
-      body: '<p>This workspace does not classify a whole plate. It <b>verifies a known target</b>, one character at a time, and answers <b>🟢 YES (MATCH)</b> or <b>🔴 NO (NOT MATCH)</b>.</p>' +
+      body: '<p>The <b>🚗 Car License Project</b> does not classify a whole plate. It <b>verifies a known target</b>, one character at a time, and answers <b>🟢 YES (MATCH)</b> or <b>🔴 NO (NOT MATCH)</b>.</p>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Because the target is fixed, the model only ever has to learn the handful of characters that appear on it — a very small, very accurate classifier. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
         '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
     }},
@@ -15555,13 +15556,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
       body: '<ul>' +
         '<li><b>Webcam</b> — the capture device; <b>Capture FPS</b> throttles the live preview stream.</li>' +
         '<li><b>Serial Device (port)</b> — the ESP32-P4 USB device. Re-scan after plugging it in.</li>' +
-        '<li><b>Frame side</b> / <b>Channels</b> must match the firmware — <b>96×96</b> and <b>Grayscale</b> by default.</li>' +
+        '<li><b>Frame side</b> (<code>#settingsFrameSide</code>) / <b>Channels</b> must match the firmware — <b>96×96</b> and <b>Grayscale</b> by default. Raise Frame side to <b>160×160</b> for the sharpest capture: it is the <b>camera&rsquo;s</b> resolution, not the model&rsquo;s.</li>' +
+        '<li><b>Image Size</b> is the model&rsquo;s own square, set in the middle column under ▸ <b>Advanced</b> (<code>#advImgSizeInline</code>) — <b>96</b>, or <b>28</b> for a single glyph. Capture high and train compact: the app scales every incoming frame down to the model&rsquo;s <code>img_size</code>, and the exported firmware carries that size in <code>model_settings.h</code>, so the device scales its camera frames the same way.</li>' +
         '<li><b>Baud rate</b>: <b>115200</b> for reliability, <b>921600</b> for faster frame streaming.</li>' +
         '</ul>' +
         '<details class="tm-tour-details"><summary>Deep dive · what each serial field does</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table"><tr><th>Field</th><th>Meaning</th></tr>' +
         '<tr><td><code>Port</code></td><td>USB serial device of the ESP32-P4 (re-scan after plugging in).</td></tr>' +
-        '<tr><td><code>Frame side</code></td><td>Square frame the device streams; must match its firmware.</td></tr>' +
+        '<tr><td><code>Frame side</code></td><td>Square frame the device streams; must match its firmware. It is separate from the model&rsquo;s <b>Image Size</b> — frames are scaled down to it.</td></tr>' +
         '<tr><td><code>Channels</code></td><td><b>1</b> = grayscale (default), <b>3</b> = RGB colour.</td></tr>' +
         '<tr><td><code>Baud</code></td><td>115200 for reliability, 921600 for faster frame streaming.</td></tr>' +
         '<tr><td><code>Sync header</code></td><td>Byte pattern marking the start of a frame (AA 55 AA) — under <b>▸ Advanced Settings</b>.</td></tr>' +
@@ -15591,11 +15593,11 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<tr><td>Real signs are missed</td><td><b>Loosen</b>: lower <code>sign min %</code>, raise <code>sign max %</code>, lower <code>max prob</code>, raise <code>entropy max</code>.</td></tr>' +
         '<tr><td>Empty wall is accepted</td><td><b>Tighten</b>: raise <code>sign min %</code>, lower <code>sign max %</code>, raise <code>max prob</code>, lower <code>entropy max</code>.</td></tr>' +
         '</table></div></details>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>On the sign path each slot also has its own confidence floor and its own <code>_background</code> rejector, so start permissive and tighten until a blank frame reliably reads red.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>On the Car License path each slot also has its own confidence floor, and by default (<code>_background</code> OFF) the four gates above plus that floor are the whole rejector — so start permissive and tighten until a blank frame reliably reads red. The next checkpoint covers the optional <code>_background</code> class.</span></div>'
     }},
     {{
       chapter: 1,
-      title: 'OCR Dataset Mixing &amp; Transfer Learning',
+      title: 'Dataset Mixing, _background &amp; Transfer Learning',
       target: '#advOcrPanel',
       fallback: ['#modalOcrSection', '#globalSettingsModal'],
       placement: 'left',
@@ -15606,7 +15608,10 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseTarget: '#navSettings',
       phaseName: 'Input Settings',
       advanceTarget: '#advOcrEmnist',
-      checkpoint: 'Decide how much EMNIST is mixed into the character set',
+      /* Flipping the `_background` toggle is this checkpoint's own
+         decision, so touching it counts as doing the step. */
+      advanceAlso: ['#settingsUseBackgroundOod'],
+      checkpoint: 'Decide how much EMNIST is mixed in, and whether the model trains a _background class',
       body: '<p>This is the glyph-project panel. It decides what the model trains on beyond your own captures:</p>' +
         '<ul>' +
         '<li><b>Mix EMNIST into every class</b> (<code>#advOcrEmnist</code>) — augments each character with public handwriting glyphs, so a character you captured 60 times is backed by thousands more.</li>' +
@@ -15677,6 +15682,26 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '</ul>' +
         '<p>The three slots are the <b>single writer</b> of the target: change them and the class list, the training set and the preview verdict all follow.</p>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⌨️</span><span>Focus a slot and type, or <b>paste the whole sign</b> into the first slot to fill all three at once. The tour advances once the bar has settled, so you can fill the sign without leaving the step.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Allow More Than One Plate: the 🪪 License List',
+      target: '#navLicenseList',
+      fallback: ['#signSeqBar', '.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navLicenseList',
+      /* The whitelist is its own modal, and the next checkpoint lives on the
+         slot bar behind it — so leaving the step closes what it opened,
+         exactly like the Settings and drawer exits. */
+      onLeave: closeLicenseListModal,
+      checkpoint: 'Click "🪪 License List" beside ⚙ Settings to add a second valid plate',
+      body: '<p>Think of the gatekeeper at a car park, who is allowed to remember <b>several</b> cars rather than only one. <b>🪪 License List</b> (<code>#navLicenseList</code>) sits next to <b>⚙ Settings</b> and holds <b>one or more valid 3-character plates</b> — for example <b>A12</b> and <b>B18</b>.</p>' +
+        '<ul>' +
+        '<li>Every plate on the list is a reading the firmware accepts; a plate that is not listed stays <b>🔴 NO</b>.</li>' +
+        '<li><b>+ Add Allowed License Plate</b> (<code>#licenseListAdd</code>) appends another row, and <b>Save &amp; Sync Classes</b> merges the <b>unique characters of every plate</b> into the left-hand Character Cards — a character shared by two plates (such as <code>1</code>) has its samples collected <b>once</b> and serves both.</li>' +
+        '<li>The badge on the button (<code>#navLicenseCount</code>) counts the plates on the list, and the first plate is the one the slot bar above shows.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🅿️</span><span>A single plate — the default — is enough for this walkthrough. Add a second only when one camera has to recognise more than one car.</span></div>'
     }},
     {{
       chapter: 1,
@@ -15994,7 +16019,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 5,
-      title: 'Export the Road-Sign Firmware Package',
+      title: 'Export the Car License Firmware Package',
       target: '#exportBtn',
       fallback: ['.preview-card'],
       placement: 'bottom',

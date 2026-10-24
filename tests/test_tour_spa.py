@@ -10,7 +10,7 @@ The guide is built as the rhythm a person actually works in, so that is what
 is checked:
 
   curricula     the guide selected for a project type is that project's own
-                curriculum: 23 steps for `image`, 26 for `ocr`, 28 for
+                curriculum: 23 steps for `image`, 26 for `ocr`, 29 for
                 `sign_ocr`, with three distinct step lists
   overview      every type opens on step 0 as a Workflow Overview: a card
                 that lists the whole trip as numbered stages, with no
@@ -82,7 +82,7 @@ CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # The curriculum each project type must load.  Hard-coded on purpose: the
 # number of steps is the thing a user notices, so it is the thing the test
 # states, rather than something read back out of the source it checks.
-EXPECTED_STEPS = {"image": 23, "ocr": 26, "sign_ocr": 28}
+EXPECTED_STEPS = {"image": 23, "ocr": 26, "sign_ocr": 29}
 
 # Steps whose real interaction the test performs, keyed by the TARGET
 # selector — that is the string the driver records for a step, not the
