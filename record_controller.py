@@ -2612,6 +2612,63 @@ class RecordController:
         raw = self._classes_meta_load(dataset_root)
         return normalize_sample_preprocess_map(raw.get("sample_preprocess"))
 
+    @staticmethod
+    def _canonical_sample_key(class_name: str, filename: str) -> str:
+        """The canonical sample_preprocess key: `<class_name>/<filename>`.
+
+        `filename` is reduced to its basename so a stored full path, a
+        foreign separator or a prefix directory can never orphan a
+        sample's Manual ROI on save/load.
+        """
+        return f"{str(class_name or '').strip()}/{Path(str(filename or '')).name}"
+
+    @staticmethod
+    def _sample_preprocess_lookup(
+        sample_preprocess: Dict[str, Any], class_name: str, filename: str
+    ) -> Optional[Dict[str, Any]]:
+        """Find a per-sample preprocess record, whatever key shape wrote it.
+
+        Tries, in order:
+          1. the canonical nested entry  `<class_name> -> <filename>`
+          2. the canonical flat entry     `<class_name>/<filename>`
+          3. a basename-normalised variant of either (case/path drift)
+          4. a bare `<filename>` key (class-less flat maps)
+
+        so a path difference between the save side and the load side can
+        NEVER silently drop a sample's Manual ROI (RC1).
+        """
+        if not isinstance(sample_preprocess, dict):
+            return None
+        cls = str(class_name or "").strip()
+        file = Path(str(filename or "")).name
+        if not cls or not file:
+            return None
+        canonical = f"{cls}/{file}"
+        # 1. canonical nested entry
+        class_map = sample_preprocess.get(cls)
+        if isinstance(class_map, dict):
+            if file in class_map and isinstance(class_map[file], dict):
+                return class_map[file]
+            # 1b. basename-normalised variant inside the class map
+            for key, value in class_map.items():
+                if Path(str(key or "")).name == file and isinstance(value, dict):
+                    return value
+        # 2. canonical flat entry `<class_name>/<filename>`
+        flat = sample_preprocess.get(canonical)
+        if isinstance(flat, dict):
+            return flat
+        # 3. flat entry whose basename matches and whose class prefix matches
+        for key, value in sample_preprocess.items():
+            if not isinstance(value, dict) or not isinstance(key, str):
+                continue
+            if Path(str(key or "")).name == file and key.rstrip("/").endswith(f"/{cls}"):
+                return value
+        # 4. bare `<filename>` key in a class-less flat map (last resort)
+        bare = sample_preprocess.get(file)
+        if isinstance(bare, dict):
+            return bare
+        return None
+
     def _classes_save(
         self,
         dataset_root: Path,
@@ -3769,16 +3826,18 @@ class RecordController:
         # such writer and lives in the SPA until something flushes it.  This
         # is that flush, and it happens before the zip is opened so both
         # halves of the archive carry the same settings.
-        if isinstance(project_state, dict) and (
-            project_state.get("class_preprocess") is not None
-            or project_state.get("sample_preprocess") is not None
-        ):
-            self._classes_save(
-                dataset_root,
-                self._classes_load(dataset_root),
-                class_preprocess=merged_project_state.get("class_preprocess"),
-                sample_preprocess=merged_project_state.get("sample_preprocess"),
-            )
+        #
+        # UNCONDITIONAL (RC1): every save writes the complete merged map —
+        # the per-sample Manual ROI boxes and Dark/Lum thresholds in
+        # sample_preprocess were silently dropped from tm_classes.json
+        # whenever a save payload happened not to carry the key, and the
+        # archive then reopened without them.
+        self._classes_save(
+            dataset_root,
+            self._classes_load(dataset_root),
+            class_preprocess=merged_project_state.get("class_preprocess"),
+            sample_preprocess=merged_project_state.get("sample_preprocess"),
+        )
 
         tmp_path = save_path.with_suffix(".tmproj.tmp")
         if tmp_path.exists():
@@ -3951,12 +4010,74 @@ class RecordController:
                     classes = sorted([str(x) for x in dirs]) if dirs else ["Class 1", "Class 2"]
                 self._classes_save(dataset_root, classes)
 
+            # ── RC1: restore the per-sample preprocessing FIRST ──
+            # The state file (tm_project_state.json) is the snapshot of what
+            # the SPA was actually holding when the user saved — including
+            # every per-sample Manual ROI box and Dark/Lum threshold.  An
+            # archive whose tm_classes.json predates the sample_preprocess
+            # flush (older files, a save raced with the Edit modal's write)
+            # must still come back with its ROIs, so the state file's copy
+            # is merged over the archive's tm_classes.json before anything
+            # re-preprocesses a sample.
+            project_state_in = tmp_dir / str(manifest.get("project_state") or "tm_project_state.json")
+            project_state: Optional[Dict[str, Any]] = None
+            if project_state_in.exists():
+                try:
+                    loaded = json.loads(project_state_in.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        project_state = loaded
+                except Exception:
+                    project_state = None
+            if project_state is None:
+                project_state = {}
+            state_sample = normalize_sample_preprocess_map(project_state.get("sample_preprocess"))
+            state_class = normalize_class_preprocess_map(project_state.get("class_preprocess"))
+            if state_sample or state_class:
+                # Layer the state file's entries over the restored map (the
+                # state file wins where the two disagree — it is the newer,
+                # SPA-authored half) and write the merged result back.
+                merged_pp = self._sample_preprocess_load(dataset_root)
+                for cls_name, class_map in state_sample.items():
+                    merged_pp.setdefault(cls_name, {}).update(class_map)
+                merged_cp = self._class_preprocess_load(dataset_root)
+                for cls_name, cfg in state_class.items():
+                    merged_cp[cls_name] = cfg
+                self._classes_save(
+                    dataset_root,
+                    self._classes_load(dataset_root),
+                    class_preprocess=merged_cp,
+                    sample_preprocess=merged_pp,
+                )
+
+            # ── RC1: rebuild the processed cache FROM the restored settings ──
+            # The archive's own cache can only be trusted when it was rebuilt
+            # with the same per-sample ROIs; restoring it verbatim re-imports
+            # whatever the saver last computed.  Rebuilding with the restored
+            # sample_preprocess guarantees the 28x28 glyphs the Edit modal
+            # and training see ARE the Manual ROI crops the user drew.
             processed_cache_in = tmp_dir / str(manifest.get("processed_cache_dir") or "")
             processed_cache_out = self._processed_cache_dir(dataset_root)
             if processed_cache_out.exists():
                 shutil.rmtree(processed_cache_out)
-            if processed_cache_in.exists():
-                shutil.copytree(processed_cache_in, processed_cache_out)
+            try:
+                self._rebuild_processed_cache(
+                    dataset_root,
+                    class_preprocess=self._class_preprocess_load(dataset_root),
+                    sample_preprocess=self._sample_preprocess_load(dataset_root),
+                    global_preprocess_mode=str(
+                        (project_state.get("train_cfg") or {}).get("preprocess_mode")
+                        or project_state.get("preprocess_mode")
+                        or PREPROCESS_MODE_AUTO_BY_LABEL
+                    ),
+                    out_size=int(resolved_size or cfg.img_size),
+                    fast_mode=True,
+                    project_type=resolved_type or str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                )
+            except Exception:
+                # A rebuild failure must not abort the open: fall back to the
+                # archive's cached glyphs when the project bundled them.
+                if processed_cache_in.exists():
+                    shutil.copytree(processed_cache_in, processed_cache_out)
 
             # A trained model survives this open only when the ARCHIVE ITSELF
             # bundled one.  The record inside names absolute paths from the
@@ -4000,17 +4121,8 @@ class RecordController:
                     if run_dst.exists():
                         shutil.rmtree(run_dst, ignore_errors=True)
                     latest_out.unlink(missing_ok=True)
-            project_state_in = tmp_dir / str(manifest.get("project_state") or "tm_project_state.json")
-            project_state: Optional[Dict[str, Any]] = None
-            if project_state_in.exists():
-                try:
-                    loaded = json.loads(project_state_in.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        project_state = loaded
-                except Exception:
-                    project_state = None
-            if project_state is None:
-                project_state = {}
+            # (project_state was loaded above, before the per-sample
+            # preprocessing restore — see the RC1 block.)
             # Reconcile the two halves of the archive.  The manifest is the
             # header (written by the one save path from the session's own
             # config); the state file is whatever the saver happened to
@@ -4986,12 +5098,13 @@ class RecordController:
                 continue
             raw_cfg = class_preprocess.get(class_name, {"mode": global_preprocess_mode})
             config = dict(raw_cfg) if isinstance(raw_cfg, dict) else {"mode": global_preprocess_mode}
-            class_sample_map = sample_preprocess.get(class_name, {})
             processed_count = 0
             for src in _list_class_image_files(src_dir):
                 try:
                     png = src.read_bytes()
-                    sample_cfg = class_sample_map.get(src.name)
+                    sample_cfg = self._sample_preprocess_lookup(
+                        sample_preprocess, class_name, src.name
+                    )
                     out_png = self._preprocess_image_png(
                         png,
                         label_name=class_name,

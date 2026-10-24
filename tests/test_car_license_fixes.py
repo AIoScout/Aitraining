@@ -497,3 +497,109 @@ def test_export_stamps_preview_dark_lum_into_both_constant_pairs():
         assert _re.search(
             r"previewThreshUserModified\s*=\s*true", source
         ), "the slider handler must mark the thresholds as user-modified"
+
+
+def test_save_open_project_preserves_per_sample_manual_roi():
+    """RC1: Save Project / Load Project must keep every per-sample Manual
+    ROI box and Dark/Lum threshold, and the processed 28x28 glyphs the
+    cache was built with.
+
+    The reported failure: a project saved with Manual ROI boxes on camera
+    captures reopened with ALL of them gone — every photo reverted to an
+    uncropped full frame, which then trained the whole "A 1 2" board into
+    class A and class 2.  The round trip must be lossless:
+      * sample_preprocess on disk and in the opened payload is identical;
+      * the processed-cache glyphs are pixel-identical after reopen;
+      * even an archive whose tm_classes.json lost the map (a save raced
+        with the Edit modal's writer) recovers it from the state file and
+        rebuilds the cache from the restored boxes.
+    """
+    def _plate() -> np.ndarray:
+        frame = np.full((96, 96), 220, np.uint8)
+        for x0, x1 in ((24, 30), (44, 50), (64, 70)):
+            frame[30:66, x0:x1] = 25
+        return frame
+
+    sample_map = {
+        name: {
+            "cam1.png": {
+                "mode": "manual_roi",
+                "manual_roi": list(roi),
+                "bg_dark_thresh": 7,
+                "bg_lum_thresh": 90,
+            }
+        }
+        for name, roi in {
+            "A": [0.10, 0.20, 0.60, 0.75],
+            "1": [0.30, 0.20, 0.60, 0.75],
+            "2": [0.50, 0.20, 0.80, 0.75],
+        }.items()
+    }
+
+    def _glyph(cache: Path, name: str) -> np.ndarray:
+        return np.asarray(
+            Image.open(next((cache / name).glob("cam1.png"))).convert("L")
+        )
+
+    def _roundtrip(ctrl, dataset: Path, save_path: Path):
+        # Reopen into the SAME workspace the way /project/open does.
+        ctrl._project_reset("s")
+        opened = ctrl._project_open("s", save_path)
+        assert isinstance(opened, dict)
+        restored = opened.get("sample_preprocess")
+        assert isinstance(restored, dict), opened
+        on_disk = ctrl._sample_preprocess_load(dataset)
+        for name in ("A", "1", "2"):
+            want = sample_map[name]["cam1.png"]
+            for store in (restored.get(name) or {}, on_disk.get(name) or {}):
+                got = store.get("cam1.png") or {}
+                assert str(got.get("mode")) == "manual_roi", (name, store)
+                assert list(got.get("manual_roi") or []) == list(
+                    want["manual_roi"]
+                ), (name, store)
+                assert int(got.get("bg_dark_thresh") or 0) == 7, (name, store)
+                assert int(got.get("bg_lum_thresh") or 0) == 90, (name, store)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        ctrl, dataset = _workspace(root)
+        for name in ("A", "1", "2"):
+            (dataset / name).mkdir(exist_ok=True)
+            (dataset / name / "cam1.png").write_bytes(_png(_plate()))
+        ctrl._classes_save(dataset, ["A", "1", "2"], sample_preprocess=sample_map)
+        ctrl._rebuild_processed_cache(
+            dataset, fast_mode=False, out_size=28,
+            project_type=rc.PROJECT_TYPE_SIGN_OCR,
+        )
+        cache = dataset.parent / ".tm_processed_cache"
+        before = {name: _glyph(cache, name).copy() for name in ("A", "1", "2")}
+
+        # Clean round trip: save with the SPA-shaped payload, then reopen.
+        save_path = root / "proj.tmproj"
+        ctrl._project_save(
+            "s", save_path,
+            project_state={"sample_preprocess": sample_map,
+                           "class_preprocess": {}, "train_cfg": {}},
+        )
+        _roundtrip(ctrl, dataset, save_path)
+        for name in ("A", "1", "2"):
+            assert np.array_equal(_glyph(cache, name), before[name]), name
+
+        # Rescue path: an archive whose tm_classes.json has NO
+        # sample_preprocess (an old build, or a save that raced the Edit
+        # modal's writer) must still restore the boxes from the state file
+        # and rebuild the glyphs from them.
+        import zipfile
+
+        broken = root / "broken.tmproj"
+        with zipfile.ZipFile(save_path) as zf, zipfile.ZipFile(broken, "w") as out:
+            for n in zf.namelist():
+                data = zf.read(n)
+                if n == "tm_classes.json":
+                    meta = json.loads(data.decode("utf-8"))
+                    meta.pop("sample_preprocess", None)
+                    data = json.dumps(meta).encode("utf-8")
+                out.writestr(n, data)
+        _roundtrip(ctrl, dataset, broken)
+        for name in ("A", "1", "2"):
+            assert np.array_equal(_glyph(cache, name), before[name]), name

@@ -437,12 +437,43 @@ def emnist_bank_path() -> Path:
     return Path(__file__).resolve().parent / "models" / TEMPLATE_BANK_FILENAME
 
 
+_UPRIGHT_ONE_MAX_W_H_RATIO = 0.40
+
+
+def _is_upright_one(img: np.ndarray) -> bool:
+    """True when a 28x28 EMNIST '1' is an upright vertical bar.
+
+    EMNIST handwritten '1's are mostly diagonal slashes (35-45 degrees
+    tilt), which taught the model to read an upright printed '1' (|) as
+    'A' or '2'.  The pre-widening ink bbox (the raw source glyph, BEFORE
+    normalise_glyph widens narrow strokes) separates the two: an upright
+    bar is narrow and vertical, a diagonal slash is about as wide as it
+    is tall.  Keep only w / h <= _UPRIGHT_ONE_MAX_W_H_RATIO (integer
+    math, so the same glyph always gets the same verdict).
+    """
+    arr = np.asarray(img)
+    if arr.ndim != 2 or arr.size == 0:
+        return False
+    ink = arr > 127
+    ys, xs = np.nonzero(ink)
+    if ys.size == 0 or xs.size == 0:
+        return False
+    w = int(xs.max()) - int(xs.min()) + 1
+    h = int(ys.max()) - int(ys.min()) + 1
+    return w * 100 <= 40 * h
+
+
 def _bank_add(bank: Dict[str, List[np.ndarray]], char: Any, image: np.ndarray) -> None:
     ch = str(char or "").strip().upper()
     if len(ch) != 1 or ch not in TEMPLATE_SIGN_CHARS:
         return
     arr = np.asarray(image)
     if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+        return
+    # RC3: seed class '1' with UPRIGHT vertical bars only.  The diagonal
+    # slashes EMNIST mostly stores taught the model to read an upright
+    # printed '1' as 'A' or '2'.
+    if ch == "1" and not _is_upright_one(arr):
         return
     bank.setdefault(ch, []).append(np.ascontiguousarray(arr, dtype=np.uint8))
 
@@ -1263,10 +1294,36 @@ def build_mixed_dataset(
                 emnist_counts[name] = 0
                 continue
             idx = np.flatnonzero(emnist_data.labels == int(label))
+            mapped_char = (
+                emnist_data.chars[label]
+                if label < len(emnist_data.chars) else ""
+            )
             if idx.size == 0:
                 emnist_counts[name] = 0
-                warnings.append(f"class '{name}' mapped to EMNIST '{emnist_data.chars[label] if label < len(emnist_data.chars) else label}' but the split has no such samples")
+                warnings.append(f"class '{name}' mapped to EMNIST '{mapped_char}' but the split has no such samples")
                 continue
+            # RC3: class '1' seeds UPRIGHT vertical bars only — the
+            # pre-widening bbox of the raw glyph must be narrow and
+            # vertical (w / h <= 0.40).  Diagonal EMNIST slashes taught
+            # the model to read an upright printed '1' as 'A' or '2'.
+            if mapped_char == "1":
+                keep = np.asarray(
+                    [_is_upright_one(emnist_data.images[int(i)]) for i in idx],
+                    dtype=bool,
+                )
+                n_dropped = int(idx.size) - int(keep.sum())
+                idx = idx[keep]
+                if n_dropped:
+                    warnings.append(
+                        f"class '1': dropped {n_dropped} slanted EMNIST "
+                        f"'1's (kept {int(idx.size)} upright bars)"
+                    )
+                if idx.size == 0:
+                    emnist_counts[name] = 0
+                    warnings.append(
+                        f"class '1' has no upright EMNIST samples to seed"
+                    )
+                    continue
             take = min(int(cfg.emnist_per_class), int(idx.size))
             # Deterministic subset: same seed -> same training set.
             chosen = rng.permutation(idx)[:take]

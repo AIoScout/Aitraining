@@ -59,6 +59,31 @@ def _blocks(w, h, rects, paper=230):
     return img
 
 
+def _cluttered_room_frame(side: int = 96) -> np.ndarray:
+    """`side`x`side` room scene: a white sign plate in the middle carrying
+    dark "A 1 2" (x ~= 38..68, y ~= 44..62 at 96), and DISCONNECTED dark
+    room clutter blobs on the left, top and right — the capture that used
+    to drag the ROI out to 0..96 (RC2).  At 160 the scene is the same
+    capture at 160x160; mode 5 box-averages it back down to 96."""
+    f = int(side)
+    frame = np.full((f, f), 80, np.uint8)          # dark room surround
+
+    def _s(v: int) -> int:
+        return int(round(v * f / 96.0))
+
+    # Clutter first: the plate is drawn OVER them so the blobs stay
+    # outside the white board.
+    frame[_s(20):_s(80), 0:_s(34)] = 20            # left clutter (touches x=0)
+    frame[0:_s(15), _s(10):_s(40)] = 20            # top clutter (touches y=0)
+    frame[_s(25):_s(65), _s(85):_s(95)] = 20       # right clutter (mid-frame)
+    # The white plate, then the characters on it.
+    frame[_s(36):_s(70), _s(30):_s(76)] = 230
+    frame[_s(44):_s(62), _s(38):_s(45)] = 20       # A
+    frame[_s(44):_s(62), _s(50):_s(56)] = 20       # 1
+    frame[_s(44):_s(62), _s(61):_s(68)] = 20       # 2
+    return frame
+
+
 def _cases():
     rng = np.random.default_rng(20261017)
     cases = []
@@ -170,6 +195,18 @@ def _cases():
     seq("board_ring_and_clutter_otsu", board)
     seq("board_ring_and_clutter_bright", 255 - board, thresh=196,
         polarity=1)
+
+    # RC2: the cluttered room capture.  "A 1 2" on a white plate in the
+    # middle, disconnected dark room clutter on the left/top/right.  Both
+    # sides must lock the ROI onto the character cluster, under Otsu AND a
+    # pinned Lum window (the 160->96 box-average dilutes strokes into
+    # 110..145, so Lum=50 exercises the interior-Otsu fallback too).
+    clutter96 = _cluttered_room_frame(96)
+    clutter160 = _cluttered_room_frame(160)
+    seq("clutter_a12_otsu", clutter96)
+    seq("clutter_a12_lum50", clutter96, thresh=49)
+    add(5, "clutter_a12_160_otsu", clutter160, x0=96)
+    add(5, "clutter_a12_160_lum50", clutter160, x0=96, thresh=49)
 
     # Real camera-style A12 board at capture (160) and preprocessed (96)
     # sides, under Otsu and the two custom windows used in the field:
@@ -535,6 +572,77 @@ def test_corpus_exercises_all_three_reconciliation_paths():
     assert paths["merge"] > 0, f"no merge-path case in {r['count']} cases"
     assert paths["split"] > 0, f"no split-path case in {r['count']} cases"
     assert paths["equal"] > 0, f"no equal-thirds case in {r['count']} cases"
+
+
+def test_cluttered_room_locks_tight_roi_and_matches_c():
+    """RC2: the dark room clutter around the plate must NOT enter the ROI.
+
+    "A 1 2" sits at x=38..68, y=44..62 on the white plate; disconnected
+    dark blobs sit at x=0..34/y=20..80, x=10..40/y=0..15 and
+    x=85..95/y=25..65.  The old band search unioned ALL of them into a
+    0..96 box and sliced the clutter into three garbage slots.  Now both
+    sides must:
+      * ignore the outer clutter blobs (border-touching, huge, or without
+        a majority-plate ring),
+      * lock roi_box tightly onto the character cluster
+        (x1 >= 35, x2 <= 72, y1 >= 40, y2 <= 66),
+      * and produce BIT-IDENTICAL roi_box and 3x28x28 slot glyphs in C
+        and Python — at 96x96 under Otsu and a pinned Lum=50 window, and
+        through the 160->96 mode-5 capture chain (which also exercises the
+        interior-Otsu fallback for the diluted strokes).
+    """
+    cases = [
+        ("clutter_a12_otsu", 0, 96, 96, -1),
+        ("clutter_a12_lum50", 0, 96, 96, 49),
+        ("clutter_a12_160_otsu", 5, 160, 96, -1),
+        ("clutter_a12_160_lum50", 5, 160, 96, 49),
+    ]
+    cc = os.environ.get("CC") or shutil.which("cc")
+    assert cc, "no C compiler found (set CC); the C-vs-Python parity suite cannot run"
+    with tempfile.TemporaryDirectory(prefix="sign_clutter_") as td:
+        tmp = Path(td)
+        exe = _build(tmp)
+        rows = []
+        for name, mode, side, x0, thresh in cases:
+            data = _cluttered_room_frame(side)
+            c = dict(mode=mode, name=name, w=side, h=side, out_size=28,
+                     count=3, order=0, polarity=0, seg=1, min_run=2,
+                     thresh=thresh, dark=0, conv=1, x0=x0, y0=0)
+            rows.append(" ".join(str(c[k]) for k in HEADER))
+            (tmp / f"{name}.raw").write_bytes(data.tobytes())
+            # Python side (mode 5 replays the 160->96 chain, as the C does).
+            src = rc._resize_square_box_average_u8(data, x0) if mode == 5 else data
+            want = ocr.preprocess_sign_sequence(
+                src, sign_sequence="ABC", reading_order="ltr",
+                out_size=28, polarity=ocr.INK_DARK,
+                apply_segmentation=True, convention=ocr.NORM_CANON,
+                thresh=(None if thresh < 0 else thresh), dark_thr=0,
+                find_roi=True)
+            box = want.get("roi_box")
+            assert isinstance(box, list) and len(box) == 4, (name, want)
+            x1, y1, x2, y2 = (int(v) for v in box)
+            assert x1 >= 35 and x2 <= 72, (name, "x", box)
+            assert y1 >= 40 and y2 <= 66, (name, "y", box)
+            assert want["ok"] and len(want["slots"]) == 3, (name, want)
+            for i, slot in enumerate(want["slots"]):
+                assert slot["ok"] and not slot["empty"], (name, i, slot)
+            (tmp / "want" / name).mkdir(parents=True, exist_ok=True)
+            np.save(tmp / "want" / f"{name}_roi.npy",
+                    np.asarray(box, dtype=np.int32))
+            np.save(tmp / "want" / f"{name}_glyphs.npy",
+                    np.stack(want["glyphs"]))
+        (tmp / "manifest.tsv").write_text(
+            " ".join(HEADER) + "\n" + "\n".join(rows) + "\n")
+        subprocess.run([str(exe), str(tmp)], check=True,
+                       stdout=subprocess.DEVNULL)
+        for name, _mode, _side, _x0, _thresh in cases:
+            head, slots = _parse_meta(tmp / f"{name}.cmeta")
+            got_roi = tuple(int(v) for v in head["roi"].split(","))
+            want_roi = tuple(int(v) for v in np.load(tmp / "want" / f"{name}_roi.npy"))
+            assert got_roi == want_roi, (name, "roi_box", got_roi, want_roi)
+            got_g = np.fromfile(tmp / f"{name}.cglyphs", np.uint8).reshape(3, 28, 28)
+            want_g = np.load(tmp / "want" / f"{name}_glyphs.npy")
+            assert np.array_equal(got_g, want_g), (name, "glyphs")
 
 
 def main() -> int:

@@ -1376,14 +1376,97 @@ def _is_outer_frame_debris(x: int, y: int, cw: int, ch: int,
     return False
 
 
-def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
-    """Filtered 8-connected ink components, in raster-scan label order.
+_PINNED_MIN_INTERIOR_INK = 6
+_PLATE_BRIGHT_MIN = 128
 
-    Same integer bounds as the C port: tiny specks, frame lines / outer
-    corners (`_is_outer_frame_debris`), components wider than 85 % or taller
-    than 60 % of the frame, and blobs covering >40 % of the area are
-    discarded.  Thin single-stroke characters — including one close to the
-    frame edge — are kept; only frame-scale debris is removed.
+
+def _interior_ink_count(ink: np.ndarray) -> int:
+    """Ink pixels inside the interior search region (the frame inset by the
+    shared interior margin).  Mirrored in sign_glyph.c (pinned_ink_fallback)."""
+    h, w = int(ink.shape[0]), int(ink.shape[1])
+    if h <= 0 or w <= 0:
+        return 0
+    margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
+    if h <= 2 * margin or w <= 2 * margin:
+        return int(ink.sum())
+    return int(ink[margin:h - margin, margin:w - margin].sum())
+
+
+def _pinned_ink_with_otsu_fallback(
+    gray: np.ndarray, t: int, polarity: int, dark_thr: int
+) -> Tuple[int, np.ndarray]:
+    """Binarise with a pinned threshold; fall back to interior Otsu.
+
+    The 160->96 box-average dilutes a 3 px camera stroke into the
+    110..145 range.  A pinned luminance window (Lum 50..105) then leaves
+    near-zero ink, so the ROI search would find nothing on a frame that
+    visibly holds a sign.  When the pinned binarisation keeps fewer than
+    _PINNED_MIN_INTERIOR_INK ink pixels inside the interior region, re-cut
+    with Otsu computed ON that interior region and drop the dark floor —
+    the diluted stroke must count as ink again.
+
+    Mirrored bit-for-bit in sign_glyph.c (pinned_ink_fallback).
+    """
+    ink = binarize_ink(gray, t, polarity=polarity)
+    if dark_thr > 0:
+        ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+    if _interior_ink_count(ink) >= _PINNED_MIN_INTERIOR_INK:
+        return t, ink
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
+    if h > 2 * margin and w > 2 * margin:
+        interior = gray[margin:h - margin, margin:w - margin]
+        t2 = int(otsu_threshold_u8(interior))
+        if t2 != 0:
+            return t2, binarize_ink(gray, t2, polarity=polarity)
+    return t, ink
+
+
+def _bright_margin(
+    gray: np.ndarray, x: int, y: int, cw: int, ch: int, margin: int, polarity: int
+) -> bool:
+    """True when the component bbox's surrounding ring is mostly plate.
+
+    A character sits on the white sign plate; room clutter sits on the
+    dark surround.  The dilation ring of the bbox (the shared interior
+    margin, clamped to the frame, minus the bbox itself) must be majority
+    plate: bright (>= _PLATE_BRIGHT_MIN) for dark ink, dark
+    (< _PLATE_BRIGHT_MIN) for bright ink.  Mirrored in sign_glyph.c
+    (bright_margin).
+    """
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    x1 = max(0, x - margin)
+    y1 = max(0, y - margin)
+    x2 = min(w, x + cw + margin)
+    y2 = min(h, y + ch + margin)
+    if x2 <= x1 or y2 <= y1:
+        return False
+    ring = gray[y1:y2, x1:x2]
+    interior = np.zeros(ring.shape, dtype=bool)
+    interior[y - y1:y - y1 + ch, x - x1:x - x1 + cw] = True
+    outside = ~interior
+    total = int(outside.sum())
+    if total <= 0:
+        return False
+    if polarity == INK_DARK:
+        plate = int(((ring >= _PLATE_BRIGHT_MIN) & outside).sum())
+    else:
+        plate = int(((ring < _PLATE_BRIGHT_MIN) & outside).sum())
+    return 2 * plate >= total
+
+
+def _interior_ink_components(
+    ink: np.ndarray, gray: np.ndarray, polarity: int = INK_DARK
+) -> List[Dict[str, int]]:
+    """Character-candidate ink components, in raster-scan label order.
+
+    The clutter filter (RC2): a component is a character candidate only if
+    it is not a 1-2 px noise speck, does not touch the outer frame border,
+    is not a huge background blob (wider than 45 % or taller than 75 % of
+    the frame), is between 6 % and 65 % of the frame height, and sits in a
+    majority-plate neighbourhood (the bright sign board for dark ink, the
+    dark surround for bright ink).  The dark room clutter that used to
+    drag the ROI out to 0..96 fails these and is discarded on BOTH sides.
     """
     cv2 = _cv2_module()
     arr = np.asarray(ink, dtype=bool)
@@ -1391,7 +1474,6 @@ def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
         return []
     h, w = int(arr.shape[0]), int(arr.shape[1])
     margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
-    min_area = max(6, (h * w * 4 + 5000) // 10000)
     try:
         n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
             arr.astype(np.uint8), 8
@@ -1401,13 +1483,15 @@ def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
     out: List[Dict[str, int]] = []
     for i in range(1, n):
         x, y, cw, ch, area = (int(v) for v in stats[i])
-        if area < min_area:
+        if area <= 2:
             continue
-        if _is_outer_frame_debris(x, y, cw, ch, w, h, margin):
+        if x == 0 or y == 0 or x + cw == w or y + ch == h:
             continue
-        if cw * 100 > 85 * w or ch * 100 > 60 * h:
+        if cw * 100 > 45 * w or ch * 100 > 75 * h:
             continue
-        if area * 100 > 40 * w * h:
+        if ch * 100 < 6 * h or ch * 100 > 65 * h:
+            continue
+        if not _bright_margin(gray, x, y, cw, ch, margin, polarity):
             continue
         out.append({
             "x": x, "y": y, "w": cw, "h": ch, "area": area,
@@ -1417,53 +1501,63 @@ def _interior_ink_components(ink: np.ndarray) -> List[Dict[str, int]]:
     return out
 
 
-def _choose_interior_band(
+def _choose_sign_cluster(
     candidates: List[Dict[str, int]], w: int, h: int
 ) -> Optional[Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]]:
-    """(padded ROI, tight band) for the horizontal row of components.
+    """(padded ROI, tight band) around the horizontal character cluster.
 
-    A frame line is a lone component; the character row is several (or one
-    for a single-character sample).  Ties go to the larger total ink area,
-    then to the earlier raster component, so the answer is deterministic and
-    the C port can reproduce it exactly.  The tight band is what survives to
-    the split (the pad must stay white); the padded ROI is the box the UI
-    draws and the OOD sign_pct measures.
+    A compact cluster is 2-4 vertically overlapping candidates whose union
+    sits near the centre / lower-centre of the frame (the sign plate is
+    what the camera is aimed at).  Groups are scored by (component count,
+    total ink area); ties go to the earlier raster component, so the answer
+    is deterministic and the C port can reproduce it exactly.  A group that
+    fails the count or position rules means no lockable cluster exists ->
+    None, and the caller keeps the whole frame.  The tight band is what
+    survives to the split (the pad must stay white); the padded ROI is the
+    box the UI draws and the OOD sign_pct measures.
     """
     if not candidates:
         return None
     best_idx = 0
     best_key: Optional[Tuple[int, int]] = None
     for i, anchor in enumerate(candidates):
-        ah = max(1, int(anchor["h"]))
-        acy2 = 2 * int(anchor["y"]) + ah
-        band2 = 2 * ah  # +/- 1.0 * height
+        ay1 = int(anchor["y"])
+        ay2 = ay1 + int(anchor["h"])
         count = 0
         total = 0
         for c in candidates:
-            cy2 = 2 * int(c["y"]) + int(c["h"])
-            if abs(cy2 - acy2) > band2:
-                continue
-            count += 1
-            total += int(c["area"])
+            cy1 = int(c["y"])
+            cy2 = cy1 + int(c["h"])
+            if ay1 < cy2 and ay2 > cy1:
+                count += 1
+                total += int(c["area"])
         key = (count, total)
         if best_key is None or key > best_key:
             best_key = key
             best_idx = i
     anchor = candidates[best_idx]
-    ah = max(1, int(anchor["h"]))
-    acy2 = 2 * int(anchor["y"]) + ah
-    band2 = 2 * ah
+    ay1 = int(anchor["y"])
+    ay2 = ay1 + int(anchor["h"])
     x1 = y1 = 1 << 30
     x2 = y2 = -1
     for c in candidates:
-        cy2 = 2 * int(c["y"]) + int(c["h"])
-        if abs(cy2 - acy2) > band2:
+        cy1 = int(c["y"])
+        cy2 = cy1 + int(c["h"])
+        if not (ay1 < cy2 and ay2 > cy1):
             continue
         x1 = min(x1, int(c["x"]))
-        y1 = min(y1, int(c["y"]))
+        y1 = min(y1, cy1)
         x2 = max(x2, int(c["x"]) + int(c["w"]))
-        y2 = max(y2, int(c["y"]) + int(c["h"]))
+        y2 = max(y2, cy2)
     if x2 <= x1 or y2 <= y1:
+        return None
+    if not (2 <= int(best_key[0]) <= 4):
+        return None
+    # Compact cluster: centred in the middle half of the frame, in the
+    # lower two thirds.
+    if 2 * (x1 + x2) < w or 2 * (x1 + x2) > 3 * w:
+        return None
+    if 3 * (y1 + y2) < 2 * h:
         return None
     cw = x2 - x1
     ch = y2 - y1
@@ -1498,14 +1592,22 @@ def find_interior_ink_roi(
         return {"box": [0, 0, 1, 1], "method": "empty",
                 "sign_pct": 0.0, "threshold": 0}
     h, w = int(gray.shape[0]), int(gray.shape[1])
-    t = int(otsu_threshold_u8(gray)) if thresh is None else int(thresh)
-    if t <= 0 and thresh is None:
-        ink = np.zeros(gray.shape, dtype=bool)
+    if thresh is None:
+        t = int(otsu_threshold_u8(gray))
+        if t <= 0:
+            ink = np.zeros(gray.shape, dtype=bool)
+        else:
+            ink = binarize_ink(gray, t, polarity=polarity)
+            if int(dark_thr) > 0:
+                ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
     else:
-        ink = binarize_ink(gray, t, polarity=polarity)
-        if int(dark_thr) > 0:
-            ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
-    band = _choose_interior_band(_interior_ink_components(ink), w, h)
+        # Pinned threshold (the Lum slider): a pinned window can wipe ALL
+        # ink after 160->96 dilution; fall back to interior Otsu so a
+        # visible character is never lost (RC2).
+        t, ink = _pinned_ink_with_otsu_fallback(
+            gray, int(thresh), polarity=polarity, dark_thr=int(dark_thr)
+        )
+    band = _choose_sign_cluster(_interior_ink_components(ink, gray, polarity), w, h)
     if band is None:
         return {"box": [0, 0, w, h], "tight_box": None, "method": "none",
                 "ink": ink, "sign_pct": float(ink.mean() * 100.0) if ink.size else 0.0,
@@ -1883,17 +1985,31 @@ def preprocess_sign_sequence(
             return out
         h, w = int(gray.shape[0]), int(gray.shape[1])
 
-        t = int(otsu_threshold_u8(gray)) if thresh is None else int(thresh)
-        out["thresh"] = t
-        if t == 0 and thresh is None:
-            # No valid split existed (flat frame).  Same answer as the
-            # single-glyph path: there is no ink, so there is nothing to
-            # segment — report the frame split geometrically and stop.
-            ink = np.zeros(gray.shape, dtype=bool)
+        if thresh is None:
+            t = int(otsu_threshold_u8(gray))
+            out["thresh"] = t
+            if t == 0:
+                # No valid split existed (flat frame).  Same answer as the
+                # single-glyph path: there is no ink, so there is nothing to
+                # segment — report the frame split geometrically and stop.
+                ink = np.zeros(gray.shape, dtype=bool)
+            else:
+                ink = binarize_ink(gray, t, polarity=polarity)
+                if dark_thr > 0:
+                    ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+                # The component ROI search below IS the border cleanup when it is
+                # enabled; running the OpenCV component filter as well would make
+                # the Python side differ from the C port (which cannot run cv2).
+                if clean_border and not find_roi:
+                    ink = clean_sign_ink(ink, margin=border_margin)
         else:
-            ink = binarize_ink(gray, t, polarity=polarity)
-            if dark_thr > 0:
-                ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+            # Pinned threshold (the Lum slider).  A pinned window can wipe
+            # ALL ink after 160->96 dilution; fall back to interior Otsu so
+            # the search never loses visible characters (RC2).
+            t, ink = _pinned_ink_with_otsu_fallback(
+                gray, int(thresh), polarity=polarity, dark_thr=dark_thr
+            )
+            out["thresh"] = t
             # The component ROI search below IS the border cleanup when it is
             # enabled; running the OpenCV component filter as well would make
             # the Python side differ from the C port (which cannot run cv2).
@@ -1901,12 +2017,13 @@ def preprocess_sign_sequence(
                 ink = clean_sign_ink(ink, margin=border_margin)
 
         if find_roi and apply_segmentation:
-            components = _interior_ink_components(ink)
-            # A sign needs more than one character component; a single
-            # component means the frame is a tight capture (or the characters
-            # touch), where cropping to it could discard edge glyphs.  Fall
-            # back to the whole frame and let the split reconcile.
-            band = _choose_interior_band(components, w, h) if len(components) >= 2 else None
+            # The RC2 clutter filter + cluster lock: only a compact 2-4
+            # component character cluster near the centre / lower-centre of
+            # the frame becomes the ROI.  Room clutter fails the component
+            # filter, and a single component (a tight capture, or touching
+            # characters) falls back to the whole frame.
+            components = _interior_ink_components(ink, gray, polarity)
+            band = _choose_sign_cluster(components, w, h)
             if band is not None:
                 roi, tight = band
                 rx1, ry1, rx2, ry2 = roi
@@ -1971,7 +2088,12 @@ def preprocess_sign_sequence(
                     polarity=polarity,
                     apply_segmentation=False,
                     convention=convention,
-                    thresh=thresh,
+                    # The EFFECTIVE frame threshold: when the pinned window
+                    # wiped the frame's ink and the interior-Otsu fallback
+                    # re-cut it, the slot crops must use that same
+                    # threshold — a slot crop is mostly glyph and its own
+                    # Otsu is unimodal, so it cannot recover on its own.
+                    thresh=(None if thresh is None else t),
                     dark_thr=dark_thr,
                     # A slot crop can carry a corner of the neighbouring
                     # glyph; strip it before the bbox/centring.

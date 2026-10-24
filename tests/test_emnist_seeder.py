@@ -234,3 +234,42 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_one_seeding_keeps_only_upright_vertical_bars():
+    """RC3: seeded EMNIST '1's must be upright vertical bars.
+
+    EMNIST's handwritten '1's are mostly diagonal slashes (35-45 deg),
+    which taught the model to read an upright printed '1' (|) as 'A' or
+    '2'.  The pre-widening ink bbox separates them: an upright bar is
+    narrow and vertical (w / h <= 0.40), a diagonal slash is about as
+    wide as it is tall.  The template bank and the training-time mix
+    both drop the slashes.
+    """
+    import ocr_dataset as od
+
+    def _bar(w: int, h: int, *, slant: int = 0) -> np.ndarray:
+        """A dark-on-light glyph: vertical bar or diagonal slash."""
+        img = np.zeros((28, 28), dtype=np.uint8)
+        for i in range(h):
+            x = 13 + (slant * i // h)
+            for j in range(w):
+                col = x + j
+                if 0 <= col < 28:
+                    img[10 + i, col] = 255
+        return img
+
+    upright = _bar(2, 12)
+    slanted = _bar(2, 12, slant=10)   # w/h -> ~0.83
+    assert od._is_upright_one(upright), "upright bar rejected"
+    assert not od._is_upright_one(slanted), "diagonal slash accepted"
+    # Edge: exactly at the 0.40 ratio -> kept (the contract is <=).
+    assert od._is_upright_one(_bar(4, 10)), "w/h == 0.40 must be kept"
+
+    # The bank funnel applies the filter for '1' (and only for '1').
+    bank: dict = {}
+    od._bank_add(bank, "1", upright)
+    od._bank_add(bank, "1", slanted)
+    assert [g.shape for g in bank["1"]] == [(28, 28)], "slanted '1' leaked into the bank"
+    od._bank_add(bank, "A", slanted)
+    assert len(bank["A"]) == 1, "the filter must not touch other classes"
