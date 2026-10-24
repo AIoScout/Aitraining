@@ -5,8 +5,9 @@
      (Playwright); the backend payloads it consumes are exercised here and
      in test_sign_roi_preview.py.
   2. Auto ROI on a real "A 1 2" board: an interior ink cluster with a
-     hairline '1' and border clutter must still produce a tight, symmetric
-     box — never the full plate, never pulled left by the border noise.
+     hairline '1' and border clutter must still produce a tight box that
+     contains only white plate — never the full plate, never pulled left by
+     the border noise, and never carrying the dark surround into a slot.
   3. A camera-captured '1' (1-2 px stroke) must be normalised to the
      3-4 px stroke width of its EMNIST counterparts so it is not read as
      `_background`.
@@ -74,7 +75,7 @@ def _png(arr: np.ndarray) -> bytes:
     return buf.getvalue()
 
 
-def test_ink_cluster_roi_is_tight_symmetric_and_ignores_border_noise():
+def test_ink_cluster_roi_is_tight_and_ignores_border_noise():
     frame = _thin_one_frame()
     roi = op.find_sign_roi(frame, dark_thr=0, lum_thr=59)
     assert roi["method"] == "ink_cluster", roi
@@ -85,8 +86,15 @@ def test_ink_cluster_roi_is_tight_symmetric_and_ignores_border_noise():
     left, top, right, bottom = 35, 65, 124, 94
     assert x1 < left and y1 < top and x2 > right and y2 > bottom, roi
     pads = (left - x1, top - y1, x2 - right, y2 - bottom)
-    assert max(pads) - min(pads) <= 1, pads
     assert min(pads) >= 3, pads
+    # The dark plastic frame runs along x=20..28 / 132..140; trimming it
+    # makes the ROI slightly asymmetric (that is the fix — a symmetric box
+    # used to include the dark strip and bleed `|A` into slot 1).
+    assert max(pads) <= 10, pads
+    assert max(pads) - min(pads) <= 4, pads
+    for edge in (frame[y1:y2, x1], frame[y1:y2, x2 - 1],
+                 frame[y1, x1:x2], frame[y2 - 1, x1:x2]):
+        assert float(edge.mean()) > 150.0, ("dark surround in ROI", roi)
     assert y2 < 145, ("border clutter leaked into the ROI", roi)
     assert x1 > 10, ("ROI pulled left by the top-left noise", roi)
 

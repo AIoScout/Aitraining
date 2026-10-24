@@ -8575,8 +8575,9 @@ function buildExportRuntimeConfig() {{
     capture_frame_side: Number(currentSerialFrameSide || 96),
     reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
     // No SPA control yet: the per-slot confidence floor is the server's
-    // documented default, and exporting it makes that explicit on-device.
-    match_min_prob: 0.60,
+    // documented default (0.40).  On the device, `set ood ... <mpmin>`
+    // updates this runtime floor as well as the OOD layer.
+    match_min_prob: 0.40,
   }};
 }}
 async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arrayNameValue) {{

@@ -167,12 +167,13 @@ def test_stale_class_dirs_are_pruned_and_background_defaults_off():
         _assert_a12_yes(_predict(ctrl, SIGN_A12.read_bytes()))
         _assert_a12_yes(_predict(ctrl, _png(_thin_one_frame())))
 
-        # With no _background class the OOD gates are the rejector: a blank
-        # frame has sign_pct = 0 and must not become a spurious MATCH.
+        # With no _background class, a blank frame must not become a spurious
+        # MATCH.  Layer 1 (sign_pct) is disarmed on the 3-slot path, so the
+        # rejection is the per-slot ink/empty check (plus Layers 2/3 when the
+        # model is invoked on an empty glyph).
         blank = _predict(ctrl, _png(np.full((160, 160), 245, np.uint8)))
         assert blank["match"] is False, blank
-        assert blank["ood"] is True, blank
-        assert any("sign_pct" in str(s.get("ood_reason") or "") for s in blank["slots"]), blank["slots"]
+        assert any(s.get("empty") or not s.get("label") for s in blank["slots"]), blank["slots"]
 
         # Training-cache transform is reproducible byte-for-byte (the same
         # PNG the mixed set copies), so cache and training see identical

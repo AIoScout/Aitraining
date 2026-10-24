@@ -378,7 +378,7 @@ def test_predictor_treats_the_reject_class_as_a_miss():
 
 
 def test_predictor_requires_each_slot_to_clear_the_confidence_floor():
-    # argmax is right, but only 60 of 180 total -> 0.33, below the 0.60 floor.
+    # argmax is right, but only 60 of 180 total -> 0.33, below the 0.40 floor.
     weak = _raw_for(0, best=60, rest=40)
     ctrl = FakeController([weak, _raw_for(1), _raw_for(0)])
     pred = _predict(ctrl)

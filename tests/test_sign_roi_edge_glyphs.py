@@ -193,5 +193,47 @@ def test_preview_roi_slice_is_exact_and_correct_slots_bypass_entropy():
     assert all(not s.get("ood") for s in slots), slots
 
 
+def test_default_floor_is_040_and_layer1_is_disarmed():
+    """Trap 1/2: a 0.45 top-1 target is accepted at the new 0.40 floor, even
+    when the caller supplies an impossible sign_pct window and entropy is
+    above its gate."""
+    frame = _edge_plate_frame()
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, _dataset = _workspace(Path(td))
+        model = _fake_model()
+        calls = {"n": 0}
+
+        def fake_invoke(model, session_id, arr):
+            idx = calls["n"]
+            calls["n"] += 1
+            raw = np.asarray([55, 55, 55], dtype=np.int64)
+            raw[idx] = 90          # 90/200 = 0.45
+            return None, raw
+
+        ctrl._preview_load_model = lambda session_id: model
+        ctrl._invoke_glyph_tensor = fake_invoke
+
+        res = ctrl._preview_predict_sign_ocr(
+            "s", _png(frame),
+            sign_sequence="A12",
+            reading_order="ltr",
+            bg_dark_thresh=0,
+            bg_lum_thresh=121,
+            # The frame's sign_pct is ~17 %, deliberately far outside this
+            # window: Layer 1 must be disarmed, not reject all three slots.
+            ood_sign_pct_min=90.0,
+            ood_sign_pct_max=100.0,
+            ood_max_prob_min=0.40,
+            ood_entropy_ratio_max=0.70,
+        )
+
+    assert all(0.44 <= s["prob"] <= 0.46 for s in res["slots"]), res["slots"]
+    assert res["match_min_prob"] == 0.40, res.get("match_min_prob")
+    assert res["match"] is True, res
+    assert res["ood"] is False, res.get("ood_reason")
+    assert res["ood_reason"] == "", res.get("ood_reason")
+    assert [s["match"] for s in res["slots"]] == [True, True, True], res["slots"]
+
+
 if __name__ == "__main__":
     raise SystemExit(__import__("pytest").main([__file__, "-q"]))

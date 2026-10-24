@@ -146,6 +146,8 @@ def test_multi_plate_union_autofill_preview_and_export():
         assert "constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;" in header, header
         assert "constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;" in header, header
         assert "constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;" in header, header
+        # Boot floor for the runtime per-slot match threshold.
+        assert "constexpr float kSignMatchMinProb = 0.400000f;" in header, header
 
 
 def test_exported_firmware_model_is_compact_and_resolver_is_complete():

@@ -346,15 +346,21 @@ The output pane is the `.signmatch` banner:
   red = fail.  The `WANT` characters come from the closest configured plate
   when no plate is an exact match.
 - A red banner names the failing slot(s) and the reason (wrong glyph,
-  `_background`, no glyph, below the 0.60 floor, or the exact OOD gate that
-  fired).  If `entropy_ratio` is the **only** gate that failed and the slot's
-  top class is the plate's target character at `prob >= min_prob`, the slot
-  is accepted: a correct but merely uncertain reading must not produce a
-  false NO.  `sign_pct` and `max_prob` still reject.
+  `_background`, no glyph, below the 0.40 match floor, or the exact OOD gate
+  that fired).  If `entropy_ratio` is the **only** gate that failed and the
+  slot's top class is the plate's target character at `prob >= min_prob`, the
+  slot is accepted: a correct but merely uncertain reading must not produce a
+  false NO.  Layer 1 (`sign_pct`) is **disarmed on the 3-slot path** — it is
+  reported as a diagnostic only; `max_prob` still rejects.
+- The match floor is runtime-adjustable on the device: the exported
+  `kSignMatchMinProb` (**0.40** default) is the boot value, and
+  `set ood spmin spmax mpmin ermax` sets it to `mpmin` (the host Preview
+  uses 0.40 unless the request supplies `match_min`).
 - Idle states: `◻ SET THE TARGET SIGN` and `◻ NO MODEL YET`.
 
-`Preview Image Input Source`, the four OOD gates (`sign_pct` min/max, max
-prob, entropy ratio) and the per-source settings are in Settings → Preview.
+`Preview Image Input Source`, the four OOD controls (`sign_pct` min/max are
+diagnostic on the sign path; max prob and entropy ratio gate) and the
+per-source settings are in Settings → Preview.
 
 ---
 
@@ -419,7 +425,8 @@ constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
 };
 ```
 
-plus `kSignReadingOrder` (0 LTR / 1 RTL), `kSignMatchMinProb` (0.60), and the
+plus `kSignReadingOrder` (0 LTR / 1 RTL), `kSignMatchMinProb` (0.40 boot
+default; the firmware's `set ood ... <mpmin>` adjusts it at runtime), and the
 rejection policy: `TM_SIGN_USE_BACKGROUND_OOD`, `kSignBackgroundReplacesOod`,
 and `kBackgroundClassIndex` (-1 when no `_background` class was trained).  The
 legacy `TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR` /

@@ -1512,14 +1512,35 @@ def _clamp_box_to_bright_plate(gray: np.ndarray, box: Any) -> Optional[List[int]
         return None
     _, x, y, cw, ch = min(candidates, key=lambda c: c[0])
     inset = 1 if (cw > 4 and ch > 4) else 0
-    px1 = max(bx1, x + inset)
-    py1 = max(by1, y + inset)
-    px2 = min(bx2, x + cw - inset)
-    py2 = min(by2, y + ch - inset)
+
+    def _bright_frac(line: np.ndarray) -> float:
+        # Test the ORIGINAL gray, not the morphology-eroded bright mask: the
+        # Gaussian blur makes the first few white-plate pixels fail the mask,
+        # and trimming based on that shaved white margin off an ROI that was
+        # already inside the plate (breaking its symmetry).
+        return float((line >= t).mean()) if line.size else 1.0
+
+    # Trim ONLY sides whose border is actually dark surround.  Intersecting
+    # every side with the bright component's bbox used to shave a few white
+    # pixels off an already-inside ROI.
+    px1, py1, px2, py2 = bx1, by1, bx2, by2
+    changed = False
+    if _bright_frac(arr[py1:py2, px1]) < 0.5:
+        px1 = max(px1, x + inset)
+        changed = True
+    if _bright_frac(arr[py1:py2, px2 - 1]) < 0.5:
+        px2 = min(px2, x + cw - inset)
+        changed = True
+    if _bright_frac(arr[py1, px1:px2]) < 0.5:
+        py1 = max(py1, y + inset)
+        changed = True
+    if _bright_frac(arr[py2 - 1, px1:px2]) < 0.5:
+        py2 = min(py2, y + ch - inset)
+        changed = True
+    if not changed:
+        return None   # every edge is already white plate: keep the tight ROI
     if px2 <= px1 or py2 <= py1:
         return None
-    if (px1, py1, px2, py2) == (bx1, by1, bx2, by2):
-        return None   # already inside the plate: keep the tight ROI
     return [int(px1), int(py1), int(px2), int(py2)]
 
 

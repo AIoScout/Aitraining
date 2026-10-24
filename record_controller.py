@@ -2097,7 +2097,7 @@ class RecordController:
                 "capture_frame_side": payload.get("capture_frame_side"),
                 "preprocess_frame_side": payload.get("preprocess_frame_side"),
                 "reading_order": payload.get("reading_order"),
-                "match_min_prob": _num("match_min_prob", 0.60),
+                "match_min_prob": _num("match_min_prob", 0.40),
             }
             if not session_id or not export_dir:
                 _send_json(req, {"ok": "0", "error": "missing fields"}, status=400, cors=True)
@@ -3298,9 +3298,9 @@ class RecordController:
         if reading_order not in ("ltr", "rtl"):
             reading_order = "ltr"
         try:
-            sign_match_min_prob = float(rc.get("match_min_prob", 0.60))
+            sign_match_min_prob = float(rc.get("match_min_prob", 0.40))
         except (TypeError, ValueError):
-            sign_match_min_prob = 0.60
+            sign_match_min_prob = 0.40
         sign_match_min_prob = max(0.0, min(1.0, sign_match_min_prob))
         # Which rejector did THIS run train?  A `_background` class can only
         # replace OOD if it actually exists in the exported label list.  An
@@ -5649,12 +5649,14 @@ class RecordController:
             str(x).strip().lower() == BACKGROUND_CLASS_NAME.lower()
             for x in labels
         )
-        # The run's own rejection policy.  When a `_background` class is the
-        # only rejector, Layers 1-3 are bypassed (the device does the same);
-        # otherwise the standard OOD gates compose with the per-slot match
-        # rule and the probability floor.  A model dict with no explicit flag
-        # predates the toggle: having a background class is what old runs
-        # used, so preserve that rather than silently changing their verdicts.
+        # The run's own rejection policy.  Layer 1 (sign_pct) is ALWAYS
+        # disarmed on this 3-slot path (diagnostic only), matching
+        # TFLite_Sign.ino.  When a `_background` class is the only rejector,
+        # Layers 2/3 are bypassed too (the device does the same); otherwise
+        # they compose with the per-slot match rule and the runtime floor.
+        # A model dict with no explicit flag predates the toggle: having a
+        # background class is what old runs used, so preserve that rather
+        # than silently changing their verdicts.
         raw_bg_replace = model.get("sign_background_replace_ood")
         background_is_only_rejector = (
             bool(raw_bg_replace)
@@ -5668,18 +5670,14 @@ class RecordController:
         _, h, w, c = shape
         channels = int(c) if int(c) > 0 else 1
 
-        SIGN_PCT_MIN = float(ood_sign_pct_min if ood_sign_pct_min is not None else 0.3)
-        SIGN_PCT_MAX = float(ood_sign_pct_max if ood_sign_pct_max is not None else 70.0)
+        # ood_sign_pct_min/max stay in the signature for API compatibility
+        # but Layer 1 is DISARMED on the 3-slot path (see the slot loop).
         MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.60)
         ENTROPY_RATIO_MAX = float(
             ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.70
         )
-        SIGN_PCT_MIN = max(0.0, min(100.0, SIGN_PCT_MIN))
-        SIGN_PCT_MAX = max(0.0, min(100.0, SIGN_PCT_MAX))
         MAX_PROB_MIN = max(0.0, min(1.0, MAX_PROB_MIN))
         ENTROPY_RATIO_MAX = max(0.0, min(1.0, ENTROPY_RATIO_MAX))
-        if SIGN_PCT_MIN > SIGN_PCT_MAX:
-            SIGN_PCT_MIN, SIGN_PCT_MAX = SIGN_PCT_MAX, SIGN_PCT_MIN
 
         # The luminance window.  A caller-supplied value (the live preview's
         # Dark/Lum sliders) wins; otherwise the sign's own stored record;
@@ -5754,17 +5752,17 @@ class RecordController:
         )
         # OOD Layer 1's input: the ink share of the intact sign ROI.  Same
         # number the image project calls sign_pct, so spmin/spmax mean the
-        # same thing in both workspaces.
+        # same thing in both workspaces.  On the 3-slot path it is a
+        # DIAGNOSTIC only: Layer 1 is disarmed (the split already gates each
+        # slot on ink, and a frame-level window used to reject all three
+        # correct slots at once).  This mirrors ood_is_in_distribution() in
+        # TFLite_Sign.ino.
         ink = reading.get("ink")
         ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
         sign_pct = (
             float(ink_arr.mean() * 100.0)
             if ink_arr is not None and ink_arr.size
             else 0.0
-        )
-        sign_pct_in_band = (
-            background_is_only_rejector
-            or (SIGN_PCT_MIN <= sign_pct <= SIGN_PCT_MAX)
         )
 
         def _to_full_box(box: Any) -> Any:
@@ -5778,7 +5776,7 @@ class RecordController:
                 int(box[3]) + origin_y,
             ]
 
-        SLOT_MIN = max(0.0, min(1.0, float(match_min_prob if match_min_prob is not None else 0.60)))
+        SLOT_MIN = max(0.0, min(1.0, float(match_min_prob if match_min_prob is not None else 0.40)))
         slots: List[Dict[str, Any]] = []
         slot_pngs: List[bytes] = []
         all_match = bool(labels)
@@ -5815,15 +5813,13 @@ class RecordController:
             if raw_out is not None and raw_out.size:
                 slot_max_prob, slot_entropy_ratio = _raw_ood_metrics(raw_out)
                 if not background_is_only_rejector:
-                    # Standard OOD Layers 1-3, mirroring _preview_predict and
-                    # the exported device thresholds.
-                    if not sign_pct_in_band:
-                        slot_ood = True
-                        slot_ood_reason = (
-                            f"sign_pct={sign_pct:.1f}% outside "
-                            f"[{SIGN_PCT_MIN:.1f},{SIGN_PCT_MAX:.1f}]"
-                        )
-                    elif slot_max_prob < MAX_PROB_MIN:
+                    # Layers 2/3 only: Layer 1 (sign_pct) is disarmed on the
+                    # 3-slot path, exactly like ood_is_in_distribution() in
+                    # TFLite_Sign.ino.  The slot's ink check already rejects
+                    # an empty crop; a frame-level percentage is too coarse
+                    # and previously killed every slot when `set ood` set a
+                    # window.
+                    if slot_max_prob < MAX_PROB_MIN:
                         slot_ood = True
                         slot_ood_reason = (
                             f"max_prob={slot_max_prob:.3f} < {MAX_PROB_MIN:.2f}"
