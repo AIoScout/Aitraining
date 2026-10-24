@@ -126,12 +126,16 @@ A Car License project may accept **one or more** 3-character plates:
   configured plates so each allowed car can be tested without a photo.
 
 **What a sign class sample is:** one 28×28 glyph of that character — the
-same single-glyph model an OCR project trains.  Training does not split a
-whole road-sign photo into slots; the three-way split runs at Preview/device
-inference time.  Use **EMNIST Auto-Fill** for a zero-camera workflow, or
-capture/upload a frame where that character is the glyph to learn
-(Manual ROI/crop in the worktable isolates it).  A whole 3-character sign
-filed under `A` trains `A` on the whole sign, not on `A`.
+same single-glyph model an OCR project trains.  **Auto mode in a sign class
+card is slot-aware**: a whole `A 1 2` board filed under `A` is split and
+only slot 1 is kept (`1` → slot 2, `2` → slot 3), so a multi-character
+capture never trains a single class on the whole sign.  Manual ROI and
+Auto single-glyph crops strip a small disconnected **corner speck** (a
+clipped neighbour foot) before the 28×28 centring; the Edit modal's
+Processed Preview is that exact canonical 28×28 glyph.  Use **EMNIST
+Auto-Fill** for a zero-camera workflow, or capture/upload a frame where
+that character is the glyph to learn (Manual ROI/crop in the worktable
+isolates it).
 
 **Capture vs. model resolution.**  The device may stream at a larger side
 than the model consumes (typically **160×160 capture → 96×96 preprocessing →

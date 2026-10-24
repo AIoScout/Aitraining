@@ -6308,7 +6308,13 @@ async function refreshClassProcessedPreview(opts) {{
         class: targetClass,
         filename: targetFilename,
         class_config: targetClassConfig,
-        sample_config: targetSampleConfig
+        sample_config: targetSampleConfig,
+        // sign_ocr Auto needs the target sequence to extract this class's
+        // slot from a whole-board capture (the run may not have a saved
+        // train_config.json before the first training).
+        sign_sequence: isSignOcrProject() ? signSequence().join('') : '',
+        sign_sequences: isSignOcrProject() ? signSequences() : [],
+        reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))
       }})
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));

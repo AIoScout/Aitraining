@@ -198,23 +198,26 @@ def test_stale_class_dirs_are_pruned_and_background_defaults_off():
         assert "constexpr bool kSignBackgroundIsTheOnlyRejector = false;" in header, header
 
 
-def test_edit_auto_roi_tracks_thresholds_and_crops_processed_pane():
-    """The Edit worktable's Auto mode must find the interior band live.
+def test_edit_auto_roi_extracts_the_class_slot_and_28x28_preview():
+    """The Edit worktable's Auto mode in a sign class card must extract
+    THIS class's slot from a full board, and the Processed pane is the
+    canonical 28x28 glyph (not the whole sign or a pre-centring crop).
 
-    This is the modal path (`/preprocess/preview` -> _preprocess_preview),
-    not the Preview card: it feeds classPreprocessAutoCrop and the
-    black-on-white Processed pane.
+    This is the modal path (`/preprocess/preview` -> _preprocess_preview).
     """
     with tempfile.TemporaryDirectory() as td:
         ctrl, dataset = _workspace(Path(td))
         _open_template(ctrl)
-        # A full A 1 2 board with border noise, filed as one class sample.
+        # A full A 1 2 board with border noise, filed under class 'A'.
         Image.fromarray(_thin_one_frame(), mode="L").save(
             dataset / "A" / "board.png"
         )
 
         def preview(cfg):
-            return ctrl._preprocess_preview("s", "A", "board.png", cfg)
+            return ctrl._preprocess_preview(
+                "s", "A", "board.png", cfg,
+                sign_sequences=["A12"], reading_order="ltr",
+            )
 
         default = preview({})
         tuned = preview(
@@ -227,24 +230,21 @@ def test_edit_auto_roi_tracks_thresholds_and_crops_processed_pane():
             roi = res.get("auto_roi")
             assert isinstance(roi, list) and len(roi) == 4, res
             x1, y1, x2, y2 = roi
-            assert x1 < 60 and x2 > 100, roi           # frames A..2
-            assert y1 < 65 and y2 > 90, roi
+            # Class 'A' -> slot 0, NOT the whole A..2 board.
+            assert x2 < 100, ("the whole sign leaked into class A", roi)
+            assert x1 < 70 and y1 < 80 and y2 > 80, roi
             proc = np.asarray(
                 Image.open(BytesIO(base64.b64decode(res["processed_image_b64"])))
             )
-            assert proc.shape == (y2 - y1, x2 - x1), (proc.shape, roi)
+            assert proc.shape == (28, 28), (proc.shape, roi)
             assert set(np.unique(proc)).issubset({0, 255}), np.unique(proc)
             assert int(proc.min()) == 0 and int(proc.max()) == 255
             assert int(proc[0, 0]) == 255, "threshold background must be white"
-            # The green box maps the ROI onto the ORIGINAL sample.
-            assert abs(crop[0] - x1 / 160.0) < 1e-6, (crop, roi)
-            assert abs(crop[2] - x2 / 160.0) < 1e-6, (crop, roi)
-
-        # The live Dark/Lum window really moves the auto box and the crop.
-        assert default["auto_roi"] != tuned["auto_roi"], (
-            default["auto_roi"], tuned["auto_roi"]
-        )
-        assert default["processed_image_b64"] != tuned["processed_image_b64"]
+            # `crop` is the slot's PADDED crop (8 % plate context) and the
+            # green `auto_roi` is its ink bbox inside it.
+            assert crop[0] <= x1 / 160.0 and crop[2] >= x2 / 160.0, (crop, roi)
+            assert x1 / 160.0 - crop[0] <= 4.0 / 160.0, (crop, roi)
+            assert crop[2] - x2 / 160.0 <= 4.0 / 160.0, (crop, roi)
 
 
 def test_project_open_prunes_stale_classes_from_dataset_and_cache():
