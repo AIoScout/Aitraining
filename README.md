@@ -17,7 +17,7 @@ The Start Page (`✨ Choose a project type`) has three cards:
 |---|---|---|---|---|
 | **Image Project** (`image`) | *Build an image classification model from images, webcam, or ESP32-P4 device stream. Great for classroom demos and local training for tinyML MCU deployment.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 96×96 default | `TFLite/` |
 | **🔠 OCR / Character Project** (`ocr`) | *Train a highly optimized INT8 character recognition model for ESP32. Features EMNIST dataset mixing, bit-exact Vertical Projection, and OOD rejection.* | `Get Started`, `Open Project (.tmproj)` | 28×28 glyph, `0–9 A–Z` + `_background` | `TFLite_OCR/` |
-| **🚗 Car License Project** (`sign_ocr`) | *Train a 3-character car-license reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the plate in view.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 3 slots × 28×28 glyphs | `TFLite_Sign/` |
+| **🚗 Car License Project (3-Char)** (`sign_ocr`) | *Train a 3-character car-license reader. The same INT8 character model as the OCR project, plus a gatekeeper whitelist of one or more allowed plates, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview that names which plate was read.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 3 slots × 28×28 glyphs | `TFLite_Sign/` |
 
 `Open Project (.tmproj)` opens a native file picker.  The archive manifest's
 `project_type` is authoritative: a file opened from any card is restored into
@@ -27,7 +27,8 @@ v1 archives are still readable (missing settings fall back to this build's
 defaults and the app reports which ones).
 
 `Get Started` creates a fresh project.  A fresh sign project starts with the
-three-slot target `A ▸ B ▸ C` and three matching class cards.
+three-slot target `A ▸ B ▸ C` and three matching class cards.  The whitelist
+starts with that one plate; add more from **🪪 License List** (§3).
 
 ---
 
@@ -41,10 +42,16 @@ Top toolbar:
   project`.
 - **Settings** — global webcam/serial input settings, Preview source and OOD
   gates, and the Advanced EMNIST auto-fill controls.
+- **🪪 License List** (`#navLicenseList`, Car License only) — the gatekeeper
+  whitelist, with a plate-count badge.  It sits next to `⚙ Settings` and
+  opens the same `#licenseListModal` as the `+ Plates (N)` chip inside
+  `#signSeqBar`; add, edit, remove and reorder one or more allowed
+  3-character plates (§3).
 - **Preferences** — display limits and caching.
 - **📖 Tutorial** — state-aware walkthrough.  Image, OCR and sign projects
-  each have their own curriculum; the sign tour has 10 steps covering target,
-  samples, worktable, reading direction, OOD, verdict and export.
+  each have their own curriculum; the Car License tour has 29 steps covering
+  the target, the License List whitelist, resolution layers, samples,
+  worktable, reading direction, OOD, verdict and export.
 - **← Return Home**.
 - **Export Model** in the Preview card head.
 
@@ -88,10 +95,35 @@ card; clicking it again (or the `Close` pill) folds it away.
     The toggle is project state, and changing a sign slot backfills the new
     character in the same request.
 
-In a **sign_ocr** project the class list is owned by `#signSeqBar`: there is
-no add/delete/rename/drag on the cards.  Editing a slot updates the cards,
-deduplicates repeated characters (the badge reads `Slots 1 & 3`), marks a
-previously trained model `⚠ Stale`, and syncs `/classes/sync_ocr`.
+In a **sign_ocr** project the class list is owned by the target/whitelist:
+there is no add/delete/rename/drag on the cards.  Editing a slot updates the
+cards, deduplicates repeated characters (the badge reads `Slots 1 & 3`),
+marks a previously trained model `⚠ Stale`, and syncs `/classes/sync_ocr`.
+
+### Gatekeeper whitelist — 🪪 License List
+
+A Car License project may accept **one or more** 3-character plates:
+
+- **🪪 License List** (`#navLicenseList`, next to `⚙ Settings`, with a
+  count badge; tooltip *"Manage allowed 3-character car license plates
+  (1 or more valid targets)"*) and the **`+ Plates (N)`** chip in
+  `#signSeqBar` open the **🪪 Allowed License Plates** modal
+  (`#licenseListModal`).  Add a row, type its three characters, use
+  `◀` / `▶` to swap neighbours, `⭐ Set as Primary`, or `🗑️ Remove`
+  (the last plate cannot be removed).
+- `sign_sequences[0]` is the **primary** plate and stays in lock-step with
+  the `#signSeqBar` target.  Saving calls `/classes/sync_ocr`, which makes
+  `STATE.classes` / `self.classes` the **union of unique characters across
+  every plate in first-appearance order** — `["A12", "B18"]` → `A, 1, 2,
+  B, 8`; a repeated character is collected and trained once.
+- With **EMNIST Auto-Fill** on, every newly introduced character that has
+  zero samples on disk is seeded with 24 dark-on-white EMNIST captures in
+  the same request.
+- Preview compares the three readings against **every** plate in
+  `sign_sequences`: any exact 3-for-3 wins, and the banner names it
+  (`🟢 YES — MATCH · Plate #2 (B18)`); a near miss reports the closest
+  plate and marks the failing slot.  **🧪 Synth Match** cycles through the
+  configured plates so each allowed car can be tested without a photo.
 
 **What a sign class sample is:** one 28×28 glyph of that character — the
 same single-glyph model an OCR project trains.  Training does not split a
@@ -100,6 +132,13 @@ inference time.  Use **EMNIST Auto-Fill** for a zero-camera workflow, or
 capture/upload a frame where that character is the glyph to learn
 (Manual ROI/crop in the worktable isolates it).  A whole 3-character sign
 filed under `A` trains `A` on the whole sign, not on `A`.
+
+**Capture vs. model resolution.**  The device may stream at a larger side
+than the model consumes (typically **160×160 capture → 96×96 preprocessing →
+28×28 glyph**, and 160→96 for the image project).  The app's live serial
+preview box-averages the captured frame to the preprocessing side before
+Preview runs, exactly like the MCU; the captured sample PNGs themselves stay
+at full resolution for training.  The sides travel with the export (§7).
 
 ---
 
@@ -184,10 +223,11 @@ Under the hood:
   glyphs are polarity-aligned to the capture convention, isolated and
   centered (no segmentation), shuffled with the real captures; the optional
   `_background` class receives random non-glyph crops.  In a Car License
-  project the class list is locked to the unique target characters — stale
-  `Class 1`/`Class 2` folders are deleted from `dataset/`,
-  `.tm_processed_cache/` and `.tm_ocr_mixed/` before mixing (the EMNIST
-  mapper would otherwise fill them and turn them into real labels).
+  project the class list is locked to the unique characters of **all**
+  whitelisted plates (first-appearance order) — stale `Class 1`/`Class 2`
+  folders are deleted from `dataset/`, `.tm_processed_cache/` and
+  `.tm_ocr_mixed/` before mixing (the EMNIST mapper would otherwise fill
+  them and turn them into real labels).
 - **Transfer learning** caches one EMNIST-pretrained backbone keyed by
   architecture, split, convention and polarity.  Phase 1 trains a fresh
   `N+1` classification head with the backbone frozen; phase 2 unfreezes the
@@ -238,16 +278,25 @@ retraining.
 
 In the **Local Image File** source a sign project also shows:
 
-- `🧪 Synth Match` — compose the current target and assert `YES`.
+- `🧪 Synth Match` — compose an allowed plate and assert `YES`.
 - `🔀 Synth Reversed` — compose in reversed order, for LTR/RTL probes.
 - `❌ Synth Mismatch` — substitute a wrong character and assert `NO`.
+- With more than one plate, a `Plate #k (…)` selector next to the pills
+  chooses which allowed plate all three synth variants draw (the primary is
+  the default), so every whitelisted car can be exercised.
 
 They are disabled until a target is set and a model is trained.  Auto-fill
 and a finished training run also store a synthetic plate, so Preview has a
-ready frame with zero files on disk.
+ready frame with zero files on disk.  A device (serial) frame is box-averaged
+to the project's preprocessing side on ingest (160→96 for Car License), the
+same transform the MCU applies, so Preview and firmware score the same
+pixels.
 
 Before splitting, the host sign preview locates the sign board on the
-**native frame** (`find_sign_roi`): the pinned Manual ROI when one is set;
+**preprocessed frame** (`find_sign_roi`) — for a device source that is the
+box-averaged 96×96 frame (160×160 capture), exactly the input the MCU's
+front-end sees; uploads/synth images keep their own size: the pinned Manual
+ROI when one is set;
 when Dark/Lum have been tuned, an **ink-cluster** pass ignores components
 within 6 % of the frame edge (fingers/frame/border noise), drops oversized
 and tiny blobs — a thin `1` is allowed — and takes the horizontal row of
@@ -282,10 +331,13 @@ glyph.
 
 The output pane is the `.signmatch` banner:
 
-- `🟢 YES — MATCH` or `🔴 NO — NOT MATCH`.
+- `🟢 YES — MATCH · Plate #2 (B18)` when any whitelisted plate matches all
+  three slots (a one-plate project shows the shorter
+  `🟢 YES — MATCH (A12)`), or `🔴 NO — NOT MATCH`.
 - Three `.signmatch-slot` cells, each showing `WANT <char>`, the read glyph,
   the slot's 28×28 glyph image, and its confidence percentage; green = match,
-  red = fail.
+  red = fail.  The `WANT` characters come from the closest configured plate
+  when no plate is an exact match.
 - A red banner names the failing slot(s) and the reason (wrong glyph,
   `_background`, no glyph, or below the 0.60 floor).
 - Idle states: `◻ SET THE TARGET SIGN` and `◻ NO MODEL YET`.
@@ -325,13 +377,47 @@ model's operator codes before allocation, and turn every resolver/arena/
 allocation failure into a named `FATAL:` line on USB `Serial`.  The generated
 `model_resolver.h` covers every op in the exported graph.
 
-Sign exports add `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`,
-`kTargetSignSequence`, `kTargetSignClassIndices[3]`, `kSignReadingOrder`
-(0 LTR / 1 RTL), `kSignMatchMinProb` (0.60), and the rejection policy:
-`TM_SIGN_USE_BACKGROUND_OOD`, `kSignBackgroundReplacesOod`, and
-`kBackgroundClassIndex` (-1 when no `_background` class was trained).  The
+Every export stamps the **resolution layers** it was trained/previewed at:
+
+```c
+#define TM_MODEL_INPUT_SIDE 28        // kNumCols (28 glyph, 96 image)
+#define TM_PREPROCESS_FRAME_SIDE 96   // working frame before the glyph/ROI crop
+#define TM_CAPTURE_FRAME_SIDE 160     // ⚙ Settings → MCU Device Settings → Image Size
+constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;
+constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;
+constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;
+```
+
+The sketches initialize `g_frame_side` from `kCaptureFrameSide` and
+box-average the camera frame down to `kPreprocessFrameSide`; they never
+require capture side == `kNumCols`.  The same exact integer box average
+(`frame_resize.h` / `_resize_square_box_average_u8`, pinned by
+`tests/test_frame_resize_parity.py`) runs in the live serial preview.
+
+Sign exports add `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`, the primary
+`kTargetSignSequence` / `kTargetSignClassIndices[3]`, and the full
+multi-plate whitelist:
+
+```c
+#define TM_SIGN_MULTI_TARGET_EXPORTED 1
+constexpr int kTargetSignCount = 2;
+constexpr char kTargetSignSequences[kTargetSignCount][4] = { "A12", "B18" };
+constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
+    { 0, 1, 2 },   // A12
+    { 3, 1, 4 },   // B18; -1 = that character has no class in this export
+};
+```
+
+plus `kSignReadingOrder` (0 LTR / 1 RTL), `kSignMatchMinProb` (0.60), and the
+rejection policy: `TM_SIGN_USE_BACKGROUND_OOD`, `kSignBackgroundReplacesOod`,
+and `kBackgroundClassIndex` (-1 when no `_background` class was trained).  The
 legacy `TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR` /
-`kSignBackgroundIsTheOnlyRejector` spellings are emitted too.
+`kSignBackgroundIsTheOnlyRejector` spellings are emitted too.  On a MATCH the
+firmware sends the matched plate **index** in the 9-byte UART packet, so the
+ESP32-S3 knows which allowed car was read.  Copy the same
+`model_settings.h/.cpp` next to `S3_UART_Receiver.ino`; the receiver's
+checked-in copy is the current sign export.
+
 Exporting also stamps `<workspace>/deployed.json`, pinning Preview to the
 model that was just exported.
 
@@ -362,10 +448,13 @@ project.tmproj
 ```
 
 The archive header is authoritative on reopen.  `train_cfg` is a complete
-`TrainConfig` snapshot, including `sign_sequence`, `reading_order`,
-`auto_seed_emnist_samples`, OCR mixing/transfer-learning fields and the
-preprocessing geometry.  Legacy v1 archives are readable; missing fields fall
-back to this build's defaults and the app says which ones.
+`TrainConfig` snapshot, including `sign_sequence`, `sign_sequences` (the whole
+whitelist), `reading_order`, `auto_seed_emnist_samples`, OCR
+mixing/transfer-learning fields and the preprocessing geometry.  The session
+state also carries `current_serial_frame_side`, so the capture side used for
+data collection and stamped at export survives a reopen.  Legacy v1 archives
+are readable; missing fields fall back to this build's defaults and the app
+says which ones.
 
 ---
 
