@@ -8572,6 +8572,7 @@ function buildExportRuntimeConfig() {{
     // trainer and the preview use.
     sign_sequence: signSequence().join(''),
     sign_sequences: signSequences(),
+    capture_frame_side: Number(currentSerialFrameSide || 96),
     reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
     // No SPA control yet: the per-slot confidence floor is the server's
     // documented default, and exporting it makes that explicit on-device.

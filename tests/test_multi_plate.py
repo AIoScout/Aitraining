@@ -119,7 +119,12 @@ def test_multi_plate_union_autofill_preview_and_export():
         assert pred.get("matched_sequence") == "", pred
 
         export_dir = dataset.parent / "export_multi"
-        ctrl._export_run("s", export_dir, "tm_sign", "g_model", overwrite=True)
+        # The SPA forwards the configured camera capture side; the server
+        # derives the preprocessing side (96 for glyph projects).
+        ctrl._export_run(
+            "s", export_dir, "tm_sign", "g_model", overwrite=True,
+            runtime_config={"capture_frame_side": 160},
+        )
         header = (export_dir / "model_settings.h").read_text(encoding="utf-8")
         assert "#define TM_SIGN_MULTI_TARGET_EXPORTED 1" in header, header
         assert "constexpr int kTargetSignCount = 2;" in header, header
@@ -133,6 +138,14 @@ def test_multi_plate_union_autofill_preview_and_export():
         # Backward-compatible primary target.
         assert 'constexpr char kTargetSignSequence[] = "A12";' in header, header
         assert "constexpr int kTargetSignClassIndices[3] = {0, 1, 2};" in header, header
+        # Resolution layers: the MCU captures at 160, preprocesses at 96 and
+        # feeds the 28x28 glyph canvas.
+        assert "#define TM_MODEL_INPUT_SIDE 28" in header, header
+        assert "#define TM_PREPROCESS_FRAME_SIDE 96" in header, header
+        assert "#define TM_CAPTURE_FRAME_SIDE 160" in header, header
+        assert "constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;" in header, header
+        assert "constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;" in header, header
+        assert "constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;" in header, header
 
 
 def test_exported_firmware_model_is_compact_and_resolver_is_complete():

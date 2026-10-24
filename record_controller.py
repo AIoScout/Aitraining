@@ -1175,12 +1175,17 @@ class RecordController:
                     err = self._get_live_error(session_id=session_id, source=source) or "preview unavailable"
                     _send_json(req, {"ok": "0", "error": err}, status=404, cors=True)
                     return
-                # Predict using the 96x96 capture_png when possible — this is
-                # byte-for-byte the same file the /start (hold capture) worker
-                # saves on disk, so the user sees a distribution exactly equal
-                # to what their downstream MCU classifier will ingest.
-                capture_png = self._get_live_capture(session_id=session_id, source=source)
-                predict_png = capture_png if capture_png else preview_png
+                # The DEVICE preview is already box-averaged to the
+                # preprocessing side (160 -> 96), exactly like the MCU, and
+                # that is what inference must see — the native capture PNG
+                # (160) is kept for SAVING samples, not for prediction.  A
+                # webcam has no device preprocessing side, so its native
+                # capture is the right prediction source.
+                if source == "device":
+                    predict_png = preview_png
+                else:
+                    capture_png = self._get_live_capture(session_id=session_id, source=source)
+                    predict_png = capture_png if capture_png else preview_png
                 if self._is_sign_ocr_session(session_id):
                     pred = self._preview_predict_sign_ocr(
                         session_id=session_id,
@@ -2089,6 +2094,8 @@ class RecordController:
                 # SPA did not send them (older SPA builds).
                 "sign_sequence": payload.get("sign_sequence"),
                 "sign_sequences": payload.get("sign_sequences"),
+                "capture_frame_side": payload.get("capture_frame_side"),
+                "preprocess_frame_side": payload.get("preprocess_frame_side"),
                 "reading_order": payload.get("reading_order"),
                 "match_min_prob": _num("match_min_prob", 0.60),
             }
@@ -3160,6 +3167,21 @@ class RecordController:
         tflite_path = Path(str(meta.get("tflite_path") or "")).expanduser().resolve()
         labels = list(meta.get("labels") or []) if isinstance(meta, dict) else []
         img_size = int(meta.get("img_size") or 96) if isinstance(meta, dict) else 96
+        # Capture / preprocessing / model sides are separate by design: the
+        # camera can stream 160x160 while the model consumes 96x96 (or a
+        # glyph canvas at 28x28).  The sketches resize between them.
+        try:
+            capture_side = int(rc.get("capture_frame_side") or getattr(cfg, "serial_frame_side", 96) or 96)
+        except (TypeError, ValueError):
+            capture_side = 96
+        capture_side = max(8, min(512, capture_side))
+        try:
+            preprocess_side = int(rc.get("preprocess_frame_side") or 0)
+        except (TypeError, ValueError):
+            preprocess_side = 0
+        if preprocess_side <= 0:
+            preprocess_side = 96 if is_glyph_project(getattr(cfg, "project_type", "")) else int(img_size)
+        preprocess_side = max(8, min(512, preprocess_side))
         color_mode = str(meta.get("color_mode") or "rgb") if isinstance(meta, dict) else "rgb"
         channels = 1 if color_mode.strip().lower() in {"l", "gray", "grayscale", "mono"} else 3
         if not tflite_path.exists():
@@ -3383,6 +3405,17 @@ class RecordController:
                 "constexpr int kNumChannels = " + str(int(channels)) + ";",
                 "",
                 "constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;",
+                "",
+                "// ── Resolution layers (capture -> preprocess -> model) ───────────",
+                "// The MCU may capture at a different side than the model input;",
+                "// the sketches box-average the captured square frame down to the",
+                "// preprocessing side before the glyph/ROI transform.",
+                "#define TM_MODEL_INPUT_SIDE " + str(int(img_size)),
+                "#define TM_PREPROCESS_FRAME_SIDE " + str(int(preprocess_side)),
+                "#define TM_CAPTURE_FRAME_SIDE " + str(int(capture_side)),
+                "constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;",
+                "constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;",
+                "constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;",
                 "",
                 # 1 = OCR glyph model (28x28 canvas, "_background" rejector,
                 # ocr_glyph.c front-end) / 0 = legacy 96x96 sign model.
@@ -6820,8 +6853,22 @@ class RecordController:
                 xfer_s = frame_bytes * 10.0 / float(baud)
                 timeout = max(1.5, xfer_s * 2.5)
                 raw = reader.read_frame(timeout_s=timeout)
-                capture_png = _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=int(cfg.serial_frame_side), out_side=int(cfg.serial_frame_side))
-                self._live_set(key, preview_png=capture_png, capture_png=capture_png, error="")
+                out_side = _preprocess_frame_side(
+                    getattr(cfg, "project_type", ""), getattr(cfg, "img_size", 96)
+                )
+                raw_side = int(cfg.serial_frame_side)
+                # preview_png is what Preview/inference sees: box-averaged to
+                # the preprocessing side (96), exactly like the MCU.  The
+                # capture PNG stays at the NATIVE stream side (160) so a
+                # saved sample keeps the resolution the user collected; the
+                # training cache downsizes it later.
+                preview_png = _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=raw_side, out_side=int(out_side))
+                capture_png = (
+                    preview_png
+                    if int(out_side) == raw_side
+                    else _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=raw_side, out_side=raw_side)
+                )
+                self._live_set(key, preview_png=preview_png, capture_png=capture_png, error="")
                 last_error = ""
             except Exception as e:
                 msg = str(e) or "Unable to read from serial device."
@@ -7594,6 +7641,57 @@ def _open_working_camera(preferred_index: int, unique_id: Optional[str] = None, 
     return None, CameraOpenInfo("failed", idx, uid, "", "No camera opened at any probed index.")
 
 
+# Working resolution the glyph front-end uses on the MCU (captures are
+# trained at 96x96 glyph frames) and the image project's fallback model side.
+GLYPH_PREPROCESS_FRAME_SIDE = 96
+
+
+def _preprocess_frame_side(project_type: Any, img_size: Any) -> int:
+    """Capture-frame side -> preprocessing side for the live serial stream."""
+    try:
+        side = int(img_size or 96)
+    except (TypeError, ValueError):
+        side = 96
+    if is_glyph_project(str(project_type or "")):
+        return GLYPH_PREPROCESS_FRAME_SIDE
+    return max(8, min(512, side))
+
+
+def _resize_square_box_average_u8(arr: np.ndarray, out_side: int) -> np.ndarray:
+    """Exact integer box-average resize used by the host and the MCU sketches.
+
+    The source interval of output pixel o is [o*in//out, (o+1)*in//out)
+    (clamped to at least one source pixel), every pixel in that box is
+    summed and divided with round-half-up.  No floats and no PIL/BILINEAR
+    path, so the same function is reproducible in C on the P4 — it is
+    mirrored bit-for-bit by TFLite/frame_resize.h
+    (FrameResizeBoxAverageGray / FrameResizeBoxAverageRgb) and pinned by
+    tests/test_frame_resize_parity.py.
+    """
+    a = np.asarray(arr)
+    out = max(1, int(out_side))
+    if a.ndim < 2 or a.size == 0:
+        return a
+    h, w = int(a.shape[0]), int(a.shape[1])
+    if h == out and w == out:
+        return a
+    dst = np.empty((out, out) + tuple(a.shape[2:]), dtype=np.uint8)
+    for oy in range(out):
+        sy0 = (oy * h) // out
+        sy1 = max(sy0 + 1, ((oy + 1) * h) // out)
+        for ox in range(out):
+            sx0 = (ox * w) // out
+            sx1 = max(sx0 + 1, ((ox + 1) * w) // out)
+            block = a[sy0:sy1, sx0:sx1].astype(np.int64)
+            count = int(block.shape[0] * block.shape[1])
+            if a.ndim == 2:
+                dst[oy, ox] = np.uint8((int(block.sum()) + count // 2) // count)
+            else:
+                sums = block.reshape((-1, block.shape[-1])).sum(axis=0)
+                dst[oy, ox, :] = np.clip((sums + count // 2) // count, 0, 255).astype(np.uint8)
+    return dst
+
+
 def _raw96_to_png(
     raw: bytes,
     crop_box: Optional[Tuple[int, int, int, int]],
@@ -7615,8 +7713,10 @@ def _raw96_to_png(
     if crop_box is not None:
         x1, y1, x2, y2 = crop_box
         img = img.crop((x1, y1, x2, y2))
-    img = img.resize((out_side, out_side))
-    return _to_png_bytes(img)
+    arr = np.asarray(img)
+    # Exact integer box-average, matching the P4 sketch's resize helper.
+    arr = _resize_square_box_average_u8(arr, int(out_side))
+    return _to_png_bytes(Image.fromarray(arr, mode=("RGB" if arr.ndim == 3 else "L")))
 
 
 def _raw96_preview_png(raw: bytes, frame_side: int = 96) -> bytes:
