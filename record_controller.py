@@ -106,7 +106,6 @@ from ocr_preprocess import (
     NORM_STRETCH,
     SIGN_SEQUENCE_PAD,
     find_interior_ink_roi,
-    find_sign_roi,
     preprocess_glyph,
     preprocess_sign_sequence,
     normalize_sign_sequence,
@@ -4881,8 +4880,9 @@ class RecordController:
         ink = result.get("ink")
         ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
         # ── Auto ROI for the Edit worktable ───────────────────────────────
-        # The Preview card already has find_sign_roi; the per-sample editor
-        # has only one glyph, so it needs the generic interior-band search:
+        # The Preview card runs the device's own interior-band search inside
+        # preprocess_sign_sequence(find_roi=True); the per-sample editor has
+        # only one glyph, so it uses the generic interior-band search:
         # threshold window -> component/border cleanup -> tight padded box.
         # This is the box the SPA draws in green, and the processed pane is
         # re-cut from it so Dark/Lum drags update BOTH live.
@@ -5613,17 +5613,24 @@ class RecordController:
             qscale = float(q[0] or 0.0)
             qzp = int(q[1] or 0)
         dtype = input_details.get("dtype")
-        batch = np.expand_dims(arr, axis=0)
-        if dtype is not None and dtype != np.float32 and qscale > 0:
-            qarr = np.round(batch / qscale + qzp)
-            if dtype == np.int8:
-                x = np.clip(qarr, -128, 127).astype(np.int8)
-            elif dtype == np.uint8:
-                x = np.clip(qarr, 0, 255).astype(np.uint8)
-            else:
-                x = qarr.astype(dtype)
+        if arr.dtype == np.int8:
+            # Caller already produced the exact device tensor: the sign
+            # path feeds `(int)pixel - 128`, byte-for-byte what
+            # TFLite_Sign.ino writes into input->data.int8.  Do not run it
+            # through float32 division/rounding again.
+            x = np.expand_dims(arr, axis=0)
         else:
-            x = batch.astype(np.float32)
+            batch = np.expand_dims(arr, axis=0)
+            if dtype is not None and dtype != np.float32 and qscale > 0:
+                qarr = np.round(batch / qscale + qzp)
+                if dtype == np.int8:
+                    x = np.clip(qarr, -128, 127).astype(np.int8)
+                elif dtype == np.uint8:
+                    x = np.clip(qarr, 0, 255).astype(np.uint8)
+                else:
+                    x = qarr.astype(dtype)
+            else:
+                x = batch.astype(np.float32)
         with self._preview_model_lock(session_id):
             interpreter.set_tensor(int(input_details.get("index")), x)
             interpreter.invoke()
@@ -5991,65 +5998,66 @@ class RecordController:
         gray = np.asarray(src_img, dtype=np.uint8)
         full_h, full_w = gray.shape[:2]
 
-        # ── Stage 1: locate the sign plate on the NATIVE frame ────────────
-        # The device streams 160x160 (or 96x96); the glyph model is 28x28.
-        # Never resize the scene to the glyph size before this point: the
-        # split needs the original pixel resolution.  Manual ROI wins when
-        # the sign is pinned; otherwise the bright inner plate is detected
-        # so the desk/wheels/frame never enter the vertical projection.
+        # ── Stage 1+2: the SAME call the device makes ─────────────────────
+        # The MCU passes its full preprocessed frame (160→96 box-averaged)
+        # straight into preprocess_sign_sequence_c(), which performs the
+        # interior character-band ROI search and the split.  Do NOT
+        # pre-crop with the host-only find_sign_roi: a different crop
+        # changes the split boxes even when the glyph code is identical.
+        # Manual ROI is a desktop-only override: crop first, then run the
+        # same splitter with find_roi off.
         manual_roi = None
         if str(config.get("mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
             manual_roi = config.get("manual_roi")
         if manual_roi is None and str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
             manual_roi = model.get("manual_roi")
-        roi_info = find_sign_roi(
-            gray,
-            manual_roi=manual_roi,
-            dark_thr=floor if thresholds_adjusted else None,
-            lum_thr=pinned if thresholds_adjusted else None,
-        )
-        rx1, ry1, rx2, ry2 = (int(v) for v in roi_info["box"])
-        rx1 = max(0, min(full_w - 1, rx1))
-        ry1 = max(0, min(full_h - 1, ry1))
-        rx2 = max(rx1 + 1, min(full_w, rx2))
-        ry2 = max(ry1 + 1, min(full_h, ry2))
-        roi_gray = np.ascontiguousarray(gray[ry1:ry2, rx1:rx2])
-        origin_x, origin_y = rx1, ry1
 
-        # ── Stage 2: threshold + split 3 glyphs ───────────────────────────
-        # NO second border-cleaning pass here.  `roi_gray` is already the
-        # sign interior returned by find_sign_roi; running clean_sign_ink on
-        # the cropped ROI treats any glyph near the box edge as "border
-        # clutter" and erases it (the `'A'` / broken-`'1'` bug).  The ROI
-        # finder strips the outer frame, so the exact `roi_box` content is
-        # what the split must see.  All slot crops are clamped inside
-        # roi_gray, so no pixel outside `roi_box` can reach a slot.
-        reading = preprocess_sign_sequence(
-            roi_gray,
-            sign_sequence=seq,
-            reading_order=order,
-            out_size=int(w),
-            polarity=polarity,
-            apply_segmentation=True,
-            convention=convention,
-            thresh=pinned,
-            dark_thr=floor,
-            clean_border=False,
-        )
-        # OOD Layer 1's input: the ink share of the intact sign ROI.  Same
-        # number the image project calls sign_pct, so spmin/spmax mean the
-        # same thing in both workspaces.  On the 3-slot path it is a
-        # DIAGNOSTIC only: Layer 1 is disarmed (the split already gates each
-        # slot on ink, and a frame-level window used to reject all three
-        # correct slots at once).  This mirrors ood_is_in_distribution() in
-        # TFLite_Sign.ino.
-        ink = reading.get("ink")
-        ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
-        sign_pct = (
-            float(ink_arr.mean() * 100.0)
-            if ink_arr is not None and ink_arr.size
-            else 0.0
-        )
+        def _run_split(src: np.ndarray, find_roi: bool) -> Dict[str, Any]:
+            return preprocess_sign_sequence(
+                src,
+                sign_sequence=seq,
+                reading_order=order,
+                out_size=int(w),
+                polarity=polarity,
+                apply_segmentation=True,
+                convention=convention,
+                thresh=pinned,
+                dark_thr=floor,
+                clean_border=False,
+                find_roi=find_roi,
+            )
+
+        reading: Optional[Dict[str, Any]] = None
+        roi_method = "input"
+        origin_x = origin_y = 0
+        if manual_roi is not None:
+            roi_px = manual_roi_to_pixels(full_h, full_w, manual_roi)
+            if roi_px is not None:
+                mx1, my1, mx2, my2 = (int(v) for v in roi_px)
+                mx1 = max(0, min(full_w - 1, mx1))
+                my1 = max(0, min(full_h - 1, my1))
+                mx2 = max(mx1 + 1, min(full_w, mx2))
+                my2 = max(my1 + 1, min(full_h, my2))
+                manual_gray = np.ascontiguousarray(gray[my1:my2, mx1:mx2])
+                if manual_gray.size:
+                    # The manual box only PRE-crops the scene; the same
+                    # interior-band search and split the device runs then
+                    # operate inside it.
+                    reading = _run_split(manual_gray, find_roi=True)
+                    origin_x, origin_y = mx1, my1
+                    rx1, ry1, rx2, ry2 = mx1, my1, mx2, my2
+                    roi_method = "manual"
+        if reading is None:
+            reading = _run_split(gray, find_roi=True)
+            roi_raw = reading.get("roi_box") or [0, 0, full_w, full_h]
+            rx1, ry1, rx2, ry2 = (int(v) for v in roi_raw)
+            rx1 = max(0, min(full_w - 1, rx1))
+            ry1 = max(0, min(full_h - 1, ry1))
+            rx2 = max(rx1 + 1, min(full_w, rx2))
+            ry2 = max(ry1 + 1, min(full_h, ry2))
+            roi_method = str(reading.get("roi_method") or "input")
+        roi_gray = np.ascontiguousarray(gray[ry1:ry2, rx1:rx2])
+        sign_pct = float(reading.get("sign_pct") or 0.0)
 
         def _to_full_box(box: Any) -> Any:
             """Slot/sign box from the ROI-local frame back to frame pixels."""
@@ -6073,7 +6081,14 @@ class RecordController:
             prob = 0.0
             raw_out = None
             if labels and glyph.size:
-                arr = (glyph.astype(np.float32) / 255.0).reshape((int(h), int(w), channels))
+                # Device-exact tensor: `(int)pixel - 128`, no float
+                # dequantise/requantise round trip.  (A non-int8 model
+                # falls back to the float path.)
+                if model["input_details"].get("dtype") == np.int8:
+                    arr = (glyph.astype(np.int16) - 128).astype(np.int8)
+                else:
+                    arr = glyph.astype(np.float32) / 255.0
+                arr = arr.reshape((int(h), int(w), channels))
                 try:
                     _scores, raw_out = self._invoke_glyph_tensor(model, session_id, arr)
                 except Exception:
@@ -6274,7 +6289,7 @@ class RecordController:
             "crop": roi_box_norm,
             "roi_box": roi_box,
             "roi_box_norm": roi_box_norm,
-            "roi_method": str(roi_info.get("method") or ""),
+            "roi_method": str(roi_method),
             "model_source": str(model.get("model_source") or "latest"),
             "processed_image_b64": base64.b64encode(processed_png).decode("ascii"),
             "crop_image_b64": base64.b64encode(raw_crop_png).decode("ascii"),

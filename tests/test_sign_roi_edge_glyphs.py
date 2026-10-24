@@ -119,7 +119,7 @@ def test_roi_is_inside_plate_and_keeps_edge_glyphs():
 def _fake_model() -> dict:
     return {
         "labels": ["A", "1", "2"],
-        "input_details": {"shape": [1, 28, 28, 1]},
+        "input_details": {"shape": [1, 28, 28, 1], "dtype": np.int8},
         "sign_sequence": "A12",
         "sign_sequences": ["A12"],
         "sign_background_replace_ood": False,
@@ -243,7 +243,7 @@ def test_ood_max_prob_is_the_single_floor_and_banner_value():
         ctrl, _dataset = _workspace(Path(td))
         model = {
             "labels": ["A", "1", "2", "B", "8"],
-            "input_details": {"shape": [1, 28, 28, 1]},
+            "input_details": {"shape": [1, 28, 28, 1], "dtype": np.int8},
             "sign_sequence": "A12",
             "sign_sequences": ["A12"],
             "sign_background_replace_ood": False,
@@ -362,6 +362,64 @@ def test_edit_processed_preview_is_the_canonical_28x28_glyph():
     )
     arr = np.asarray(Image.open(BytesIO(shown)).convert("L"))
     assert arr.shape == (28, 28), arr.shape
+
+
+def test_host_preview_uses_the_same_slicing_as_the_device():
+    """The Preview must pass the same frame + thresholds to the SAME
+    preprocess_sign_sequence(find_roi=True) path as sign_feed_slots(), and
+    feed `(int)pixel - 128` int8 tensors to the model."""
+    frame160 = _edge_plate_frame()
+    small = rc._resize_square_box_average_u8(frame160, 96)
+    png = _png(small)
+    cases = [
+        (0, 100, None),
+        (0, 121, 120),
+        (0, 50, 49),
+    ]
+    for bg_dark, bg_lum, pinned in cases:
+        captured = []
+        with tempfile.TemporaryDirectory() as td:
+            ctrl, _dataset = _workspace(Path(td))
+            model = {
+                "labels": ["A", "1", "2"],
+                "input_details": {"shape": [1, 28, 28, 1], "dtype": np.int8},
+                "sign_sequence": "A12",
+                "sign_sequences": ["A12"],
+                "sign_background_replace_ood": False,
+                "class_preprocess": {},
+                "preprocess_mode": "auto_by_label",
+                "model_source": "latest",
+            }
+            ctrl._preview_load_model = lambda session_id: model
+
+            def fake_invoke(model, session_id, arr):
+                captured.append(np.array(arr, copy=True))
+                return None, np.asarray([200, 10, 10], dtype=np.int64)
+
+            ctrl._invoke_glyph_tensor = fake_invoke
+            res = ctrl._preview_predict_sign_ocr(
+                "s", png,
+                sign_sequence="A12",
+                reading_order="ltr",
+                bg_dark_thresh=bg_dark,
+                bg_lum_thresh=bg_lum,
+                ood_max_prob_min=0.40,
+            )
+
+        reading = op.preprocess_sign_sequence(
+            small, sign_sequence="A12", reading_order="ltr", out_size=28,
+            polarity=op.INK_DARK, apply_segmentation=True,
+            convention=op.NORM_CANON, thresh=pinned, dark_thr=0,
+            find_roi=True,
+        )
+        assert res.get("roi_box") == reading.get("roi_box"), (
+            bg_lum, res.get("roi_box"), reading.get("roi_box")
+        )
+        assert len(captured) == 3, captured
+        for got, slot in zip(captured, reading["slots"]):
+            want = ((np.asarray(slot["glyph"], dtype=np.int16) - 128)
+                    .astype(np.int8).reshape(28, 28, 1))
+            assert np.array_equal(got, want), (bg_lum, slot["char"])
 
 
 if __name__ == "__main__":

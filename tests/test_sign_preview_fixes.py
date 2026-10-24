@@ -188,7 +188,7 @@ def test_thin_one_sign_reads_a12_not_background():
             bg_lum_thresh=60,
         )
 
-    assert res.get("roi_method") == "ink_cluster", res.get("roi_method")
+    assert res.get("roi_method") == "interior_ink", res.get("roi_method")
     slots = res.get("slots") or []
     assert [s.get("char") for s in slots] == ["A", "1", "2"], slots
     assert [s.get("label") for s in slots] == ["A", "1", "2"], slots

@@ -139,7 +139,10 @@ def test_preview_crops_board_before_three_slots():
             "s", _png_bytes(frame), sign_sequence="A12", reading_order="ltr"
         )
 
-    assert res.get("roi_method") == "bright_plate", res
+    # The preview now uses the SAME interior-band search as the device
+    # (preprocess_sign_sequence(find_roi=True)), not the host-only
+    # bright-plate pre-crop.
+    assert res.get("roi_method") == "interior_ink", res
     roi = res.get("roi_box")
     assert isinstance(roi, list) and len(roi) == 4, roi
     assert not (roi == [0, 0, 160, 160]), roi
@@ -215,7 +218,7 @@ def test_user_window_finds_characters_and_renders_white_masks():
             bg_dark_thresh=57, bg_lum_thresh=160,
         )
 
-    assert res.get("roi_method") == "ink_cluster", res.get("roi_method")
+    assert res.get("roi_method") == "interior_ink", res.get("roi_method")
     assert float(res.get("sign_pct") or 0.0) > 1.0, res.get("sign_pct")
     # The synthetic mid-tone glyphs are a distribution shift for the template
     # model, so assert the three target slots/crops (the subject of this

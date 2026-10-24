@@ -40,6 +40,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import ocr_preprocess as ocr  # noqa: E402
+import record_controller as rc  # noqa: E402
+from test_sign_preview_fixes import _thin_one_frame  # noqa: E402
 
 SOURCE = REPO / "TFLite_Sign" / "sign_glyph.c"
 HARNESS = REPO / "TFLite_Sign" / "tools" / "sign_glyph_host.c"
@@ -167,6 +169,19 @@ def _cases():
     seq("board_ring_and_clutter_otsu", board)
     seq("board_ring_and_clutter_bright", 255 - board, thresh=196,
         polarity=1)
+
+    # Real camera-style A12 board at capture (160) and preprocessed (96)
+    # sides, under Otsu and the two custom windows used in the field:
+    # Dark=0/Lum=121 -> thresh 120, and Dark=0/Lum=50 -> thresh 49.
+    board160 = _thin_one_frame()
+    board96 = rc._resize_square_box_average_u8(board160, 96)
+    for label, shot in (("a12_160", board160), ("a12_96", board96)):
+        for thr_name, thr in (("otsu", -1), ("lum121", 120), ("lum50", 49)):
+            seq(f"{label}_{thr_name}", shot, thresh=thr)
+    # Full 160->96 capture chain in C (frame_resize.h + sign_glyph.c) vs
+    # the host's _resize_square_box_average_u8 + preprocess.
+    for thr_name, thr in (("otsu", -1), ("lum121", 120), ("lum50", 49)):
+        add(5, f"a12_capture160_{thr_name}", board160, x0=96, thresh=thr)
 
     # Regression for the Preview ROI bug: a white plate whose 'A' sits
     # inside the old 6 % frame margin, and a '1' broken into two strokes.
@@ -393,8 +408,13 @@ def _run_corpus():
                 results["single"].append(errs)
 
             else:
+                src = data
+                if c["mode"] == 5:
+                    # C mode 5 box-averages w*h -> x0*x0 with the shared
+                    # frame_resize.h; mirror it with the host helper.
+                    src = rc._resize_square_box_average_u8(data, int(c["x0"]))
                 want = ocr.preprocess_sign_sequence(
-                    data, sign_sequence="ABC",
+                    src, sign_sequence="ABC",
                     reading_order=("rtl" if c["order"] else "ltr"),
                     out_size=c["out_size"], polarity=c["polarity"],
                     apply_segmentation=bool(c["seg"]),

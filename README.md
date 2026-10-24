@@ -296,26 +296,22 @@ to the project's preprocessing side on ingest (160→96 for Car License), the
 same transform the MCU applies, so Preview and firmware score the same
 pixels.
 
-Before splitting, the host sign preview locates the sign board on the
-**preprocessed frame** (`find_sign_roi`) — for a device source that is the
-box-averaged 96×96 frame (160×160 capture), exactly the input the MCU's
-front-end sees; uploads/synth images keep their own size: the pinned Manual
-ROI when one is set;
-when Dark/Lum have been tuned, an **ink-cluster** pass strips frame-scale
-lines and frame-thickness corner debris but **keeps a character near the
-plate/frame edge** (the old 6 % margin drop erased `'A'`), drops oversized
-and tiny blobs — a thin `1` is allowed — and takes the horizontal row of
-three character blobs.  The ROI is their union plus one uniform 10 % pad on
-all four sides, so the box is tight and symmetric rather than pulled left by
-edge clutter, then clamped to the white plate interior so the dark surround
-cannot enter the crop.  Otherwise the enclosed bright inner plate is used,
-with a centred 70 % fallback.
+The host sign preview uses the **same slicer as the MCU** on the
+**preprocessed frame** (device: box-averaged 96×96 from the 160×160
+capture; uploads/synth keep their own size):
+`preprocess_sign_sequence(..., find_roi=True)` with the same
+`(pinned_thresh, dark_thr)` derived from Dark/Lum.  There is no host-only
+`find_sign_roi` pre-crop: the interior component/band search strips the
+outer frame/clutter, **keeps a character near the plate/frame edge** (the
+old 6 % margin drop erased `'A'`), drops oversized/tiny blobs, strips a
+small disconnected corner speck, and splits the band.  A pinned Manual ROI
+pre-crops first and the same search runs inside it.
 
-The three-glyph projection runs on that **exact ROI crop**.  There is no
-second border-cleaning pass on the cropped box: checking `ROI` displays the
-same pixels visible inside the unchecked green box, and a broken `'1'`
-keeps both strokes.  Only frame-scale outer-surround components are ever
-removed.
+The result is bit-identical to `sign_glyph.c` on the same frame — `roi_box`
+and all three 28×28 glyphs — and Preview feeds the model the device tensor
+`(int)pixel − 128` (no float dequantise/requantise round trip).  Checking
+`ROI` displays the same threshold pixels visible inside the unchecked green
+box, and a broken `'1'` keeps both strokes.
 
 Each slot crop gets a small plate-context margin (8 % of its smaller side,
 minimum 2 px) before the glyph transform.  A stroke-only `1` crop otherwise
