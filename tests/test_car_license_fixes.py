@@ -318,3 +318,130 @@ def test_ui_display_name_is_car_license():
     assert "🚗 Car License Project" in source
     # Internal key is unchanged.
     assert "sign_ocr" in source
+
+
+def _board_frames(count: int, seed: int):
+    """`count` varied full-frame 'A 1 2' plates (dark ink on white paper).
+
+    Glyphs are hand-drawn with PIL lines at fixed x-bands (A ~30, 1 ~75,
+    2 ~118) with a few pixels of jitter, ink tone and paper mottle per
+    frame, so the model sees 20 DIFFERENT boards, not one board 20 times.
+    """
+    from PIL import ImageDraw
+
+    rng = np.random.default_rng(seed)
+    frames = []
+    for _ in range(count):
+        im = Image.new("L", (160, 160), 245)
+        d = ImageDraw.Draw(im)
+        jx, jy = int(rng.integers(-3, 4)), int(rng.integers(-3, 4))
+        ink = int(rng.integers(20, 61))
+        ax, ay = 30 + jx, 45 + jy
+        # A: two diagonals + crossbar
+        d.line([(ax - 13, ay + 70), (ax, ay), (ax + 13, ay + 70)], fill=ink, width=5)
+        d.line([(ax - 9, ay + 45), (ax + 9, ay + 45)], fill=ink, width=4)
+        # 1: vertical bar + small serifs
+        ox = 75 + jx
+        d.line([(ox, ay), (ox, ay + 70)], fill=ink, width=4)
+        d.line([(ox - 6, ay), (ox + 6, ay)], fill=ink, width=4)
+        d.line([(ox - 4, ay + 70), (ox + 4, ay + 70)], fill=ink, width=3)
+        # 2: top bar + diagonal + bottom bar
+        tx = 118 + jx
+        d.line([(tx - 12, ay), (tx + 12, ay)], fill=ink, width=5)
+        d.line([(tx + 12, ay), (tx - 8, ay + 70)], fill=ink, width=5)
+        d.line([(tx - 14, ay + 70), (tx + 12, ay + 70)], fill=ink, width=5)
+        arr = np.asarray(im, dtype=np.uint8)
+        arr = np.minimum(
+            255,
+            arr.astype(np.int16)
+            - rng.integers(0, 8, size=arr.shape, dtype=np.uint8),
+        ).astype(np.uint8)
+        frames.append(arr)
+    return frames
+
+
+def test_manual_roi_camera_samples_train_cleanly_and_never_confuse_1_with_a():
+    """The reported failure: user camera samples cropped with Manual ROI
+    broke '1' vs 'A' (EMNIST-only training reads both perfectly).
+
+    Train on ONLY 20 full-frame A 1 2 boards whose per-sample Manual ROI
+    boxes isolate each character, with EMNIST mixing and the pretrained
+    backbone disabled.  Then read held-out boards: every class must score
+    >= 95 % in _preview_predict_sign_ocr, and slot '1' must never read
+    'A' (or vice versa).
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        state = _open_template(ctrl)
+        # Isolate the camera path: drop the seeded glyphs; disable EMNIST
+        # mixing and the pretrained backbone below.
+        for name in ("A", "1", "2"):
+            for p in (dataset / name).iterdir():
+                p.unlink()
+
+        roi = {
+            "A": [0.07, 0.0, 0.33, 1.0],
+            "1": [0.40, 0.0, 0.55, 1.0],
+            "2": [0.59, 0.0, 0.88, 1.0],
+        }
+        sample_map = {}
+        for i, arr in enumerate(_board_frames(20, seed=20261024)):
+            fname = f"board_{i:02d}.png"
+            for name in ("A", "1", "2"):
+                Image.fromarray(arr, mode="L").save(dataset / name / fname)
+                sample_map.setdefault(name, {})[fname] = {
+                    "mode": "manual_roi",
+                    "manual_roi": list(roi[name]),
+                    "bg_dark_thresh": 0,
+                    "bg_lum_thresh": 60,
+                }
+        ctrl._classes_save(dataset, ["A", "1", "2"], sample_preprocess=sample_map)
+
+        cfg = dict(state["train_cfg"])
+        cfg.update(
+            {
+                "ocr_emnist_enabled": False,
+                "ocr_emnist_per_class": 0,
+                "ocr_background_enabled": False,
+                "sign_background_replace_ood": False,
+                "ocr_transfer_learning": False,
+                "epochs": 15,
+                "validation_split": 0.25,
+            }
+        )
+        ctrl._train_worker("s", cfg)
+        status = ctrl._train.get("s") or {}
+        assert not status.get("error"), status
+
+        # The training cache holds ONE glyph per manual-ROI sample — the
+        # stored [x1, y1, x2, y2] was applied.  A full-frame leak would
+        # leave three ink column runs in the cached 28x28.
+        processed = dataset.parent / ".tm_processed_cache"
+        for name in ("A", "1", "2"):
+            cached = np.asarray(
+                Image.open(next((processed / name).glob("board_*.png"))).convert("L")
+            )
+            assert cached.shape == (28, 28), (name, cached.shape)
+            cols = np.flatnonzero((cached < 128).any(axis=0))
+            assert cols.size, (name, "glyph vanished")
+            runs = 1 + int(np.flatnonzero(np.diff(cols) > 1).size)
+            assert runs == 1, (name, "the whole board leaked into the training glyph", cols)
+
+        # Held-out boards: >= 95 % per class, and no 1/A confusion, ever.
+        held_out = _board_frames(20, seed=987654)
+        per_class = {"A": 0, "1": 0, "2": 0}
+        for arr in held_out:
+            res = _predict(ctrl, _png(arr))
+            slots = res.get("slots") or []
+            assert len(slots) == 3, res
+            for slot in slots:
+                ch = str(slot.get("char") or "")
+                label = str(slot.get("label") or "")
+                assert ch in ("A", "1", "2"), slot
+                if label == ch:
+                    per_class[ch] += 1
+                assert not (ch == "1" and label == "A"), ("'1' read as 'A'", slots)
+                assert not (ch == "A" and label == "1"), ("'A' read as '1'", slots)
+        for name in ("A", "1", "2"):
+            acc = per_class[name] / len(held_out)
+            assert acc >= 0.95, (name, per_class, "per-class accuracy below 95 %")
