@@ -445,3 +445,55 @@ def test_manual_roi_camera_samples_train_cleanly_and_never_confuse_1_with_a():
         for name in ("A", "1", "2"):
             acc = per_class[name] / len(held_out)
             assert acc >= 0.95, (name, per_class, "per-class accuracy below 95 %")
+
+
+def test_export_stamps_preview_dark_lum_into_both_constant_pairs():
+    """The Preview Dark/Lum sliders must reach the device header as BOTH
+    the threshold-window #defines and the runtime bg constants.
+
+    The device contract: kDarkThr 0 / kLumThr 100 means automatic Otsu
+    (pinned_thresh = -1); any other value pins the threshold.  If the
+    export dropped the user's slider values, the device would fall back
+    to Otsu while the app previewed a pinned threshold — different slots,
+    different verdicts.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        state = _open_template(ctrl)
+        _train(ctrl, state, background=False)
+
+        export_dir = dataset.parent / "export_check"
+        ctrl._export_run(
+            "s", export_dir, "tm_sign", "g_model", overwrite=True,
+            runtime_config={
+                "bg_dark_thresh": 0,
+                "bg_lum_thresh": 102,
+                "ood_sign_min": 0.3,
+                "ood_sign_max": 70.0,
+                "ood_max_prob": 0.40,
+                "ood_entropy_max": 0.85,
+            },
+        )
+        header = (export_dir / "model_settings.h").read_text(encoding="utf-8")
+        assert "#define kDarkThr 0" in header, header
+        assert "#define kLumThr 102" in header, header
+        assert "constexpr int kBgDarkThresh = 0;" in header, header
+        assert "constexpr int kBgLumThresh = 102;" in header, header
+
+        # The SPA wires the Preview sliders into the export payload: the
+        # values travel only once the user has moved a slider, so an
+        # untouched project still exports the 0/100 Otsu defaults.
+        source = (ROOT / "app.py").read_text(encoding="utf-8")
+        assert (
+            "bg_dark_thresh: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : 0"
+            in source
+        )
+        assert (
+            "bg_lum_thresh: previewThreshUserModified ? Number(previewLumThresh ?? 100) : 100"
+            in source
+        )
+        import re as _re
+
+        assert _re.search(
+            r"previewThreshUserModified\s*=\s*true", source
+        ), "the slider handler must mark the thresholds as user-modified"
