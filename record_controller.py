@@ -1203,6 +1203,7 @@ class RecordController:
                         ood_sign_pct_max=ood_sign_pct_max,
                         ood_max_prob_min=ood_max_prob_min,
                         ood_entropy_ratio_max=ood_entropy_ratio_max,
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                         source=source,
                     )
                 else:
@@ -1861,6 +1862,7 @@ class RecordController:
                             if payload.get("match_min") is not None and str(payload.get("match_min")).strip() != ""
                             else None
                         ),
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                     )
                 else:
                     pred = self._preview_predict(
@@ -1994,6 +1996,7 @@ class RecordController:
                         ood_sign_pct_min=_opt_float("ood_sign_min", "ood_sign_pct_min"),
                         ood_sign_pct_max=_opt_float("ood_sign_max", "ood_sign_pct_max"),
                         match_min_prob=_opt_float("match_min", "match_min_prob"),
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                     )
                 else:
                     pred = self._preview_predict(
@@ -2130,6 +2133,7 @@ class RecordController:
                         ood_sign_pct_min=_synth_float("ood_sign_min", "ood_sign_pct_min"),
                         ood_sign_pct_max=_synth_float("ood_sign_max", "ood_sign_pct_max"),
                         match_min_prob=_synth_float("match_min", "match_min_prob"),
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                     )
                     if variant == "match":
                         intended = True
@@ -5888,6 +5892,7 @@ class RecordController:
         ood_sign_pct_max: Optional[float] = None,
         ood_max_prob_min: Optional[float] = None,
         ood_entropy_ratio_max: Optional[float] = None,
+        preprocess_frame_side: Optional[int] = None,
         source: str = "",
     ) -> Dict[str, Any]:
         """Read a whole road sign: locate, split, one inference per glyph.
@@ -5996,6 +6001,18 @@ class RecordController:
 
         src_img = Image.open(_bytes_io(png)).convert("L")
         gray = np.asarray(src_img, dtype=np.uint8)
+        # Capture-side independence: a 160x160 (or larger) square device
+        # frame is box-averaged down to the preprocessing side with the
+        # SAME integer function the MCU uses (FrameResizeBoxAverageGray),
+        # before any ROI/threshold stage.  96x96 and non-square uploads are
+        # left alone.
+        if (
+            preprocess_frame_side is not None
+            and gray.ndim == 2
+            and gray.shape[0] == gray.shape[1]
+            and int(gray.shape[0]) > int(preprocess_frame_side)
+        ):
+            gray = _resize_square_box_average_u8(gray, int(preprocess_frame_side))
         full_h, full_w = gray.shape[:2]
 
         # ── Stage 1+2: the SAME call the device makes ─────────────────────

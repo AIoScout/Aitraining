@@ -370,7 +370,9 @@ def test_host_preview_uses_the_same_slicing_as_the_device():
     feed `(int)pixel - 128` int8 tensors to the model."""
     frame160 = _edge_plate_frame()
     small = rc._resize_square_box_average_u8(frame160, 96)
-    png = _png(small)
+    # Feed the NATIVE 160 frame; the preview must perform the same 160->96
+    # box average the device does.
+    png = _png(frame160)
     cases = [
         (0, 100, None),
         (0, 121, 120),
@@ -404,6 +406,7 @@ def test_host_preview_uses_the_same_slicing_as_the_device():
                 bg_dark_thresh=bg_dark,
                 bg_lum_thresh=bg_lum,
                 ood_max_prob_min=0.40,
+                preprocess_frame_side=96,
             )
 
         reading = op.preprocess_sign_sequence(
