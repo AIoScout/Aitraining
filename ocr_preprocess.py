@@ -909,10 +909,78 @@ def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
 
 
 def _round_half_up(num: int, den: int) -> int:
-    """Integer round-half-up division for positive and negative `num`."""
-    if num >= 0:
-        return (2 * num + den) // (2 * den)
-    return -((-2 * num + den) // (2 * den))
+    """Integer round-half-up division on the real line: floor(num/den + 0.5).
+
+    Python's floor division makes the one expression correct for negative
+    numerators too.  The old negative branch rounded half AWAY FROM ZERO; at
+    exactly -0.5 that shifted a symmetrically pasted glyph one pixel LEFT,
+    leaving a narrow '1' at x=11..13 instead of 12..14.  sign_glyph.c and
+    ocr_glyph.c mirror this exact expression.
+    """
+    return (2 * num + den) // (2 * den)
+
+
+def strip_border_specks(ink: np.ndarray) -> np.ndarray:
+    """Drop small disconnected specks touching the crop boundary.
+
+    A Manual ROI drawn around one glyph can clip a neighbouring character's
+    foot into a corner.  If that speck survives, it stretches the ink bbox
+    and shifts the real stroke: a centred '1' ends up at the right edge of
+    the 28x28 canvas, where it reads as 'A'.
+
+    Keep the dominant component and any other component that is
+      * large (more than 20 % of the dominant area), or
+      * not touching the crop boundary, or
+      * overlapping the dominant bbox in BOTH axes
+        (a detached fragment of a broken '1' shares the stem's columns).
+    Everything else — the border-corner stray bar — is removed.
+
+    Mirrored bit-for-bit by `strip_border_specks_c()` in sign_glyph.c.
+    """
+    arr = np.asarray(ink, dtype=bool)
+    if arr.ndim != 2 or arr.size == 0 or not bool(arr.any()):
+        return arr
+    cv2 = _cv2_module()
+    if cv2 is None:
+        return arr
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    try:
+        n, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            arr.astype(np.uint8), 8
+        )
+    except Exception:
+        return arr
+    if n <= 2:
+        return arr  # background + at most one component
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    dominant = 1 + int(np.argmax(areas))
+    dx = int(stats[dominant, cv2.CC_STAT_LEFT])
+    dy = int(stats[dominant, cv2.CC_STAT_TOP])
+    dw = int(stats[dominant, cv2.CC_STAT_WIDTH])
+    dh = int(stats[dominant, cv2.CC_STAT_HEIGHT])
+    da = int(areas[dominant - 1])
+    keep = labels == dominant
+    for i in range(1, n):
+        if i == dominant:
+            continue
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        cw = int(stats[i, cv2.CC_STAT_WIDTH])
+        ch = int(stats[i, cv2.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area * 100 > 20 * da:
+            keep |= labels == i
+            continue
+        touches = (x == 0 or y == 0 or x + cw == w or y + ch == h)
+        if not touches:
+            keep |= labels == i
+            continue
+        x_overlap = not (x + cw <= dx or x >= dx + dw)
+        y_overlap = not (y + ch <= dy or y >= dy + dh)
+        if x_overlap and y_overlap:
+            keep |= labels == i
+        # else: border-corner speck, disconnected from the glyph columns
+    return keep
 
 
 def preprocess_glyph(
@@ -924,6 +992,7 @@ def preprocess_glyph(
     thresh: Optional[int] = None,
     convention: str = NORM_STRETCH,
     dark_thr: int = 0,
+    strip_specks: bool = False,
 ) -> Dict[str, Any]:
     """Full glyph transform.  Returns a dict (never raises on bad input).
 
@@ -990,6 +1059,18 @@ def preprocess_glyph(
         # stays bit-identical to that port.
         if dark_thr > 0:
             ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+        if strip_specks:
+            # A Manual ROI can clip a neighbouring glyph's foot into a
+            # corner; keeping it stretches the bbox and shifts the real
+            # stroke (the '1' -> 'A' failure).  Remove the speck from the
+            # mask AND whiten it in the grayscale crop so it cannot bias
+            # the intensity centring either.
+            before = ink
+            ink = strip_border_specks(ink)
+            removed = before & ~ink
+            if bool(removed.any()):
+                gray = gray.copy()
+                gray[removed] = np.uint8(255 if polarity == INK_DARK else 0)
         out["ink"] = ink
 
         if not bool(ink.any()):
@@ -1067,6 +1148,7 @@ def preprocess_glyph_capture(src: np.ndarray, out_size: int = GLYPH_SIZE,
     return preprocess_glyph(
         src, out_size=out_size, polarity=polarity,
         apply_segmentation=True, convention=convention,
+        strip_specks=True,
     )
 
 
@@ -1891,6 +1973,9 @@ def preprocess_sign_sequence(
                     convention=convention,
                     thresh=thresh,
                     dark_thr=dark_thr,
+                    # A slot crop can carry a corner of the neighbouring
+                    # glyph; strip it before the bbox/centring.
+                    strip_specks=True,
                 )
             glyph = np.asarray(res["glyph"], dtype=np.uint8)
             out["glyphs"][idx] = glyph

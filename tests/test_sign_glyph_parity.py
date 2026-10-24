@@ -234,6 +234,14 @@ def _cases():
             dark=int(rng.choice([0, 0, 40])), conv=int(rng.integers(0, 2)))
     add(3, "single_flat", np.full((20, 20), 200, np.uint8))
     add(3, "single_blocks", base)
+    # Manual ROI '1' with a clipped neighbour foot in the bottom-left corner:
+    # the small boundary-touching, x-disjoint speck must be stripped before
+    # the bbox/centring on BOTH sides.
+    speck = np.full((96, 96), 230, np.uint8)
+    speck[20:80, 44:48] = 20      # vertical '1' stroke
+    speck[92:96, 0:10] = 20       # stray foot clipping the crop corner
+    add(3, "single_border_speck", speck, thresh=100, conv=1)
+    add(3, "single_border_speck_noseg", speck, thresh=100, conv=1, seg=0)
 
     for i in range(SWEEP):
         w = int(rng.integers(5, 100))
@@ -370,7 +378,10 @@ def _run_corpus():
                     thresh=(None if c["thresh"] < 0 else c["thresh"]),
                     convention=(ocr.NORM_CANON if c["conv"]
                                 else ocr.NORM_STRETCH),
-                    dark_thr=c["dark"])
+                    dark_thr=c["dark"],
+                    # sign_glyph.c always strips border specks on this
+                    # single-glyph path; match it here.
+                    strip_specks=True)
                 head, _, errs = _check_info(name, tmp, want)
                 if c["seg"] and int(head["nb"]) != len(want["boxes"]):
                     errs.append(f"nb {head['nb']} != {len(want['boxes'])}")

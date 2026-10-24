@@ -101,6 +101,7 @@ from image_preprocess import (
 from ocr_preprocess import (
     GLYPH_SIZE,
     INK_DARK,
+    INK_BRIGHT,
     NORM_CANON,
     NORM_STRETCH,
     SIGN_SEQUENCE_PAD,
@@ -110,6 +111,9 @@ from ocr_preprocess import (
     preprocess_sign_sequence,
     normalize_sign_sequence,
     normalize_sign_sequences,
+    segment_glyph_boxes,
+    normalise_glyph,
+    _narrow_stroke_radius,
 )
 
 # The sign-OCR preview's two answers, in one place: the SPA renders
@@ -1666,6 +1670,10 @@ class RecordController:
             filename = str(payload.get("filename") or "").strip()
             class_config = payload.get("class_config")
             sample_config = payload.get("sample_config")
+            sign_sequences = payload.get("sign_sequences")
+            if sign_sequences is None and payload.get("sign_sequence") is not None:
+                sign_sequences = payload.get("sign_sequence")
+            reading_order = payload.get("reading_order") or payload.get("reading")
             if not session_id or not class_name or not filename:
                 _send_json(req, {"ok": "0", "error": "missing params"}, status=400, cors=True)
                 return
@@ -1676,6 +1684,8 @@ class RecordController:
                     filename=filename,
                     class_config=class_config,
                     sample_config=sample_config,
+                    sign_sequences=sign_sequences,
+                    reading_order=reading_order,
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -4532,6 +4542,7 @@ class RecordController:
                 fast_mode=False,
                 out_size=int(img_size),
                 project_type=project_type,
+                dataset_root=dataset_root,
             )
             dst_dir = self._processed_cache_dir(dataset_root) / sanitize_class_name(class_name)
             dst_dir.mkdir(parents=True, exist_ok=True)
@@ -4539,7 +4550,7 @@ class RecordController:
         except Exception:
             pass
 
-    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96, project_type: str = PROJECT_TYPE_IMAGE):
+    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96, project_type: str = PROJECT_TYPE_IMAGE, dataset_root: Optional[Path] = None, sign_sequences: Any = None, reading_order: Any = None):
         class_cfg = class_config if isinstance(class_config, dict) else {}
         src_cfg = sample_config if isinstance(sample_config, dict) else {}
         # Project dispatch — ONE key, at the ONE place every sample enters the
@@ -4548,7 +4559,14 @@ class RecordController:
         # lifecycle (cache dirs, class dirs, naming, previews) and only swaps
         # the pixel transform.
         if is_glyph_project(project_type):
-            return self._preprocess_image_png_ocr(png, class_config, sample_config, return_crop, out_size)
+            return self._preprocess_image_png_ocr(
+                png, class_config, sample_config, return_crop, out_size,
+                label_name=label_name,
+                project_type=project_type,
+                dataset_root=dataset_root,
+                sign_sequences=sign_sequences,
+                reading_order=reading_order,
+            )
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
         mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
         # The Edit worktable sends per-sample slider values in `sample_config`;
@@ -4608,6 +4626,11 @@ class RecordController:
         sample_config: Any = None,
         return_crop: bool = False,
         out_size: int = GLYPH_SIZE,
+        label_name: str = "",
+        project_type: str = PROJECT_TYPE_OCR,
+        dataset_root: Optional[Path] = None,
+        sign_sequences: Any = None,
+        reading_order: Any = None,
     ):
         """OCR project sample transform: the glyph pipeline in ocr_preprocess.
 
@@ -4695,6 +4718,118 @@ class RecordController:
         # inclusive lower edge of the user's window.
         floor = (0 if bg_dark <= 0 else min(255, bg_dark + 1)) if thresholds_adjusted else 0
 
+        # ── sign_ocr Auto: extract THIS class's slot from a whole sign ──
+        # A Device capture shows the whole A 1 2 board.  Feeding that frame
+        # to a single-glyph class card would train A, 1 and 2 on the same
+        # multi-character image.  In Auto mode on a sign project, split the
+        # sign and keep the slot whose character is this class card's label.
+        # A sample that is already one glyph has one raw column run, so this
+        # branch deliberately does not fire for it.
+        is_sign = str(project_type).strip().lower() == PROJECT_TYPE_SIGN_OCR
+        if is_sign and mode != PREPROCESS_MODE_MANUAL_ROI and label_name:
+            seqs = normalize_sign_sequences(sign_sequences)
+            order_src = reading_order
+            if not seqs or order_src is None:
+                saved_cfg: Dict[str, Any] = {}
+                if dataset_root is not None:
+                    try:
+                        saved_cfg = self._project_train_cfg(Path(dataset_root))
+                    except Exception:
+                        saved_cfg = {}
+                if not seqs:
+                    seqs = normalize_sign_sequences(
+                        saved_cfg.get("sign_sequences")
+                        or saved_cfg.get("sign_sequence")
+                    )
+                if order_src is None:
+                    order_src = saved_cfg.get("reading_order")
+            order = str(order_src or "ltr").strip().lower()
+            if order not in ("ltr", "rtl"):
+                order = "ltr"
+            target = str(label_name).strip().upper()[:1]
+            if seqs and target:
+                reading = preprocess_sign_sequence(
+                    gray,
+                    sign_sequence=seqs[0],
+                    reading_order=order,
+                    out_size=int(out_size),
+                    polarity=polarity,
+                    apply_segmentation=True,
+                    convention=convention,
+                    thresh=pinned,
+                    dark_thr=floor,
+                    # Isolate the character band first: a whole board
+                    # capture includes the plastic frame / desk clutter,
+                    # which would otherwise turn the projection into one
+                    # wide run and prevent this branch from firing.
+                    find_roi=True,
+                )
+                slots = list(reading.get("slots") or [])
+                raw_runs = (
+                    len(segment_glyph_boxes(reading.get("ink")))
+                    if reading.get("ink") is not None else 0
+                )
+                nonempty = sum(
+                    1 for s in slots if s.get("ok") and not s.get("empty")
+                )
+                if (
+                    reading.get("ok")
+                    and str(reading.get("roi_method") or "") == "interior_ink"
+                    and raw_runs >= 2
+                    and len(slots) == len(normalize_sign_sequence(seqs[0]))
+                    and nonempty >= 2
+                ):
+                    candidates: List[int] = []
+                    for plate in seqs:
+                        for s_idx, ch in enumerate(plate):
+                            if ch == target and s_idx < len(slots) and s_idx not in candidates:
+                                candidates.append(s_idx)
+                    chosen = next(
+                        (
+                            idx for idx in candidates
+                            if slots[idx].get("ok") and not slots[idx].get("empty")
+                        ),
+                        None,
+                    )
+                    if chosen is not None:
+                        slot = slots[chosen]
+                        glyph = np.asarray(slot.get("glyph"), dtype=np.uint8)
+                        glyph_png = _to_png_bytes(Image.fromarray(glyph, mode="L"))
+                        if not return_crop:
+                            return glyph_png
+                        display = np.asarray(slot.get("display", glyph), dtype=np.uint8)
+                        display_png = _to_png_bytes(Image.fromarray(display, mode="L"))
+                        slot_box = slot.get("box")
+                        crop_norm = [0.0, 0.0, 1.0, 1.0]
+                        cp_png = glyph_png
+                        if slot_box is not None:
+                            bx1, by1, bx2, by2 = (int(v) for v in slot_box)
+                            bx1 = max(0, min(full_w - 1, bx1))
+                            by1 = max(0, min(full_h - 1, by1))
+                            bx2 = max(bx1 + 1, min(full_w, bx2))
+                            by2 = max(by1 + 1, min(full_h, by2))
+                            crop = np.ascontiguousarray(gray[by1:by2, bx1:bx2])
+                            if crop.size:
+                                cp_png = _to_png_bytes(Image.fromarray(crop, mode="L"))
+                            if full_w and full_h:
+                                crop_norm = [
+                                    bx1 / full_w, by1 / full_h,
+                                    bx2 / full_w, by2 / full_h,
+                                ]
+                        ink_box = slot.get("ink_box") or slot_box
+                        return {
+                            "png": glyph_png,
+                            "crop": crop_norm,
+                            "processed_png": display_png,
+                            "display_png": display_png,
+                            "crop_png": cp_png,
+                            "auto_roi": (
+                                [int(v) for v in ink_box]
+                                if ink_box is not None else None
+                            ),
+                            "sign_pct": float(reading.get("sign_pct") or 0.0),
+                        }
+
         result = preprocess_glyph(
             gray,
             out_size=int(out_size),
@@ -4703,9 +4838,34 @@ class RecordController:
             convention=convention,
             thresh=pinned,
             dark_thr=floor,
+            strip_specks=True,
         )
         glyph = np.asarray(result["glyph"], dtype=np.uint8)
         png_bytes = _to_png_bytes(Image.fromarray(glyph, mode="L"))
+
+        # Display variant of the SAME canonical glyph: the cleaned ink mask
+        # normalised exactly like the model crop (same convention, same
+        # narrow-stroke widening) and inverted to black-on-white.  This is
+        # what the Edit modal shows, so the user sees the 28x28 shape the
+        # model trains on instead of a larger pre-centring crop.
+        display_png = png_bytes
+        _box = result.get("box")
+        _ink = result.get("ink")
+        if _box is not None and _ink is not None:
+            ix1, iy1, ix2, iy2 = (int(v) for v in _box)
+            ink_bool = np.asarray(_ink, dtype=bool)[iy1:iy2, ix1:ix2]
+            if ink_bool.size:
+                radius = _narrow_stroke_radius(
+                    ink_bool, int(ix2) - int(ix1), int(iy2) - int(iy1),
+                    int(out_size), convention,
+                )
+                mask = (ink_bool.astype(np.uint8) * 255)
+                display_mask = normalise_glyph(
+                    mask, out_size=int(out_size), convention=convention,
+                    narrow_radius=int(radius), polarity=INK_BRIGHT,
+                )
+                display = (255 - display_mask).astype(np.uint8)
+                display_png = _to_png_bytes(Image.fromarray(display, mode="L"))
 
         if not return_crop:
             return png_bytes
@@ -4759,7 +4919,8 @@ class RecordController:
                 (ay2 + oy) / full_h if full_h else 1.0,
             ]
             return {"png": png_bytes, "crop": crop_norm,
-                    "processed_png": mp_png, "crop_png": cp_png,
+                    "processed_png": mp_png, "display_png": display_png,
+                    "crop_png": cp_png,
                     "auto_roi": [ax1, ay1, ax2, ay2],
                     "sign_pct": float(auto_roi.get("sign_pct") or 0.0)}
         # Fallback: the segmented glyph box (or the whole manual ROI).
@@ -4792,7 +4953,8 @@ class RecordController:
                     (x2 + ox) / full_w,
                     (y2 + oy) / full_h,
                 ]
-        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png,
+        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png,
+                "display_png": display_png, "crop_png": cp_png,
                 "auto_roi": None, "sign_pct": 0.0}
 
     def _rebuild_processed_cache(
@@ -4834,6 +4996,7 @@ class RecordController:
                         sample_config=sample_cfg,
                         out_size=int(out_size),
                         project_type=project_type,
+                        dataset_root=dataset_root,
                     )
                     (dst_dir / f"{src.stem}.png").write_bytes(out_png)
                     processed_count += 1
@@ -4866,6 +5029,8 @@ class RecordController:
         filename: str,
         class_config: Any,
         sample_config: Any = None,
+        sign_sequences: Any = None,
+        reading_order: Any = None,
     ) -> Dict[str, Any]:
         with self._lock:
             cfg = self._configs.get(session_id)
@@ -4883,13 +5048,25 @@ class RecordController:
             return_crop=True,
             out_size=int(cfg.img_size),
             project_type=str(cfg.project_type),
+            dataset_root=cfg.dataset_root,
+            sign_sequences=sign_sequences,
+            reading_order=reading_order,
+        )
+        # The Edit modal's Processed Preview must be the EXACT canonical
+        # 28x28 glyph the model trains on (corner specks already stripped),
+        # not a larger pre-centring crop.  Image projects keep their
+        # established processed view.
+        processed_bytes = (
+            result.get("display_png") or result["png"]
+            if is_glyph_project(str(cfg.project_type))
+            else result.get("processed_png", result["png"])
         )
         return {
             "image_b64": base64.b64encode(result["png"]).decode("ascii"),
             "crop": result.get("crop"),
             "auto_roi": result.get("auto_roi"),
             "sign_pct": float(result.get("sign_pct") or 0.0),
-            "processed_image_b64": base64.b64encode(result.get("processed_png", result["png"])).decode("ascii"),
+            "processed_image_b64": base64.b64encode(processed_bytes).decode("ascii"),
         }
 
     def _project_state_payload(self, dataset_root: Path, project_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

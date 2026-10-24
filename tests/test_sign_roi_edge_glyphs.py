@@ -37,7 +37,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 import ocr_preprocess as op  # noqa: E402
 import record_controller as rc  # noqa: E402
-from test_emnist_seeder import _workspace  # noqa: E402
+from test_emnist_seeder import SIGN_A12, _workspace  # noqa: E402
 
 
 def _edge_plate_frame() -> np.ndarray:
@@ -281,6 +281,87 @@ def test_ood_max_prob_is_the_single_floor_and_banner_value():
     assert res["match"] is True, res
     assert res["ood"] is False, res.get("ood_reason")
     assert [s["match"] for s in res["slots"]] == [True, True, True], res["slots"]
+
+
+def test_manual_roi_strips_corner_speck_and_centers_the_one():
+    """A Manual ROI of '1' with a clipped foot at the bottom-left corner must
+    drop the speck and centre the stroke at x=13-14 on the 28x28 canvas."""
+    frame = np.full((96, 96), 230, np.uint8)
+    frame[20:70, 30:36] = 20       # vertical '1' stroke
+    frame[92:96, 0:10] = 20        # stray foot touching the crop corner
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, _dataset = _workspace(Path(td))
+        res = ctrl._preprocess_image_png_ocr(
+            _png(frame),
+            {"mode": "manual_roi", "manual_roi": [0.0, 0.0, 0.8, 1.0]},
+            out_size=28,
+            label_name="1",
+            project_type="sign_ocr",
+            sign_sequences=["A12"],
+            return_crop=True,
+        )
+    # The Processed Preview shape: black ink on white, 28x28.
+    glyph = np.asarray(Image.open(BytesIO(res["display_png"])).convert("L"))
+    assert glyph.shape == (28, 28), glyph.shape
+    ink = glyph < 128
+    cols = np.where(ink.any(axis=0))[0]
+    assert cols.size, "the '1' stroke vanished"
+    # Centred, 3-4 px wide; the corner speck is gone.
+    assert 12 <= int(cols.min()) and int(cols.max()) <= 15, cols
+    assert 3 <= int(cols.max() - cols.min() + 1) <= 4, cols
+    assert not bool(ink[-4:, :5].any()), "corner speck survived"
+
+
+def test_sign_auto_extracts_the_class_slot_from_a_whole_sign():
+    """Auto mode in a sign_ocr class card must extract THIS class's slot,
+    not feed the whole A 1 2 board into a single-glyph class."""
+    frame = np.asarray(Image.open(SIGN_A12).convert("L"), dtype=np.uint8)
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, _dataset = _workspace(Path(td))
+        got = ctrl._preprocess_image_png_ocr(
+            _png(frame),
+            {"mode": "auto_by_label"},
+            out_size=28,
+            label_name="1",
+            project_type="sign_ocr",
+            sign_sequences=["A12"],
+            reading_order="ltr",
+        )
+    want = op.preprocess_sign_sequence(
+        frame, sign_sequence="A12", reading_order="ltr", out_size=28,
+        polarity=op.INK_DARK, apply_segmentation=True,
+        convention=op.NORM_CANON,
+    )["slots"][1]["glyph"]
+    assert got == rc._to_png_bytes(Image.fromarray(np.asarray(want, np.uint8), mode="L"))
+
+
+def test_edit_processed_preview_is_the_canonical_28x28_glyph():
+    """#classPreprocessModal's Processed Preview must be the exact 28x28
+    canonical glyph (speck stripped), not a larger pre-centring crop."""
+    frame = np.full((96, 96), 230, np.uint8)
+    frame[20:70, 30:36] = 20
+    frame[92:96, 0:10] = 20
+    cfg = {"mode": "manual_roi", "manual_roi": [0.0, 0.0, 0.8, 1.0]}
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        class_dir = dataset / "1"
+        class_dir.mkdir(parents=True, exist_ok=True)
+        sample = class_dir / "sample.png"
+        sample.write_bytes(_png(frame))
+        preview = ctrl._preprocess_preview(
+            "s", "1", sample.name, cfg,
+        )
+        direct = ctrl._preprocess_image_png_ocr(
+            sample.read_bytes(), cfg, out_size=28,
+            label_name="1", project_type="sign_ocr",
+            sign_sequences=["A12"], return_crop=True,
+        )
+    shown = base64.b64decode(preview["processed_image_b64"])
+    assert shown == direct["display_png"], (
+        "Processed Preview is not the canonical 28x28 display glyph"
+    )
+    arr = np.asarray(Image.open(BytesIO(shown)).convert("L"))
+    assert arr.shape == (28, 28), arr.shape
 
 
 if __name__ == "__main__":
