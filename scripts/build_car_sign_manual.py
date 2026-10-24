@@ -12,13 +12,15 @@ What this script does
    ``getBoundingClientRect()`` and captures 1440x900 @2x screenshots.
    The Sample Worktable capture is polarity-guarded: the build fails if the
    Processed Preview is not black ink on pure white (255).
-4. Assembles a STANDALONE, software-only student manual with python-docx:
-   Title / A) Objective / Briefing, then sections 2-6 walking the
-   TFLiteTraining app workflow (open project -> four areas -> target sign &
-   samples -> Edit-page preprocessing -> training -> preview & export),
-   following the bullet style and table formats of the reference manual's
-   Task 2.  No hardware walkthrough, no Arduino IDE setup, no MCU
-   flashing — the manual is ONLY the app workflow.
+4. Assembles a STANDALONE student manual with python-docx:
+   Title / A) Objective / Briefing, then sections 1-5 walking the
+   TFLiteTraining app workflow (open project -> four areas -> target
+   license & samples -> Edit-page preprocessing -> training -> preview &
+   export), following the bullet style and table formats of the reference
+   manual's Task 2.  Section 5 ends with the physical car/checkpoint
+   placement (reserved photo placeholder boxes) and the on-car Serial
+   Monitor verification.  No hardware kit walkthrough (Task 0), no
+   Arduino IDE setup steps (Task 1), no MCU flashing guide (Task 3).
 5. Writes the .docx to the repository root and to the OneDrive Student_Helper
    folder.  The reference "TF Lite Training Manual.docx" is never opened,
    read or modified.
@@ -1060,6 +1062,55 @@ def _callout_box(doc, title: str, body: Sequence[str], icon: str = "⚠") -> Non
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
 
 
+def _reserved_image_box(doc, label: str) -> None:
+    """A clearly labeled box the author drops a photo into, in Word.
+
+    The manual ships with reserved spaces for hardware/setup photos that
+    only exist on the instructor's camera; the box stays in the document
+    as a visible drop target until the photo replaces it.
+    """
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cell = table.cell(0, 0)
+    _set_cell_shading(cell, "F8FAFC")
+    _set_cell_borders(cell, "94A3B8", 14)
+    p = cell.paragraphs[0]
+    p.clear()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(2)
+    r = p.add_run(f"📷 {label}")
+    r.bold = True
+    r.font.name = BODY_FONT
+    r.font.size = Pt(10.5)
+    r.font.color.rgb = RGBColor(0x33, 0x41, 0x55)
+    p2 = cell.add_paragraph()
+    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p2.paragraph_format.space_after = Pt(4)
+    r2 = p2.add_run("(Reserved space — drop the photo here)")
+    r2.italic = True
+    r2.font.name = BODY_FONT
+    r2.font.size = Pt(9)
+    r2.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def _code_line(doc, text: str) -> None:
+    """A shaded monospace line, used for the Serial Monitor example output."""
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cell = table.cell(0, 0)
+    _set_cell_shading(cell, "F1F5F9")
+    _set_cell_borders(cell, "CBD5E1", 10)
+    p = cell.paragraphs[0]
+    p.clear()
+    r = p.add_run(text)
+    r.font.name = "Consolas"
+    r.font.size = Pt(9)
+    r.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
 def _figure(doc, path: Path, caption: str, width_in: float = 6.5) -> None:
     # Keep the lead-in paragraph, the image and its caption on one page where
     # possible; an orphaned step heading above a page break reads poorly.
@@ -1260,8 +1311,8 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "If your license uses the same character twice (like A 1 A), the app automatically keeps just one A card with a “Slots 1 & 3” badge so you only need to collect samples for A once!")
     _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 3 — The Target Sign Bar: typing characters, the ◀ / ▶ swap buttons and the duplicate-character badge.")
     _para(doc, "Want your AI “gatekeeper” to accept more than one license plate?", bold=True)
-    _bullet(doc, "Click the 🪪 License List button next to ⚙ Settings in the top bar and add several allowed plates — for example both A 1 2 and B 1 8!", bold_prefix="🪪 License List")
-    _bullet(doc, "The app automatically combines the unique letters/numbers of all your plates into the Sample Area cards, so a repeated character like 1 is only collected once.")
+    _bullet(doc, "Besides typing a single 3-character plate (A ▸ 1 ▸ 2), you can click the 🪪 License List button next to ⚙ Settings in the top bar and add one or more allowed license plates — just like a parking-lot gatekeeper that remembers multiple authorized cars (for example A 1 2 and B 1 8)!", bold_prefix="🪪 License List")
+    _bullet(doc, "Shared characters are automatically merged: a character like 1 that appears on several plates becomes ONE Sample Area card, so you only collect samples for each unique character once!")
     _bullet(doc, "In Preview, the app shows 🟢 YES — MATCH whenever ANY plate on your allowed list is seen!")
     _para(doc, "Collecting Samples for Each Character Card:", bold=True)
     _callout_box(
@@ -1372,23 +1423,64 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "The app slices the detected license horizontally into 3 character slots in your chosen reading direction.")
     _bullet(doc, "Each slot card shows WANT <character>, the character read by the AI, the 28×28 image fed to the model, and the confidence percentage (%).")
     _bullet(doc, "When all 3 slots match your target characters with at least 60% confidence, the banner turns green: 🟢 YES — MATCH. If any slot reads a different character, is below 60%, or is blank (_background), the banner turns red: 🔴 NO — NOT MATCH and explains which slot failed.")
+    _para(doc, "Positioning the Smart Car and Checkpoint on the Map:", bold=True)
+    _para(
+        doc,
+        "Before testing with the real car camera, place the car and the checkpoint stand "
+        "exactly as shown below — the right placement lets the RFID Reader read the tag and "
+        "gives the camera the perfect view of the license plate.",
+    )
+    _bullet(doc, "First, find the green RFID Reader mounted underneath the smart car chassis (between the two wheels). Locate it first, because its position is used to align the car on the map edge!")
+    _reserved_image_box(doc, "[Reserved Image 1 — Photo of Smart Car Underside Showing Green RFID Reader]")
+    _para(
+        doc,
+        "Place the smart car on the starting edge of the white map with the front IR "
+        "line-tracking sensors over the black line. The vertical projection (shadow) of the "
+        "REAR edge (back end) of the RFID Reader should sit right along the outer edge of the "
+        "white map. At this exact position, the RFID Reader is just inside the map edge and "
+        "can reliably detect the tag, while the camera gets the ideal distance to view the "
+        "checkpoint sign.",
+    )
+    _reserved_image_box(doc, "[Reserved Image 2 — Photo of Smart Car Aligned at the Edge of the Map]")
+    _para(
+        doc,
+        "Place the checkpoint stand so its square clear acrylic base is rotated at a 45° "
+        "angle, with the corner tip of the acrylic base just touching (tangent to) the "
+        "straight black line. This guarantees the camera faces the 3-character license plate "
+        "at the optimal angle while keeping the track clear.",
+    )
+    _reserved_image_box(doc, "[Reserved Image 3 — Photo of Checkpoint Acrylic Base Tangent to the Black Line at 45°]")
+
     _para(doc, "Exporting the Model & Saving Your Project:", bold=True)
     _bullet(doc, "Click Export Model at the top-right of the Preview card to export the C/C++ model files (tm_model_data.cpp/.h, model_resolver.h, model_settings.cpp/.h, tm.tflite, labels.txt).")
     _bullet(doc, "The export packs in everything the car needs: the trained weights, the img_size scaling parameters, the _background / OOD settings, and the full list of your allowed license plates — all into model_settings.h. When the car sees a plate, the ESP32-P4 checks it against the list and tells the ESP32-S3 which specific plate number matched!")
     _bullet(doc, "Click File ▾ → Save (or Save as) at the top-left menu to save your project as a .tmproj file.")
     _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model on the Preview card and File ▾ → Save / Save as.")
+    _para(doc, "On-Car Verification (Arduino Serial Monitor):", bold=True)
+    _para(
+        doc,
+        "After exporting the model into the TFLite_Sign/ folder and uploading TFLite_Sign.ino "
+        "to the ESP32-P4, open the Arduino IDE Serial Monitor (921600 baud). When the car "
+        "reads a license plate, you will see an output line like this:",
+    )
+    _code_line(doc, "SIGN: MATCH (YES) plate=A12 [0] 'A'->A 0.95 [1] '1'->1 0.86 [2] '2'->2 0.78")
+    _bullet(doc, "Each slot [0], [1], [2] prints the character the AI predicted and its confidence score — for example [1] '1'->1 0.86 means slot 1 read the character '1' with 86% confidence.")
+    _bullet(doc, "The verdict MATCH (flags=0x02) tells the ESP32-S3 which authorized license plate matched (plate=A12), so the car can execute the corresponding action!")
+    _reserved_image_box(doc, "[Reserved Image 4 — Screenshot of Arduino IDE TFLite_Sign.ino Serial Monitor Output]")
     _para(
         doc,
         "That's it — you collected letters, trained an AI to read them, tested a whole license, "
-        "and exported your model. Well done!",
+        "exported your model and watched it recognize a plate on the car. Well done!",
         bold=True,
         color="1D4ED8",
     )
 
-    # Scope guard: this is the standalone software-only Car Sign manual.
-    # No hardware walkthrough (Task 0), no Arduino IDE setup (Task 1), no
-    # MCU flashing (Task 3) — a future edit that slips them back in fails
-    # the build instead of silently producing the wrong manual.
+    # Scope guard: this is the standalone Car License manual.  No hardware
+    # kit walkthrough (Task 0), no Arduino IDE setup steps (Task 1), no MCU
+    # flashing guide (Task 3) — a future edit that slips them back in fails
+    # the build instead of silently producing the wrong manual.  (The
+    # on-car placement and Serial Monitor verification at the end of
+    # Section 5 are part of the Car License workflow, not Task 0/1/3.)
     all_text = "\n".join(p.text for p in doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
@@ -1398,9 +1490,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
         "Task 0",
         "Task 1",
         "Task 3",
-        "Arduino",
         "esp32_mannual",
-        "Serial Monitor",
         "Signpost",
         "Battery Cabin",
         "Boot Button",
