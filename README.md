@@ -346,16 +346,19 @@ The output pane is the `.signmatch` banner:
   red = fail.  The `WANT` characters come from the closest configured plate
   when no plate is an exact match.
 - A red banner names the failing slot(s) and the reason (wrong glyph,
-  `_background`, no glyph, below the 0.40 match floor, or the exact OOD gate
-  that fired).  If `entropy_ratio` is the **only** gate that failed and the
-  slot's top class is the plate's target character at `prob >= min_prob`, the
-  slot is accepted: a correct but merely uncertain reading must not produce a
-  false NO.  Layer 1 (`sign_pct`) is **disarmed on the 3-slot path** — it is
-  reported as a diagnostic only; `max_prob` still rejects.
-- The match floor is runtime-adjustable on the device: the exported
-  `kSignMatchMinProb` (**0.40** default) is the boot value, and
-  `set ood spmin spmax mpmin ermax` sets it to `mpmin` (the host Preview
-  uses 0.40 unless the request supplies `match_min`).
+  `_background`, no glyph, below the OOD MAX PROB floor, or the exact OOD
+  gate that fired).  **OOD MAX PROB in Input Settings → Preview is the single
+  probability threshold** (default 0.40) — it is both the `max_prob` gate and
+  the per-slot match floor, and the banner shows it verbatim (`each at 25%
+  or better` for 0.25).  There is no separate hidden 0.40 floor; values
+  below 0.40 are honoured.  If `entropy_ratio` is the **only** gate that
+  failed and the slot's top class is the plate's target character at
+  `prob >= min_prob`, the slot is accepted.  Layer 1 (`sign_pct`) is
+  **disarmed on the 3-slot path** — it is a diagnostic only.
+- The OOD entropy default is **0.85**.  A stale browser cache of the old
+  0.60 / 0.70 defaults migrates once to 0.40 / 0.85; custom values are
+  preserved.  On the device, `set ood spmin spmax mpmin ermax` sets both the
+  OOD gate and the runtime match floor to `mpmin`.
 - Idle states: `◻ SET THE TARGET SIGN` and `◻ NO MODEL YET`.
 
 `Preview Image Input Source`, the four OOD controls (`sign_pct` min/max are
@@ -425,8 +428,9 @@ constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {
 };
 ```
 
-plus `kSignReadingOrder` (0 LTR / 1 RTL), `kSignMatchMinProb` (0.40 boot
-default; the firmware's `set ood ... <mpmin>` adjusts it at runtime), and the
+plus `kSignReadingOrder` (0 LTR / 1 RTL), `kSignMatchMinProb` (the SAME value
+as `kOodMaxProbMin`, default 0.40; the firmware's `set ood ... <mpmin>`
+adjusts both at runtime), and the
 rejection policy: `TM_SIGN_USE_BACKGROUND_OOD`, `kSignBackgroundReplacesOod`,
 and `kBackgroundClassIndex` (-1 when no `_background` class was trained).  The
 legacy `TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR` /

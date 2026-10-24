@@ -960,6 +960,80 @@ def assert_sync_ocr_carries_autofill_state(page):
     )
 
 
+def assert_ood_max_prob_drives_the_banner_floor(page):
+    """OOD MAX PROB=0.25 renders as 'each at 25% or better', not a 40% floor."""
+    text = page.evaluate(
+        """() => {
+          if (!document.getElementById('previewOutput')) {
+            const host = document.createElement('div');
+            host.id = 'previewOutput';
+            document.body.appendChild(host);
+          }
+          renderSignMatch({
+            sign_ocr: true,
+            sign_sequence: ['A', '1', '2'],
+            match: false,
+            match_text: '🔴 NO — NOT MATCH',
+            match_min_prob: 0.25,
+            slots: [
+              {index: 0, char: 'A', label: 'A', prob: 0.28, match: false,
+               accepted: true, empty: false},
+              {index: 1, char: '1', label: '1', prob: 0.28, match: false,
+               accepted: true, empty: false},
+              {index: 2, char: '2', label: '2', prob: 0.28, match: false,
+               accepted: true, empty: false},
+            ],
+            slot_images_b64: [],
+          });
+          const hint = document.querySelector('#previewOutput .signmatch-hint');
+          return hint ? hint.textContent : '';
+        }"""
+    )
+    assert "(each at 25% or better)" in text, text
+
+
+def assert_preview_storage_v1_migrates_ood_defaults(page):
+    """A v1 localStorage cache of 0.60/0.70 migrates once to 0.40/0.85;
+    custom values (0.25/0.30) survive and a deliberate v2 0.60/0.70 is kept."""
+    got = page.evaluate(
+        """() => {
+          const key = `tm-preview-${STATE.session}`;
+          const write = (obj) => localStorage.setItem(key, JSON.stringify(obj));
+          const read = () => JSON.parse(localStorage.getItem(key) || '{}');
+          const snap = () => ({
+            max: previewOodMaxProbMin,
+            ent: previewOodEntropyRatioMax,
+            stored: read(),
+          });
+
+          write({version: 1, oodMaxProbMin: 0.60, oodEntropyRatioMax: 0.70});
+          restorePreviewState();
+          const migrated = snap();
+
+          write({version: 1, oodMaxProbMin: 0.25, oodEntropyRatioMax: 0.30});
+          restorePreviewState();
+          const custom = snap();
+
+          write({version: 2, oodMaxProbMin: 0.60, oodEntropyRatioMax: 0.70});
+          restorePreviewState();
+          const intentional = snap();
+
+          previewOodMaxProbMin = 0.40;
+          previewOodEntropyRatioMax = 0.85;
+          persistPreviewState();
+          return {migrated, custom, intentional};
+        }"""
+    )
+    assert abs(got["migrated"]["max"] - 0.40) < 1e-9, got
+    assert abs(got["migrated"]["ent"] - 0.85) < 1e-9, got
+    assert got["migrated"]["stored"].get("version") == 2, got
+    assert abs(got["custom"]["max"] - 0.25) < 1e-9, got
+    assert abs(got["custom"]["ent"] - 0.30) < 1e-9, got
+    assert got["custom"]["stored"].get("version") == 2, got
+    assert abs(got["intentional"]["max"] - 0.60) < 1e-9, got
+    assert abs(got["intentional"]["ent"] - 0.70) < 1e-9, got
+
+
 def main() -> int:
     base_cfg = boot_payload()["train_cfg"]
     html = build_spa_html(boot_payload())
@@ -1051,6 +1125,8 @@ def main() -> int:
             run("auto-seed fills new empty class", assert_auto_seed_fills_a_new_empty_class, page)
             run("sync_ocr carries auto-fill state", assert_sync_ocr_carries_autofill_state, page)
             run("background/OOD toggle defaults OFF and syncs", assert_background_ood_toggle_defaults_off_and_syncs, page)
+            run("OOD MAX PROB drives the banner floor", assert_ood_max_prob_drives_the_banner_floor, page)
+            run("preview storage v1 OOD migration", assert_preview_storage_v1_migrates_ood_defaults, page)
             run("license list union/modal/save", assert_license_list_modal_union_and_save, page)
             run("multi-plate class badges", assert_multi_plate_class_badges, page)
 

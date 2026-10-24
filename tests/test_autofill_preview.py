@@ -352,6 +352,33 @@ def test_preview_upload_json_and_dispatch():
             ctrl.stop()
 
 
+def test_preview_ood_endpoint_unifies_the_probability_threshold():
+    """OOD MAX PROB=0.25 is persisted as the one and only match floor."""
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        try:
+            res = _post_json(ctrl, "/preview/ood", {
+                "session": "s",
+                "ood_sign_pct_min": 0.2,
+                "ood_sign_pct_max": 60,
+                "ood_max_prob_min": 0.25,
+                "ood_entropy_ratio_max": 0.80,
+            })
+            assert res.get("ok") == "1", res
+            for key in ("ood_max_prob_min", "sign_match_min_prob", "match_min_prob"):
+                assert abs(float(res[key]) - 0.25) < 1e-9, (key, res)
+            saved = json.loads(
+                (dataset.parent / "runs" / "latest" / "train_config.json")
+                .read_text(encoding="utf-8")
+            )
+            assert abs(float(saved["ood_max_prob_min"]) - 0.25) < 1e-9, saved
+            assert abs(float(saved["sign_match_min_prob"]) - 0.25) < 1e-9, saved
+            assert abs(float(saved["match_min_prob"]) - 0.25) < 1e-9, saved
+            assert abs(float(saved["ood_entropy_ratio_max"]) - 0.80) < 1e-9, saved
+        finally:
+            ctrl.stop()
+
+
 # ── runner ────────────────────────────────────────────────────────────────
 def main() -> int:
     tests = [
@@ -360,6 +387,7 @@ def main() -> int:
         ("train/config save backfills", test_train_config_save_backfills),
         ("preview upload raw bytes + reuse", test_preview_upload_raw_bytes_and_reuse),
         ("preview upload JSON + dispatch", test_preview_upload_json_and_dispatch),
+        ("preview/ood unifies the probability threshold", test_preview_ood_endpoint_unifies_the_probability_threshold),
     ]
     results = []
     for name, fn in tests:

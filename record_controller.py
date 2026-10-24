@@ -1490,6 +1490,7 @@ class RecordController:
             "/samples/seed_emnist",
             "/classes/seed_emnist",
             "/preprocess/preview",
+            "/preview/ood",
             "/preview/predict_upload",
             "/preview/upload",
             "/preview/synthesize_sign",
@@ -1744,6 +1745,72 @@ class RecordController:
                 return
             _send_json(req, {"ok": "1"}, cors=True)
             return
+        if path == "/preview/ood":
+            # The Input Settings preview group pushes its four OOD values
+            # here as soon as the user saves them.  OOD MAX PROB is the
+            # SINGLE probability threshold: persist it as both the OOD gate
+            # and the per-slot sign_match_min_prob so an export cannot
+            # resurrect a separate hidden floor.
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            with self._lock:
+                sess_cfg = self._configs.get(session_id)
+            if sess_cfg is None:
+                _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
+                return
+
+            def _ood_num(default: float, *keys: str) -> float:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is None or str(raw).strip() == "":
+                        continue
+                    try:
+                        return float(raw)
+                    except (TypeError, ValueError):
+                        continue
+                return default
+
+            def _clamp(v: float, lo: float, hi: float) -> float:
+                return max(lo, min(hi, float(v)))
+
+            spmin = _clamp(_ood_num(0.3, "ood_sign_pct_min", "ood_sign_min"), 0.0, 100.0)
+            spmax = _clamp(_ood_num(70.0, "ood_sign_pct_max", "ood_sign_max"), 0.0, 100.0)
+            if spmin > spmax:
+                spmin, spmax = spmax, spmin
+            max_prob = _clamp(
+                _ood_num(0.40, "ood_max_prob_min", "ood_max_prob",
+                         "sign_match_min_prob", "match_min_prob"),
+                0.0, 1.0,
+            )
+            entropy_max = _clamp(
+                _ood_num(0.85, "ood_entropy_ratio_max", "ood_entropy_max"),
+                0.0, 1.0,
+            )
+            try:
+                self._save_train_cfg(session_id, {
+                    "ood_sign_pct_min": spmin,
+                    "ood_sign_pct_max": spmax,
+                    "ood_max_prob_min": max_prob,
+                    "ood_entropy_ratio_max": entropy_max,
+                    # One threshold, stored under both names for old readers.
+                    "sign_match_min_prob": max_prob,
+                    "match_min_prob": max_prob,
+                })
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {
+                "ok": "1",
+                "ood_sign_pct_min": spmin,
+                "ood_sign_pct_max": spmax,
+                "ood_max_prob_min": max_prob,
+                "ood_entropy_ratio_max": entropy_max,
+                "sign_match_min_prob": max_prob,
+                "match_min_prob": max_prob,
+            }, cors=True)
+            return
         if path == "/preview/predict_upload":
             session_id = str(payload.get("session") or "").strip()
             image_b64 = str(payload.get("image_b64") or "").strip()
@@ -1774,6 +1841,12 @@ class RecordController:
                         reading_order=payload.get("reading_order"),
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
+                        # OOD MAX PROB is the single per-slot probability
+                        # threshold; match_min stays as a legacy fallback.
+                        ood_max_prob_min=ood_max_prob_min,
+                        ood_entropy_ratio_max=ood_entropy_ratio_max,
+                        ood_sign_pct_min=ood_sign_pct_min,
+                        ood_sign_pct_max=ood_sign_pct_max,
                         match_min_prob=(
                             float(payload.get("match_min"))
                             if payload.get("match_min") is not None and str(payload.get("match_min")).strip() != ""
@@ -1900,6 +1973,17 @@ class RecordController:
                         reading_order=payload.get("reading_order"),
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
+                        # One threshold: the OOD MAX PROB field also sets the
+                        # per-slot match floor.
+                        ood_max_prob_min=_opt_float(
+                            "ood_max_prob", "ood_max_prob_min",
+                            "sign_match_min_prob", "match_min_prob",
+                        ),
+                        ood_entropy_ratio_max=_opt_float(
+                            "ood_entropy_max", "ood_entropy_ratio_max"
+                        ),
+                        ood_sign_pct_min=_opt_float("ood_sign_min", "ood_sign_pct_min"),
+                        ood_sign_pct_max=_opt_float("ood_sign_max", "ood_sign_pct_max"),
                         match_min_prob=_opt_float("match_min", "match_min_prob"),
                     )
                 else:
@@ -2026,6 +2110,16 @@ class RecordController:
                         reading_order=synth["reading_order"],
                         bg_dark_thresh=_synth_int("bg_dark", "dark"),
                         bg_lum_thresh=_synth_int("bg_lum", "lum"),
+                        # One threshold: OOD MAX PROB also sets the slot floor.
+                        ood_max_prob_min=_synth_float(
+                            "ood_max_prob", "ood_max_prob_min",
+                            "sign_match_min_prob", "match_min_prob",
+                        ),
+                        ood_entropy_ratio_max=_synth_float(
+                            "ood_entropy_max", "ood_entropy_ratio_max"
+                        ),
+                        ood_sign_pct_min=_synth_float("ood_sign_min", "ood_sign_pct_min"),
+                        ood_sign_pct_max=_synth_float("ood_sign_max", "ood_sign_pct_max"),
                         match_min_prob=_synth_float("match_min", "match_min_prob"),
                     )
                     if variant == "match":
@@ -2082,11 +2176,14 @@ class RecordController:
                     return cast(raw)
                 except (TypeError, ValueError):
                     return default
+            # OOD MAX PROB is the single probability threshold: the exported
+            # kSignMatchMinProb must equal kOodMaxProbMin.
+            ood_max_prob = _num("ood_max_prob", 0.40)
             runtime_config = {
                 "ood_sign_min": _num("ood_sign_min", 0.3),
                 "ood_sign_max": _num("ood_sign_max", 70.0),
-                "ood_max_prob": _num("ood_max_prob", 0.60),
-                "ood_entropy_max": _num("ood_entropy_max", 0.70),
+                "ood_max_prob": ood_max_prob,
+                "ood_entropy_max": _num("ood_entropy_max", 0.85),
                 "bg_dark_thresh": _num("bg_dark_thresh", 0, cast=int),
                 "bg_lum_thresh": _num("bg_lum_thresh", 100, cast=int),
                 # sign_ocr only.  String/None pass through; _export_run
@@ -2097,7 +2194,7 @@ class RecordController:
                 "capture_frame_side": payload.get("capture_frame_side"),
                 "preprocess_frame_side": payload.get("preprocess_frame_side"),
                 "reading_order": payload.get("reading_order"),
-                "match_min_prob": _num("match_min_prob", 0.40),
+                "match_min_prob": ood_max_prob,
             }
             if not session_id or not export_dir:
                 _send_json(req, {"ok": "0", "error": "missing fields"}, status=400, cors=True)
@@ -3156,8 +3253,8 @@ class RecordController:
         rc = runtime_config if isinstance(runtime_config, dict) else {}
         ood_sign_min = float(rc.get("ood_sign_min", 0.3))
         ood_sign_max = float(rc.get("ood_sign_max", 70.0))
-        ood_max_prob = float(rc.get("ood_max_prob", 0.60))
-        ood_entropy_max = float(rc.get("ood_entropy_max", 0.70))
+        ood_max_prob = max(0.0, min(1.0, float(rc.get("ood_max_prob", 0.40))))
+        ood_entropy_max = max(0.0, min(1.0, float(rc.get("ood_entropy_max", 0.85))))
         bg_dark_thresh = int(rc.get("bg_dark_thresh", 0))
         bg_lum_thresh = int(rc.get("bg_lum_thresh", 100))
         latest = self._train_result_path(cfg.dataset_root)
@@ -3297,11 +3394,10 @@ class RecordController:
         reading_order = str(reading_src or "ltr").strip().lower()
         if reading_order not in ("ltr", "rtl"):
             reading_order = "ltr"
-        try:
-            sign_match_min_prob = float(rc.get("match_min_prob", 0.40))
-        except (TypeError, ValueError):
-            sign_match_min_prob = 0.40
-        sign_match_min_prob = max(0.0, min(1.0, sign_match_min_prob))
+        # ONE probability threshold: the OOD MAX PROB field is also the
+        # per-slot match floor.  Export both constants from the same value so
+        # the device cannot drift from what Input Settings showed.
+        sign_match_min_prob = ood_max_prob
         # Which rejector did THIS run train?  A `_background` class can only
         # replace OOD if it actually exists in the exported label list.  An
         # old run with no recorded flag used it as the only rejector (the
@@ -4856,7 +4952,7 @@ class RecordController:
             # The Preview pane's gates.  They are not training parameters, but
             # they ARE deployment parameters: buildExportRuntimeConfig() stamps
             # them into model_settings.h as the device's OOD thresholds.  A
-            # project that reopened them at 0.3/70/0.60/0.70 after the user
+            # project that reopened them at 0.3/70/0.40/0.85 after the user
             # tuned them would re-export a device with different gates than
             # the one that is running.  Echoed verbatim — it is a flat block of
             # UI state that no normaliser owns.
@@ -5224,8 +5320,8 @@ class RecordController:
         # out" the votes are) works reliably on small CNNs.  If the net is
         # confident (high prob) AND the decision is sharp (low entropy) → we
         # trust it; otherwise suppress to "No Sign".
-        MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.60)
-        ENTROPY_RATIO_MAX = float(ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.70)  # 1.0 = uniform / perfectly uncertain
+        MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.40)
+        ENTROPY_RATIO_MAX = float(ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.85)  # 1.0 = uniform / perfectly uncertain
         SIGN_PCT_MIN = max(0.0, min(100.0, SIGN_PCT_MIN))
         SIGN_PCT_MAX = max(0.0, min(100.0, SIGN_PCT_MAX))
         MAX_PROB_MIN = max(0.0, min(1.0, MAX_PROB_MIN))
@@ -5670,13 +5766,26 @@ class RecordController:
         _, h, w, c = shape
         channels = int(c) if int(c) > 0 else 1
 
+        # ONE probability threshold.  OOD MAX PROB (the Input Settings field)
+        # is also the per-slot match floor; there is no separate hidden
+        # sign_match_min_prob.  `match_min_prob` survives only as a fallback
+        # for callers that predate the unified input (tests/automations).
+        # No >= 0.40 clamp: a user-set 0.25 really means 25%.
+        raw_min_prob = (
+            ood_max_prob_min if ood_max_prob_min is not None
+            else (match_min_prob if match_min_prob is not None else 0.40)
+        )
+        try:
+            min_prob = float(raw_min_prob)
+        except (TypeError, ValueError):
+            min_prob = 0.40
+        MAX_PROB_MIN = max(0.0, min(1.0, min_prob))
+        SLOT_MIN = MAX_PROB_MIN
         # ood_sign_pct_min/max stay in the signature for API compatibility
         # but Layer 1 is DISARMED on the 3-slot path (see the slot loop).
-        MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.60)
         ENTROPY_RATIO_MAX = float(
-            ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.70
+            ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.85
         )
-        MAX_PROB_MIN = max(0.0, min(1.0, MAX_PROB_MIN))
         ENTROPY_RATIO_MAX = max(0.0, min(1.0, ENTROPY_RATIO_MAX))
 
         # The luminance window.  A caller-supplied value (the live preview's
@@ -5776,7 +5885,6 @@ class RecordController:
                 int(box[3]) + origin_y,
             ]
 
-        SLOT_MIN = max(0.0, min(1.0, float(match_min_prob if match_min_prob is not None else 0.40)))
         slots: List[Dict[str, Any]] = []
         slot_pngs: List[bytes] = []
         all_match = bool(labels)

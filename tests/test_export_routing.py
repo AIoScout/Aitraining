@@ -135,7 +135,7 @@ def test_sign_export_targets_tflite_sign_only():
         header = _export(
             Path(td), dataset_io.PROJECT_TYPE_SIGN_OCR,
             runtime_config={"sign_sequence": "a1b", "reading_order": "rtl",
-                            "match_min_prob": 0.7},
+                            "ood_max_prob": 0.7, "match_min_prob": 0.7},
         )
     # A sign_ocr project is a glyph project, but NOT the single-glyph one.
     assert _macro(header, "TM_OCR_GLYPH_MODEL") == "0"
@@ -145,6 +145,8 @@ def test_sign_export_targets_tflite_sign_only():
     # ["_background", "A", "B", "1"].
     assert "constexpr int kTargetSignClassIndices[3] = {1, 3, 2};" in header
     assert "constexpr int kSignReadingOrder = 1;" in header
+    # OOD MAX PROB is the single probability threshold: both constants.
+    assert "constexpr float kOodMaxProbMin = 0.700000f;" in header
     assert "constexpr float kSignMatchMinProb = 0.700000f;" in header
 
 

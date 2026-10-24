@@ -235,5 +235,53 @@ def test_default_floor_is_040_and_layer1_is_disarmed():
     assert [s["match"] for s in res["slots"]] == [True, True, True], res["slots"]
 
 
+def test_ood_max_prob_is_the_single_floor_and_banner_value():
+    """OOD MAX PROB 0.25 must accept a 0.28 target hit and be the banner's
+    `each at 25% or better` value; a legacy match_min_prob=0.40 is ignored."""
+    frame = _edge_plate_frame()
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, _dataset = _workspace(Path(td))
+        model = {
+            "labels": ["A", "1", "2", "B", "8"],
+            "input_details": {"shape": [1, 28, 28, 1]},
+            "sign_sequence": "A12",
+            "sign_sequences": ["A12"],
+            "sign_background_replace_ood": False,
+            "class_preprocess": {},
+            "preprocess_mode": "auto_by_label",
+            "model_source": "latest",
+        }
+        calls = {"n": 0}
+
+        def fake_invoke(model, session_id, arr):
+            idx = calls["n"]
+            calls["n"] += 1
+            raw = np.asarray([18, 18, 18, 18, 18], dtype=np.int64)
+            raw[idx] = 28          # 28/100 = 0.28, above the 0.25 OOD floor
+            return None, raw
+
+        ctrl._preview_load_model = lambda session_id: model
+        ctrl._invoke_glyph_tensor = fake_invoke
+
+        res = ctrl._preview_predict_sign_ocr(
+            "s", _png(frame),
+            sign_sequence="A12",
+            reading_order="ltr",
+            bg_dark_thresh=0,
+            bg_lum_thresh=121,
+            # The legacy split floor says 0.40; OOD MAX PROB must win.
+            match_min_prob=0.40,
+            ood_max_prob_min=0.25,
+            ood_entropy_ratio_max=0.85,
+        )
+
+    assert all(abs(s["prob"] - 0.28) < 1e-6 for s in res["slots"]), res["slots"]
+    # This is exactly what app.py renders as "(each at 25% or better)".
+    assert res["match_min_prob"] == 0.25, res.get("match_min_prob")
+    assert res["match"] is True, res
+    assert res["ood"] is False, res.get("ood_reason")
+    assert [s["match"] for s in res["slots"]] == [True, True, True], res["slots"]
+
+
 if __name__ == "__main__":
     raise SystemExit(__import__("pytest").main([__file__, "-q"]))

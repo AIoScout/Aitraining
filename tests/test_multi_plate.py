@@ -146,8 +146,25 @@ def test_multi_plate_union_autofill_preview_and_export():
         assert "constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;" in header, header
         assert "constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;" in header, header
         assert "constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;" in header, header
-        # Boot floor for the runtime per-slot match threshold.
+        # Boot floor for the runtime per-slot match threshold (== OOD max).
         assert "constexpr float kSignMatchMinProb = 0.400000f;" in header, header
+
+        # OOD MAX PROB is the SINGLE probability threshold: exporting 0.25
+        # must stamp BOTH constants, ignoring any separate legacy match floor.
+        export_dir2 = dataset.parent / "export_ood_floor"
+        ctrl._export_run(
+            "s", export_dir2, "tm_sign", "g_model", overwrite=True,
+            runtime_config={
+                "capture_frame_side": 160,
+                "ood_max_prob": 0.25,
+                "ood_entropy_max": 0.85,
+                "match_min_prob": 0.40,
+            },
+        )
+        header2 = (export_dir2 / "model_settings.h").read_text(encoding="utf-8")
+        assert "constexpr float kOodMaxProbMin = 0.250000f;" in header2, header2
+        assert "constexpr float kSignMatchMinProb = 0.250000f;" in header2, header2
+        assert "constexpr float kOodEntropyRatioMax = 0.850000f;" in header2, header2
 
 
 def test_exported_firmware_model_is_compact_and_resolver_is_complete():

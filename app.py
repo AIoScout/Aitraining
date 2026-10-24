@@ -5805,8 +5805,8 @@ let previewLumThresh = 100;
 let previewThreshUserModified = false;  // true only after user moves a slider
 let previewOodSignPctMin = 0.3;
 let previewOodSignPctMax = 70.0;
-let previewOodMaxProbMin = 0.60;
-let previewOodEntropyRatioMax = 0.70;
+let previewOodMaxProbMin = 0.40;
+let previewOodEntropyRatioMax = 0.85;
 let previewUploadImageSrc = '';
 let previewUploadImageB64 = '';
 let previewUploadFilename = '';
@@ -5842,6 +5842,10 @@ STATE.processed_previews = STATE.processed_previews || {{}};
 const openSourceStorageKey = `tm-open-source-${{STATE.session}}`;
 const trainCfgStorageKey = `tm-train-cfg-${{STATE.session}}`;
 const previewStorageKey = `tm-preview-${{STATE.session}}`;
+// v2: OOD MAX PROB became the single probability threshold (0.40 default,
+// was 0.60) and ENTROPY MAX default became 0.85 (was 0.70).  Cached v1
+// values are migrated once in restorePreviewState().
+const PREVIEW_STORAGE_VERSION = 2;
 const exportDirStorageKey = `tm-export-dir-${{STATE.session}}`;
 const exportNameStorageKey = `tm-export-name-${{STATE.session}}`;
 const exportArrayStorageKey = `tm-export-array-${{STATE.session}}`;
@@ -6969,11 +6973,31 @@ function restorePreviewState() {{
     previewThreshUserModified = !!data.threshModified;
     previewOodSignPctMin = Number(data.oodSignPctMin ?? previewOodSignPctMin ?? 0.3);
     previewOodSignPctMax = Number(data.oodSignPctMax ?? previewOodSignPctMax ?? 70.0);
-    previewOodMaxProbMin = Number(data.oodMaxProbMin ?? previewOodMaxProbMin ?? 0.60);
-    previewOodEntropyRatioMax = Number(data.oodEntropyRatioMax ?? previewOodEntropyRatioMax ?? 0.70);
+    const storageVersion = Number(data.version || 1);
+    let cachedMaxProb = Number(
+      data.oodMaxProbMin ?? data.signMatchMinProb
+      ?? previewOodMaxProbMin ?? 0.40
+    );
+    let cachedEntropy = Number(
+      data.oodEntropyRatioMax ?? previewOodEntropyRatioMax ?? 0.85
+    );
+    if (storageVersion < PREVIEW_STORAGE_VERSION) {{
+      // A v1 cache wrote the old 0.60 / 0.70 defaults for every project, so
+      // they overwrote the backend's new 0.40 / 0.85 values on load.
+      // Migrate ONLY those exact defaults: a custom 0.25 / 0.30 survives.
+      if (Math.abs(cachedMaxProb - 0.60) < 1e-9) cachedMaxProb = 0.40;
+      if (Math.abs(cachedEntropy - 0.70) < 1e-9) cachedEntropy = 0.85;
+    }}
+    previewOodMaxProbMin = Math.max(0, Math.min(1, cachedMaxProb));
+    previewOodEntropyRatioMax = Math.max(0, Math.min(1, cachedEntropy));
     if (previewThreshUserModified) {{
       previewDarkThresh = Number(data.darkThresh ?? STATE.preview_dark_thresh ?? 0);
       previewLumThresh = Number(data.lumThresh ?? STATE.preview_lum_thresh ?? 100);
+    }}
+    if (storageVersion < PREVIEW_STORAGE_VERSION) {{
+      // One-time rewrite, so a later intentional 0.60 / 0.70 is not
+      // converted again on the next load.
+      persistPreviewState();
     }}
   }} catch (e) {{}}
 }}
@@ -6991,10 +7015,31 @@ function persistPreviewState() {{
       lumThresh: Number((previewLumThresh ?? 100)),
       oodSignPctMin: Number((previewOodSignPctMin ?? 0.3)),
       oodSignPctMax: Number((previewOodSignPctMax ?? 70.0)),
-      oodMaxProbMin: Number((previewOodMaxProbMin ?? 0.60)),
-      oodEntropyRatioMax: Number((previewOodEntropyRatioMax ?? 0.70)),
-      threshModified: !!previewThreshUserModified
+      oodMaxProbMin: Number((previewOodMaxProbMin ?? 0.40)),
+      oodEntropyRatioMax: Number((previewOodEntropyRatioMax ?? 0.85)),
+      // One threshold under both names; OOD MAX PROB is authoritative.
+      signMatchMinProb: Number((previewOodMaxProbMin ?? 0.40)),
+      threshModified: !!previewThreshUserModified,
+      version: PREVIEW_STORAGE_VERSION
     }}));
+  }} catch (e) {{}}
+}}
+async function pushPreviewOodToBackend() {{
+  // OOD MAX PROB is the single per-slot probability threshold.  Pushing the
+  // four Input Settings values immediately persists that unification in the
+  // project train config (the export and /classes/sync_ocr both read it).
+  try {{
+    await fetch(`${{baseUrl}}/preview/ood`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        session: STATE.session,
+        ood_sign_pct_min: Number(previewOodSignPctMin ?? 0.3),
+        ood_sign_pct_max: Number(previewOodSignPctMax ?? 70.0),
+        ood_max_prob_min: Number(previewOodMaxProbMin ?? 0.40),
+        ood_entropy_ratio_max: Number(previewOodEntropyRatioMax ?? 0.85)
+      }})
+    }});
   }} catch (e) {{}}
 }}
 function previewStateForProject() {{
@@ -7011,8 +7056,10 @@ function previewStateForProject() {{
     thresh_modified: !!previewThreshUserModified,
     ood_sign_pct_min: Number((previewOodSignPctMin ?? 0.3)),
     ood_sign_pct_max: Number((previewOodSignPctMax ?? 70.0)),
-    ood_max_prob_min: Number((previewOodMaxProbMin ?? 0.60)),
-    ood_entropy_ratio_max: Number((previewOodEntropyRatioMax ?? 0.70)),
+    ood_max_prob_min: Number((previewOodMaxProbMin ?? 0.40)),
+    ood_entropy_ratio_max: Number((previewOodEntropyRatioMax ?? 0.85)),
+    // Compatibility alias; OOD MAX PROB is the single authoritative value.
+    sign_match_min_prob: Number((previewOodMaxProbMin ?? 0.40)),
   }};
 }}
 function applyPreviewState(raw) {{
@@ -7026,7 +7073,10 @@ function applyPreviewState(raw) {{
   if (typeof p.thresh_modified === 'boolean') previewThreshUserModified = p.thresh_modified;
   if (isFinite(Number(p.ood_sign_pct_min))) previewOodSignPctMin = Number(p.ood_sign_pct_min);
   if (isFinite(Number(p.ood_sign_pct_max))) previewOodSignPctMax = Number(p.ood_sign_pct_max);
-  if (isFinite(Number(p.ood_max_prob_min))) previewOodMaxProbMin = Number(p.ood_max_prob_min);
+  const projectMaxProb = isFinite(Number(p.ood_max_prob_min))
+    ? Number(p.ood_max_prob_min)
+    : (isFinite(Number(p.sign_match_min_prob)) ? Number(p.sign_match_min_prob) : null);
+  if (projectMaxProb !== null) previewOodMaxProbMin = projectMaxProb;
   if (isFinite(Number(p.ood_entropy_ratio_max))) previewOodEntropyRatioMax = Number(p.ood_entropy_ratio_max);
 }}
 function clearPreviewUploadState() {{
@@ -8020,9 +8070,9 @@ function openGlobalSettings() {{
     const oodMax = document.getElementById('settingsOodSignPctMax');
     if (oodMax) oodMax.value = Number(previewOodSignPctMax ?? 70.0);
     const oodProb = document.getElementById('settingsOodMaxProbMin');
-    if (oodProb) oodProb.value = Number(previewOodMaxProbMin ?? 0.60);
+    if (oodProb) oodProb.value = Number(previewOodMaxProbMin ?? 0.40);
     const oodEnt = document.getElementById('settingsOodEntropyRatioMax');
-    if (oodEnt) oodEnt.value = Number(previewOodEntropyRatioMax ?? 0.70);
+    if (oodEnt) oodEnt.value = Number(previewOodEntropyRatioMax ?? 0.85);
     // ── Training Hyperparameters group (live TrainConfig state) ──
     try {{
       if (typeof syncAdvancedInlineInputs === 'function') syncAdvancedInlineInputs();
@@ -8135,10 +8185,11 @@ async function saveGlobalSettings() {{
     const oodMaxEl = document.getElementById('settingsOodSignPctMax');
     if (oodMaxEl) previewOodSignPctMax = Math.max(0, Math.min(100, Number(oodMaxEl.value) || 70.0));
     const oodProbEl = document.getElementById('settingsOodMaxProbMin');
-    if (oodProbEl) previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodProbEl.value) || 0.60));
+    if (oodProbEl) previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodProbEl.value) || 0.40));
     const oodEntEl = document.getElementById('settingsOodEntropyRatioMax');
-    if (oodEntEl) previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntEl.value) || 0.70));
+    if (oodEntEl) previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntEl.value) || 0.85));
     persistPreviewState();
+    await pushPreviewOodToBackend();
 
     // Resolve webcam uid from the selected option
     let webcamUid = '';
@@ -8250,8 +8301,8 @@ function applyProjectState(state) {{
   previewThreshUserModified = false;
   previewOodSignPctMin = 0.3;
   previewOodSignPctMax = 70.0;
-  previewOodMaxProbMin = 0.60;
-  previewOodEntropyRatioMax = 0.70;
+  previewOodMaxProbMin = 0.40;
+  previewOodEntropyRatioMax = 0.85;
   const cls = Array.isArray(s.classes) ? s.classes.slice() : [];
   STATE.classes = cls;
   const cnt = s.counts && typeof s.counts === 'object' ? s.counts : {{}};
@@ -8560,8 +8611,8 @@ function buildExportRuntimeConfig() {{
   return {{
     ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
     ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
-    ood_max_prob: Number(previewOodMaxProbMin ?? 0.60),
-    ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.70),
+    ood_max_prob: Number(previewOodMaxProbMin ?? 0.40),
+    ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.85),
     bg_dark_thresh: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : 0,
     bg_lum_thresh: previewThreshUserModified ? Number(previewLumThresh ?? 100) : 100,
     // sign_ocr only.  The server ignores these for every other project
@@ -8574,10 +8625,10 @@ function buildExportRuntimeConfig() {{
     sign_sequences: signSequences(),
     capture_frame_side: Number(currentSerialFrameSide || 96),
     reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
-    // No SPA control yet: the per-slot confidence floor is the server's
-    // documented default (0.40).  On the device, `set ood ... <mpmin>`
-    // updates this runtime floor as well as the OOD layer.
-    match_min_prob: 0.40,
+    // ONE probability threshold: OOD MAX PROB is also the per-slot match
+    // floor, and the exporter writes it to both kOodMaxProbMin and
+    // kSignMatchMinProb.  No hidden 0.40 floor.
+    match_min_prob: Number(previewOodMaxProbMin ?? 0.40),
   }};
 }}
 async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arrayNameValue) {{
@@ -10043,7 +10094,7 @@ async function refreshPreviewPrediction(token) {{
   previewPredictController = new AbortController();
   const note = document.getElementById('previewNote');
   try {{
-    const res = await fetch(`${{baseUrl}}/preview/predict?session=${{encodeURIComponent(STATE.session)}}&source=${{encodeURIComponent(previewSource)}}&preprocess=${{encodeURIComponent(previewPreprocessMode)}}&bg_dark=${{encodeURIComponent(previewThreshUserModified ? String(previewDarkThresh ?? '') : '')}}&bg_lum=${{encodeURIComponent(previewThreshUserModified ? String(previewLumThresh ?? '') : '')}}&ood_sign_min=${{encodeURIComponent(String(previewOodSignPctMin ?? 0.3))}}&ood_sign_max=${{encodeURIComponent(String(previewOodSignPctMax ?? 70.0))}}&ood_max_prob=${{encodeURIComponent(String(previewOodMaxProbMin ?? 0.60))}}&ood_entropy_max=${{encodeURIComponent(String(previewOodEntropyRatioMax ?? 0.70))}}&sign_seq=${{encodeURIComponent(signSequence().join(''))}}&sign_seqs=${{encodeURIComponent(signSequences().join(','))}}&reading=${{encodeURIComponent(String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')))}}&_ts=${{Date.now()}}`, {{ signal: previewPredictController.signal }});
+    const res = await fetch(`${{baseUrl}}/preview/predict?session=${{encodeURIComponent(STATE.session)}}&source=${{encodeURIComponent(previewSource)}}&preprocess=${{encodeURIComponent(previewPreprocessMode)}}&bg_dark=${{encodeURIComponent(previewThreshUserModified ? String(previewDarkThresh ?? '') : '')}}&bg_lum=${{encodeURIComponent(previewThreshUserModified ? String(previewLumThresh ?? '') : '')}}&ood_sign_min=${{encodeURIComponent(String(previewOodSignPctMin ?? 0.3))}}&ood_sign_max=${{encodeURIComponent(String(previewOodSignPctMax ?? 70.0))}}&ood_max_prob=${{encodeURIComponent(String(previewOodMaxProbMin ?? 0.40))}}&ood_entropy_max=${{encodeURIComponent(String(previewOodEntropyRatioMax ?? 0.85))}}&sign_seq=${{encodeURIComponent(signSequence().join(''))}}&sign_seqs=${{encodeURIComponent(signSequences().join(','))}}&reading=${{encodeURIComponent(String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')))}}&_ts=${{Date.now()}}`, {{ signal: previewPredictController.signal }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Preview failed.');
     previewLastPredictData = data;
@@ -10151,8 +10202,8 @@ async function runPreviewUploadPrediction() {{
         bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 0) : '', 
         ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
         ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
-        ood_max_prob: Number(previewOodMaxProbMin ?? 0.60),
-        ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.70),
+        ood_max_prob: Number(previewOodMaxProbMin ?? 0.40),
+        ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.85),
         // The target sign travels with the request rather than being read
         // from the session: it is edited in the SPA and lives in STATE.train_cfg
         // until the project is saved, so the server has no other way to know
@@ -10347,11 +10398,11 @@ function buildPreviewSettingsMarkup() {{
     </label>
     <label title="Minimum softmax confidence required before Preview accepts a class result.">
       OOD max prob
-      <input id="previewOodMaxProbMin" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodMaxProbMin ?? 0.60)}}"/>
+      <input id="previewOodMaxProbMin" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodMaxProbMin ?? 0.40)}}"/>
     </label>
     <label title="Maximum entropy ratio allowed before Preview suppresses to No Sign.">
       OOD entropy max
-      <input id="previewOodEntropyRatioMax" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodEntropyRatioMax ?? 0.70)}}"/>
+      <input id="previewOodEntropyRatioMax" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodEntropyRatioMax ?? 0.85)}}"/>
     </label>
   `;
   // One panel regardless of source: the source-specific CONTROLS live in
@@ -10410,9 +10461,10 @@ function renderPreviewSettings() {{
       const oodEntropyEl = document.getElementById('previewOodEntropyRatioMax');
       previewOodSignPctMin = Math.max(0, Math.min(100, Number(oodSignMinEl ? oodSignMinEl.value : (previewOodSignPctMin ?? 0.3))));
       previewOodSignPctMax = Math.max(0, Math.min(100, Number(oodSignMaxEl ? oodSignMaxEl.value : (previewOodSignPctMax ?? 70.0))));
-      previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodMaxProbEl ? oodMaxProbEl.value : (previewOodMaxProbMin ?? 0.60))));
-      previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntropyEl ? oodEntropyEl.value : (previewOodEntropyRatioMax ?? 0.70))));
+      previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodMaxProbEl ? oodMaxProbEl.value : (previewOodMaxProbMin ?? 0.40))));
+      previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntropyEl ? oodEntropyEl.value : (previewOodEntropyRatioMax ?? 0.85))));
       persistPreviewState();
+      await pushPreviewOodToBackend();
       previewSettingsOpen = false;
       renderPreviewSettings();
       renderPreviewCard();
@@ -10659,6 +10711,11 @@ async function handleSynthesizeSignPreview(variant, opts) {{
         reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         bg_dark: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : '',
         bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 100) : '',
+        // OOD MAX PROB is the single per-slot probability threshold.
+        ood_max_prob: Number(previewOodMaxProbMin ?? 0.40),
+        ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.85),
+        ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
+        ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
       }})
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
