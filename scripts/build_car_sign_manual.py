@@ -381,6 +381,29 @@ def snap_element(ws, selector: str, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     ws.locator(selector).screenshot(path=str(path))
     log(f"screenshot -> {path.name} (element {selector})")
+    # The settings card has rounded corners; Chromium composites the dim
+    # modal backdrop into the corner cutouts, which shows up as gray blocks
+    # in the composite.  Restore the card's white corner background.
+    _whiteout_rounded_corners(path)
+
+
+def _whiteout_rounded_corners(path: Path, radius_css: float = 14.0) -> None:
+    """Replace the rounded-corner cutouts of an element capture with white.
+
+    Playwright element screenshots include the pixels BEHIND the element in
+    the corners left empty by the CSS border-radius (the dim modal
+    backdrop).  Pasting the image through a matching rounded-rectangle mask
+    onto a white canvas removes those gray corner blocks.
+    """
+    im = Image.open(path).convert("RGB")
+    radius = int(round(radius_css * DEVICE_SCALE))
+    mask = Image.new("L", im.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, im.width - 1, im.height - 1], radius=radius, fill=255
+    )
+    white = Image.new("RGB", im.size, (255, 255, 255))
+    white.paste(im, mask=mask)
+    white.save(path)
 
 
 def _assert_fully_visible(page, ws, selectors: Sequence[str], margin: int = 30) -> None:
@@ -1232,10 +1255,14 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # ── 3. Sample Area Part A ───────────────────────────────────────────
     _heading(doc, "2. Sample Area — Part A: Setting the Target License & Collecting Samples", 3)
-    _para(doc, "Setting the 3-Character Target Sign:", bold=True)
+    _para(doc, "Setting the Target License (single plate):", bold=True)
     _bullet(doc, "Click each of the three boxes in the Target Sign Bar and type your 3 characters (for example, A, 1, 2). Use the ◀ / ▶ buttons beneath a slot to swap neighbouring characters.")
-    _bullet(doc, "If your sign uses the same character twice (like A 1 A), the app automatically keeps just one A card with a “Slots 1 & 3” badge so you only need to collect samples for A once!")
+    _bullet(doc, "If your license uses the same character twice (like A 1 A), the app automatically keeps just one A card with a “Slots 1 & 3” badge so you only need to collect samples for A once!")
     _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 3 — The Target Sign Bar: typing characters, the ◀ / ▶ swap buttons and the duplicate-character badge.")
+    _para(doc, "Want your AI “gatekeeper” to accept more than one license plate?", bold=True)
+    _bullet(doc, "Click the 🪪 License List button next to ⚙ Settings in the top bar and add several allowed plates — for example both A 1 2 and B 1 8!", bold_prefix="🪪 License List")
+    _bullet(doc, "The app automatically combines the unique letters/numbers of all your plates into the Sample Area cards, so a repeated character like 1 is only collected once.")
+    _bullet(doc, "In Preview, the app shows 🟢 YES — MATCH whenever ANY plate on your allowed list is seen!")
     _para(doc, "Collecting Samples for Each Character Card:", bold=True)
     _callout_box(
         doc,
@@ -1294,19 +1321,28 @@ def build_docx(assets: Dict[str, Path]) -> Path:
         "to view or adjust the training hyperparameters. Below is the table for each "
         "hyperparameter:",
     )
+    _para(
+        doc,
+        "About the Image Size: even if the smart-car camera captures frames at 160×160 "
+        "(set in ⚙ Settings), the app automatically scales every camera frame to match the "
+        "model's input size — 96×96 for the picture preprocessing and 28×28 for each "
+        "character slot. The exported model carries its img_size with it (in "
+        "model_settings.h), so the car always scales the camera frames to exactly the size "
+        "the model was trained on.",
+    )
     _add_table(
         doc,
         ["#", "Hyperparameter", "Default", "Range", "What it does"],
         [
             ["1", "Ink Polarity", "0 — Dark ink on bright bg", "0 / 1", "Which way round your letters are: normal dark-on-light writing (0), or bright letters on a dark sign (1)."],
             ["2", "Sign Reading Direction", "Left to Right", "L ➔ R / R ➔ L", "The order the app reads the three boxes of your sign."],
-            ["3", "Image Size", "28", "8–512", "How many pixels wide the small letter picture is. 28×28 fits one letter perfectly — leave it."],
+            ["3", "Image Size", "28", "8–512", "How many pixels wide the small letter picture is. 28×28 fits one letter perfectly — leave it. Whatever the camera sends (even 160×160), the app scales it to this size automatically."],
             ["4", "Batch Size", "32", "1 or more", "How many photos the AI practices with in one go."],
             ["5", "Epochs", "20", "1 or more", "How many times the AI reads through all your photos. For this project the app follows its own smart two-phase plan."],
             ["6", "Validation Split", "0.25", "0–0.5", "The part of your photos kept secret for testing."],
             ["7", "Learning Rate", "0.0016", "0 or more", "How big each learning step is. Small steps = careful but slow."],
             ["8", "Mix EMNIST into every class", "On", "on / off", "Mixes built-in handwriting examples with your photos so the AI learns from more variety."],
-            ["9", "Background / noise class", "Off", "on / off", "Default is Off for the Car License Project so the AI focuses purely on your 3 characters and uses standard OOD/confidence checks; turn On only if you want an extra “no letter” class to replace OOD."],
+            ["9", "Use _background noise class to replace OOD rejection", "Off", "on / off", "Default is Off for the Car License Project so the AI focuses purely on your 3 characters and uses standard OOD/confidence checks; turn On only if you want an extra “no letter” class to replace OOD."],
             ["10", "Fine-tune pre-trained backbone", "On", "on / off", "Starts from a smart pre-learned letter reader so your model trains fast and accurately even with just 20 photos!"],
         ],
         widths=[0.3, 1.55, 1.3, 1.0, 2.35],
@@ -1338,6 +1374,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "When all 3 slots match your target characters with at least 60% confidence, the banner turns green: 🟢 YES — MATCH. If any slot reads a different character, is below 60%, or is blank (_background), the banner turns red: 🔴 NO — NOT MATCH and explains which slot failed.")
     _para(doc, "Exporting the Model & Saving Your Project:", bold=True)
     _bullet(doc, "Click Export Model at the top-right of the Preview card to export the C/C++ model files (tm_model_data.cpp/.h, model_resolver.h, model_settings.cpp/.h, tm.tflite, labels.txt).")
+    _bullet(doc, "The export packs in everything the car needs: the trained weights, the img_size scaling parameters, the _background / OOD settings, and the full list of your allowed license plates — all into model_settings.h. When the car sees a plate, the ESP32-P4 checks it against the list and tells the ESP32-S3 which specific plate number matched!")
     _bullet(doc, "Click File ▾ → Save (or Save as) at the top-left menu to save your project as a .tmproj file.")
     _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model on the Preview card and File ▾ → Save / Save as.")
     _para(
