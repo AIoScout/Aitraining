@@ -14,3 +14,5 @@ g_model.tflite
 AI training.docx
 *.docx
 *.pdf
+
+docs/manual_assets/sign_ocr/*.log

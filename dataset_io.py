@@ -21,6 +21,171 @@ COMMON_SPLIT_NAMES = {
     "testing",
 }
 
+# ── Project types ───────────────────────────────────────────────────────
+# The ONE place a project type is named.  Everything downstream (session
+# config, train config, .tmproj manifest, sample transform dispatch) carries
+# this string rather than a boolean or a parallel code path, so adding a
+# project type never means forking the persistence or training lifecycle.
+PROJECT_TYPE_IMAGE = "image"
+PROJECT_TYPE_OCR = "ocr"
+# Road signs: a 3-character label read as a SEQUENCE.  Same glyph front-end
+# and the same per-character training set as OCR — what differs is that one
+# frame holds several glyphs, so the preview splits it and runs the model
+# once per slot.  The type exists (rather than a flag on the OCR project)
+# because the two answer different questions: OCR reads whatever character
+# is in the crop, sign_ocr asks whether the sign in view is the trained one.
+PROJECT_TYPE_SIGN_OCR = "sign_ocr"
+# The classified-import page is an image-project variant, not a third
+# pipeline: it produces the same workspace and trains with the same code.
+PROJECT_TYPE_CLASSIFIED_IMPORT = "image_classified_import"
+
+KNOWN_PROJECT_TYPES = (
+    PROJECT_TYPE_IMAGE,
+    PROJECT_TYPE_OCR,
+    PROJECT_TYPE_SIGN_OCR,
+    PROJECT_TYPE_CLASSIFIED_IMPORT,
+)
+
+# The types that share the character pipeline — a 28x28 glyph per class,
+# the integer-exact ocr_preprocess front-end, and (on export) the OCR
+# device sketch.  Membership is the whole test: anything that must behave
+# one way for "a project whose classes are characters" rather than for one
+# specific project type asks this instead of comparing to a single string,
+# so the third such type cannot be added and silently miss half the
+# dispatch sites.  (It already nearly happened: the sample dispatch and the
+# export's device-sketch choice are in two different modules.)
+GLYPH_PROJECT_TYPES = (PROJECT_TYPE_OCR, PROJECT_TYPE_SIGN_OCR)
+
+# Model input size per project type.  The image project's 96 is the default
+# in TrainConfig/SessionConfig; the glyph projects work on 28x28 characters
+# and reuse the SAME img_size plumbing rather than introducing a second size
+# concept.
+DEFAULT_IMG_SIZE_BY_PROJECT = {
+    PROJECT_TYPE_IMAGE: 96,
+    PROJECT_TYPE_CLASSIFIED_IMPORT: 96,
+    PROJECT_TYPE_OCR: 28,
+    PROJECT_TYPE_SIGN_OCR: 28,
+}
+
+
+def is_glyph_project(project_type: object) -> bool:
+    """True for the projects whose samples are 28x28 character glyphs."""
+    return str(project_type or "").strip().lower() in GLYPH_PROJECT_TYPES
+
+# ── .tmproj format header ───────────────────────────────────────────────
+# Also the ONE place these are named: the writer (record_controller
+# ._project_save) and every reader (the open path, the Start Page's file
+# picker) import them from here, so "which version is this file?" can never
+# be answered differently in two places.
+#
+# The magic string exists because a .tmproj is a ZIP: without it, a reader
+# handed the wrong kind of archive (a bare dataset zip, a renamed directory)
+# would fail somewhere deep in the extraction instead of at the door.  It is
+# stored under "_magic" — leading underscore, like every other metadata key
+# the format reserves — so it cannot collide with a project folder name.
+PROJECT_MAGIC = "TFLITE_TRAINER_PROJ"
+# Bumped when the archive's LAYOUT or the set of required state changes.
+# 1.0 -> 2.0: the manifest gained the magic + header, and train_cfg became a
+# complete TrainConfig snapshot rather than the 12-field subset v1 wrote.
+PROJECT_FORMAT_VERSION = "2.0"
+# What a file with no header at all is assumed to be.  Every archive written
+# before this header existed is readable — but only because the load path
+# treats a missing key as "keep the smart default", never as an error.
+PROJECT_FORMAT_LEGACY = "1.0"
+
+
+def project_header(project_type: object) -> Dict[str, object]:
+    """The metadata header stamped at the root of a saved project.
+
+    Written to BOTH the manifest and the project-state JSON, so each half of
+    the archive identifies itself: a reader that only has the state file
+    (a future import tool, a bug report pasted from disk) can still tell what
+    it is holding and whether it predates the complete-train_cfg snapshot.
+    """
+    return {
+        "_magic": PROJECT_MAGIC,
+        "version": PROJECT_FORMAT_VERSION,
+        "project_type": str(project_type or PROJECT_TYPE_IMAGE).strip().lower(),
+    }
+
+
+def read_project_header(manifest: object) -> Dict[str, object]:
+    """Classify a manifest/state dict by its header.
+
+    Returns the magic, the version, and `legacy` — True when the file carries
+    no magic, i.e. it was written before this header existed or by something
+    that is not this app.  Callers use `legacy` to decide how much to trust
+    the rest of the payload, not to reject it: an unreadable-by-default
+    format would strand every project a user already saved.
+    """
+    src = manifest if isinstance(manifest, dict) else {}
+    magic = str(src.get("_magic") or "").strip()
+    version = str(src.get("version") or "").strip() or PROJECT_FORMAT_LEGACY
+    return {
+        "magic": magic,
+        "version": version,
+        "known": magic == PROJECT_MAGIC,
+        "legacy": magic != PROJECT_MAGIC,
+    }
+
+
+def default_img_size(project_type: object) -> int:
+    """Model input side for a project type (falls back to the image project)."""
+    key = str(project_type or PROJECT_TYPE_IMAGE).strip().lower()
+    return int(DEFAULT_IMG_SIZE_BY_PROJECT.get(key, 96))
+
+
+# ── App data directory ──────────────────────────────────────────────────
+# Lives here, not in app.py, because the training worker and the EMNIST
+# cache also need it and neither may import streamlit.  app.py and
+# desktop_launcher.py resolve through this function so there is exactly one
+# definition of "where the app keeps its files".
+APP_NAME = "TFLiteTraining"
+
+
+def app_data_dir() -> Path:
+    """Writable per-user app data dir (env override, else platform default).
+
+    Falls through to the temp dir if the preferred location cannot be
+    written, so a sandboxed or read-only home does not make the app
+    unusable — it just makes it forgetful.
+    """
+    import os
+    import sys
+    import tempfile
+
+    candidates: List[Path] = []
+    env_override = os.getenv("TFLITE_TRAINING_DATA_DIR")
+    if env_override:
+        candidates.append(Path(env_override).expanduser().resolve())
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+        candidates.append((base / APP_NAME).resolve())
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        candidates.append((base / APP_NAME).resolve())
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+        candidates.append((base / APP_NAME).resolve())
+    candidates.append((Path(tempfile.gettempdir()) / APP_NAME).resolve())
+
+    last_err: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            (candidate / "workspace").mkdir(parents=True, exist_ok=True)
+            (candidate / "datasets").mkdir(parents=True, exist_ok=True)
+            probe_dir = candidate / "workspace" / "_probe_dir"
+            probe_dir.mkdir(parents=True, exist_ok=True)
+            probe = probe_dir / ".write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            probe_dir.rmdir()
+            return candidate
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Failed to prepare app data dir. Last error: {last_err}")
+
 
 @dataclass(frozen=True)
 class ImportedData:

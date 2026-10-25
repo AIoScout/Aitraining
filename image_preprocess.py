@@ -689,6 +689,28 @@ def normalize_class_preprocess(raw: Any) -> Dict[str, Any]:
     out["bg_diff_abs"] = max(0, min(255, bg_diff))  # |B-G| magnitude
     out["bg_dark_thresh"] = max(0, min(100, bg_dark))
 
+    # Glyph (OCR project) knobs, carried here rather than in a parallel
+    # class-config schema: this function IS the per-class preprocess record,
+    # and .tmproj persistence, the sample overrides and the preview calls all
+    # already thread it through.  Only emitted when the class actually sets
+    # them so an image project's record keeps its exact shape (no spurious
+    # keys written back into old .tmproj files).
+    if "ink_polarity" in src or "glyph_convention" in src or "glyph_segment" in src:
+        # Local import: the glyph vocabulary lives in ONE place
+        # (ocr_preprocess) and image_preprocess must stay importable without
+        # it; this branch is the only coupling point and runs only for OCR
+        # classes.
+        from ocr_preprocess import normalize_ink_polarity, normalize_norm_convention
+
+        if "ink_polarity" in src:
+            out["ink_polarity"] = int(normalize_ink_polarity(src.get("ink_polarity")))
+        if "glyph_convention" in src:
+            out["glyph_convention"] = str(normalize_norm_convention(src.get("glyph_convention")))
+        # Vertical-projection segmentation: ON for camera captures (the glyph
+        # sits somewhere in a larger frame), OFF for already-isolated
+        # datasets (EMNIST/MNIST imports).
+        if "glyph_segment" in src:
+            out["glyph_segment"] = bool(src.get("glyph_segment"))
     return out
 
 

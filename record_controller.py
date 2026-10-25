@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import shutil
 import socket
 import subprocess
@@ -64,13 +65,28 @@ from PIL import Image, ImageOps
 
 from camera_permission import ensure_camera_access
 from serial_device import SerialFrameReader, list_serial_ports, parse_sync_header
-from dataset_io import IMAGE_EXTS, sanitize_class_name
+from dataset_io import (
+    DEFAULT_IMG_SIZE_BY_PROJECT,
+    IMAGE_EXTS,
+    KNOWN_PROJECT_TYPES,
+    PROJECT_FORMAT_LEGACY,
+    PROJECT_TYPE_IMAGE,
+    PROJECT_TYPE_OCR,
+    PROJECT_TYPE_SIGN_OCR,
+    app_data_dir,
+    is_glyph_project,
+    default_img_size,
+    project_header,
+    read_project_header,
+    sanitize_class_name,
+)
 from image_preprocess import (
     CROP_MODE_AUTO_SEARCH,
     CROP_MODE_CENTER,
     CLIP_MODE_JUNCTION,
     PREPROCESS_MODE_AUTO_BY_LABEL,
     PREPROCESS_MODE_MANUAL_ROI,
+    PREPROCESS_MODE_NONE,
     _BG_LUM_THRESH,
     _BG_DIFF_MIN,
     class_clip_mode,
@@ -82,6 +98,56 @@ from image_preprocess import (
     preprocess_blue_diff_array,
     prepare_inference_inputs,
 )
+# The OCR project's integer-exact glyph transform.  Imported here (not
+# lazily) because the dispatch in _preprocess_image_png is on the hot path
+# for every captured sample.
+from ocr_preprocess import (
+    GLYPH_SIZE,
+    INK_DARK,
+    NORM_CANON,
+    NORM_STRETCH,
+    SIGN_SEQUENCE_PAD,
+    preprocess_glyph,
+    preprocess_sign_sequence,
+    normalize_sign_sequence,
+)
+
+# The sign-OCR preview's two answers, in one place: the SPA renders
+# `match_text` verbatim, so the wording (and the one emoji per branch that
+# makes it readable at a glance across a workshop) is decided here rather
+# than duplicated in the frontend.
+SIGN_MATCH_TEXT = "🟢 YES — MATCH"
+SIGN_NOMATCH_TEXT = "🔴 NO — NOT MATCH"
+
+# Template (EMNIST) sample seeding writes files whose names start with this,
+# which is how a re-seed can replace its own previous output without ever
+# touching a real camera capture in the same class folder.
+TEMPLATE_SAMPLE_PREFIX = "emnist_seed_"
+TEMPLATE_SAMPLE_DEFAULT_COUNT = 24
+
+# The sign_ocr keys a preview response carries ON TOP of the ordinary
+# predict payload.  Listed once so /preview/predict and
+# /preview/predict_upload cannot answer the same question with different
+# fields — they serve the same SPA renderer.
+_SIGN_OCR_PAYLOAD_KEYS = (
+    "sign_ocr",
+    "sign_sequence",
+    "reading_order",
+    "slots",
+    "slot_images_b64",
+    "match",
+    "match_text",
+    "match_min_prob",
+    "sign_box",
+)
+
+
+def sign_ocr_payload_extras(pred: Any) -> Dict[str, Any]:
+    """The sign_ocr half of a predict result, or {} for every other project."""
+    src = pred if isinstance(pred, dict) else {}
+    if not src.get("sign_ocr"):
+        return {}
+    return {k: src.get(k) for k in _SIGN_OCR_PAYLOAD_KEYS if k in src}
 
 _APP_NAME = "TFLiteTraining"
 
@@ -128,10 +194,21 @@ class SessionConfig:
     # silently select the wrong device whenever virtual cameras (Iriun etc.)
     # are installed.  webcam_index is only a UI hint / non-macOS fallback.
     webcam_id: Optional[str] = None
-    # Training image size (the "Image Size" hyperparameter).  Captured /
-    # uploaded samples and their processed-cache previews are stored at this
-    # size so 160×160 (or 48/128/192) projects are never downsampled to 96.
+    # Training image size (the "Image Size" hyperparameter).  The
+    # PROCESSED-CACHE previews and the training tensors are stored at this
+    # size, so 160×160 (or 48/128/192) projects are never downsampled to 96.
+    #
+    # NOT the size of the saved sample: webcam captures are written at camera
+    # resolution (bounded by CAPTURE_MAX_SIDE) because the saved PNG is the
+    # "Original Sample" the user draws a Manual ROI on.  Storing a 28×28 OCR
+    # capture destroyed the scene before the ROI could select anything.
     img_size: int = 96
+    # Which project owns this session.  Selects the sample transform used by
+    # _preprocess_image_png (and therefore by the processed cache, the class
+    # previews and training): "image" = the sign pipeline in image_preprocess,
+    # "ocr" = the integer-exact glyph pipeline in ocr_preprocess.  It is a
+    # single dispatch key, not a fork of the surrounding lifecycle.
+    project_type: str = PROJECT_TYPE_IMAGE
 
 
 def _persist_webcam_choice(cfg: "SessionConfig") -> None:
@@ -174,6 +251,210 @@ def _is_truthy(value: Any) -> bool:
     return text in {"1", "true", "yes", "on"}
 
 
+def _parse_multipart_form(raw: bytes, content_type: str) -> Dict[str, Any]:
+    """Minimal multipart/form-data splitter for /preview/upload.
+
+    Only what that endpoint needs: text fields come back as strings and the
+    first file part becomes `image_bytes`.  Deliberately dependency-free —
+    the controller already speaks a small hand-rolled HTTP protocol, and a
+    full MIME parser would be far more machinery than one image upload.
+    """
+    m = re.search(r'boundary="?([^";]+)"?', str(content_type or ""), re.I)
+    if not m:
+        return {}
+    boundary = ("--" + m.group(1)).encode("latin-1")
+    out: Dict[str, Any] = {}
+    for part in raw.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--" or b"\r\n\r\n" not in part:
+            continue
+        head, body = part.split(b"\r\n\r\n", 1)
+        body = body.rstrip(b"\r\n")
+        header = head.decode("utf-8", "replace")
+        name_match = re.search(r'name="([^"]+)"', header, re.I)
+        if not name_match:
+            continue
+        name = name_match.group(1)
+        if re.search(r"filename=", header, re.I):
+            out["image_bytes"] = body
+            fname_match = re.search(r'filename="([^"]*)"', header, re.I)
+            if fname_match and fname_match.group(1):
+                out.setdefault("filename", fname_match.group(1))
+        else:
+            out[name] = body.decode("utf-8", "replace")
+    return out
+
+
+# ── TrainConfig (de)serialisation ───────────────────────────────────────
+# The .tmproj train_cfg is a TrainConfig snapshot, and the set of fields it
+# carries is DERIVED from the dataclass rather than listed by hand here.
+# v1 hand-listed 12 of the 35 fields in `_project_train_cfg._pick_cfg` and
+# silently dropped the rest on every save — all 13 ocr_* mixing / two-phase
+# knobs, plus crop_mode (the model-input geometry!), img_size, seed,
+# optimizer, and the batch/epoch auto-adjust flags.  A hand-written list
+# drifts the moment anyone adds a field; deriving it means a new TrainConfig
+# field is serialised by default and the only way to leave one out is to add
+# it to `_TRAIN_CFG_UNSERIALISED` and say why.
+_TRAIN_CFG_SCHEMA: Optional[Dict[str, Any]] = None
+
+# Fields that are part of the project but deliberately NOT part of the
+# train_cfg snapshot, because the archive already carries them somewhere
+# better: sample_preprocess lives in tm_classes.json next to the samples it
+# overrides, and class_names_order is the class LIST, which is labels.txt and
+# the directory order (writing it twice is how the two copies drift apart).
+# Excluded here so `missing_train_cfg_fields()` reports a field the file
+# SHOULD have carried — never one this format never writes — otherwise every
+# freshly saved project would look incomplete on open.  A future field that
+# describes the MACHINE rather than the project also belongs in this set.
+_TRAIN_CFG_UNSERIALISED: frozenset = frozenset({"sample_preprocess", "class_names_order"})
+
+# Fields whose value is not a scalar and needs the project's own normaliser
+# instead of a cast — a tuple, or a nested map the rest of the app already
+# knows how to sanitise.
+_TRAIN_CFG_COMPLEX_FIELDS = (
+    "manual_roi",
+    "class_preprocess",
+    "sample_preprocess",
+    "class_names_order",
+    "sign_sequence",
+)
+
+# Enumerated string fields: a value outside the set is forwarded to code that
+# switches on it and silently takes a default branch, so it is rejected here
+# rather than persisted as if the project were configured that way.
+_TRAIN_CFG_ENUMS = {
+    "project_type": KNOWN_PROJECT_TYPES,
+    # PREPROCESS_MODE_NONE is a v0 constant the settings modal still accepts;
+    # it dispatches to the same branch as auto_by_label, so it stays valid
+    # rather than being rewritten on save.
+    "preprocess_mode": (PREPROCESS_MODE_AUTO_BY_LABEL, PREPROCESS_MODE_MANUAL_ROI, PREPROCESS_MODE_NONE),
+    "crop_mode": (CROP_MODE_AUTO_SEARCH, CROP_MODE_CENTER),
+    "color_mode": ("grayscale", "rgb"),
+    "optimizer": ("adam", "sgd", "rmsprop"),
+}
+
+
+def _train_cfg_schema() -> Dict[str, Any]:
+    """name -> dataclass default for TrainConfig, imported lazily and cached.
+
+    Function-local import for the same reason every other `trainer` import in
+    this module is: it pulls in TensorFlow, and this module is imported by the
+    record controller long before any training happens.  Cached because the
+    save and open paths each call through here several times.
+    """
+    global _TRAIN_CFG_SCHEMA
+    if _TRAIN_CFG_SCHEMA is None:
+        from dataclasses import fields as _dc_fields
+
+        from trainer import TrainConfig
+
+        _TRAIN_CFG_SCHEMA = {f.name: f.default for f in _dc_fields(TrainConfig) if f.name not in _TRAIN_CFG_UNSERIALISED}
+    return _TRAIN_CFG_SCHEMA
+
+
+def train_cfg_field_names() -> Tuple[str, ...]:
+    """Every field name a saved project is expected to carry."""
+    return tuple(_train_cfg_schema().keys())
+
+
+def _coerce_train_cfg_value(name: str, value: Any) -> Tuple[bool, Any]:
+    """Coerce one persisted value to the type its dataclass field declares.
+
+    Returns (keep, coerced).  `keep` is False when the value cannot be
+    represented as the field's type — a hand-edited JSON file, or a field
+    whose meaning changed between versions.  A rejected value falls back to
+    the dataclass default rather than being stored as something the trainer
+    would then misuse: a string "false" is truthy, and "0.2" is not a number
+    of epochs.
+    """
+    if value is None:
+        return False, None
+    if name in _TRAIN_CFG_COMPLEX_FIELDS:
+        if name == "manual_roi":
+            roi = normalize_manual_roi(value)
+            return (True, list(roi)) if roi is not None else (False, None)
+        if name == "class_names_order":
+            if not isinstance(value, (list, tuple)):
+                return False, None
+            names = [str(v) for v in value if isinstance(v, (str, int, float))]
+            return (True, names) if names else (False, None)
+        if name == "sign_sequence":
+            # Always exactly SIGN_SEQUENCE_LEN characters — the sequence is
+            # the model's slot contract, so a truncated one from a
+            # hand-edited file is padded rather than rejected, and a long
+            # one is cut.  An all-blank sequence carries no information and
+            # is dropped so the field falls back to the dataclass default.
+            seq = normalize_sign_sequence(value)
+            return (True, seq) if any(c != SIGN_SEQUENCE_PAD for c in seq) else (False, None)
+        if name == "class_preprocess":
+            cfg = normalize_class_preprocess_map(value)
+            return (True, cfg) if cfg else (False, None)
+        if name == "sample_preprocess":
+            cfg = normalize_sample_preprocess_map(value)
+            return (True, cfg) if cfg else (False, None)
+        return False, None
+    if name in _TRAIN_CFG_ENUMS:
+        text = str(value).strip().lower()
+        return (True, text) if text in _TRAIN_CFG_ENUMS[name] else (False, None)
+
+    # The declared type is the dataclass default's type, so a field added
+    # later is coerced correctly without touching this function.
+    default = _train_cfg_schema().get(name)
+    if isinstance(default, bool):
+        # Before the int branch: bool subclasses int, and these fields are
+        # strictly boolean on the trainer side.
+        return True, _is_truthy(value)
+    if isinstance(default, int):
+        try:
+            return True, int(value)
+        except Exception:
+            return False, None
+    if isinstance(default, float):
+        try:
+            return True, float(value)
+        except Exception:
+            return False, None
+    if isinstance(default, str):
+        text = str(value)
+        return (True, text) if text else (False, None)
+    # No usable default and not one of the complex fields: hand the JSON back
+    # unchanged so a future nested config survives instead of being dropped
+    # for lack of a coercion rule.
+    return True, value
+
+
+def pick_train_cfg(raw: Any) -> Dict[str, Any]:
+    """Project a JSON blob onto the TrainConfig schema.
+
+    Only keys the blob actually carries come back, so an empty result still
+    means "this source had nothing to say" and the callers' fallback chain
+    (project state -> runs/latest/train_config.json -> train meta) keeps
+    working.  Values are coerced to their declared types and validated
+    against the enumerated sets; every field the schema knows about survives.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    out: Dict[str, Any] = {}
+    for name in train_cfg_field_names():
+        if name not in src:
+            continue
+        keep, value = _coerce_train_cfg_value(name, src.get(name))
+        if keep:
+            out[name] = value
+    return out
+
+
+def missing_train_cfg_fields(saved: Any) -> List[str]:
+    """Schema fields a saved config does not carry — the legacy marker.
+
+    A v1 archive carries a 12-key train_cfg; a v2 one carries the lot.  The
+    load path reports the difference so a user opening an old project is told
+    which settings came back at their defaults, instead of discovering it
+    from a model trained with a different mix than the file implies.
+    """
+    src = saved if isinstance(saved, dict) else {}
+    return [n for n in train_cfg_field_names() if n not in src]
+
+
 _TFLITE_OP_RESOLVER_MAP = {
     "ADD": "Add",
     "AVERAGE_POOL_2D": "AveragePool2D",
@@ -186,7 +467,9 @@ _TFLITE_OP_RESOLVER_MAP = {
     "PAD": "Pad",
     "QUANTIZE": "Quantize",
     "DEQUANTIZE": "Dequantize",
+    "REDUCE_MAX": "ReduceMax",
     "RESHAPE": "Reshape",
+    "RSQRT": "Rsqrt",
     "SHAPE": "Shape",
     "SOFTMAX": "Softmax",
     "STRIDED_SLICE": "StridedSlice",
@@ -198,16 +481,51 @@ def _generate_model_resolver_h(tflite_bytes: bytes) -> str:
     ops = []
     try:
         import tensorflow as tf
-        interp = tf.lite.Interpreter(model_content=tflite_bytes)
+        # A default-constructed Interpreter applies the XNNPACK delegate at
+        # allocate_tensors().  That does two things to the graph we are about
+        # to read: it appends a node literally named `DELEGATE`, and it may
+        # FUSE real ops away.  Neither is what the device's TFLM interpreter
+        # runs, so the list read from it is the wrong list.  DELEGATE has no
+        # Add*() mapping, so every export would print a bogus "will OMIT
+        # DELEGATE" warning; worse, a fused-away op would be missing from the
+        # resolver entirely and the device would fail AllocateTensors() with
+        # only "AllocateTensors() failed" on the serial console.  Ask for the
+        # builtin kernels only.
+        try:
+            interp = tf.lite.Interpreter(
+                model_content=tflite_bytes,
+                experimental_op_resolver_type=(
+                    tf.lite.experimental.OpResolverType
+                    .BUILTIN_WITHOUT_DEFAULT_DELEGATES),
+            )
+        except Exception:
+            # Older (or future) TF without that enum: keep the plain
+            # constructor, but still drop DELEGATE by name so the fallback
+            # degrades to the pre-fix behaviour instead of warning forever.
+            interp = tf.lite.Interpreter(model_content=tflite_bytes)
         interp.allocate_tensors()
         for detail in interp._get_ops_details():
             op = str(detail.get("op_name") or "")
-            if op and op not in ops:
+            if op and op != "DELEGATE" and op not in ops:
                 ops.append(op)
     except Exception:
         pass
     if not ops:
         ops = ["CONV_2D", "MAX_POOL_2D", "SHAPE", "STRIDED_SLICE", "PACK", "RESHAPE", "FULLY_CONNECTED", "SOFTMAX"]
+    # An op with no Add*() mapping is NOT a cosmetic loss: the generated
+    # resolver would be missing that kernel, MicroInterpreter::AllocateTensors()
+    # would fail on the device, and the only symptom is a sketch that flashes
+    # and then prints "AllocateTensors() failed".  Say it here instead.
+    dropped = [op for op in ops if op not in _TFLITE_OP_RESOLVER_MAP]
+    if dropped:
+        print(
+            "[export] WARNING: model_resolver.h will OMIT "
+            + ", ".join(dropped)
+            + " — no mapping in _TFLITE_OP_RESOLVER_MAP. The device will fail "
+            "AllocateTensors(). Add the mapping (and make sure the TFLM build "
+            "ships that kernel) before flashing.",
+            file=sys.stderr,
+        )
     resolved = [op for op in ops if op in _TFLITE_OP_RESOLVER_MAP]
     if not resolved:
         resolved = ["CONV_2D", "FULLY_CONNECTED", "SOFTMAX"]
@@ -247,6 +565,15 @@ def _generate_model_resolver_h(tflite_bytes: bytes) -> str:
 LIVE_IDLE_S = 15.0
 LIVE_STALE_S = 1.5
 
+# Longest side a saved webcam sample keeps.  The saved PNG is the "Original
+# Sample" the user draws a Manual ROI on, so downsampling it to the model
+# input size (28x28 for OCR) at capture time destroyed the very detail the
+# editor exists to select.  Downsampling belongs in the preprocessing
+# pipeline, AFTER the crop — _cache_one_sample / _preprocess_image_png
+# already do exactly that.  Serial captures are unaffected: the device only
+# ever sends 96x96, so there is nothing to preserve.
+CAPTURE_MAX_SIDE = 1024
+
 
 class RecordController:
     def __init__(self) -> None:
@@ -262,6 +589,11 @@ class RecordController:
         self._train_conds: Dict[str, threading.Condition] = {}
         self._preview: Dict[str, Dict[str, Any]] = {}
         self._preview_locks: Dict[str, threading.Lock] = {}
+        # The most recent uploaded Preview image per session.  /preview/upload
+        # keeps it so a Dark/Lum slider move or an ROI/Orig tab switch can
+        # re-run inference on the SAME picture without re-uploading it; the
+        # SPA sends reuse=1 for those re-evaluations.
+        self._preview_uploads: Dict[str, Dict[str, Any]] = {}
         self._server: Optional[ThreadingHTTPServer] = None
         self._port: Optional[int] = None
         self._thread: Optional[threading.Thread] = None
@@ -359,6 +691,8 @@ class RecordController:
         serial_frame_side: Optional[int] = None,
         serial_channels: Optional[int] = None,
         direct_tensor_stream: Optional[bool] = None,
+        project_type: Optional[str] = None,
+        fps: Optional[float] = None,
     ) -> SessionConfig:
         with self._lock:
             cfg = self._configs.get(session_id)
@@ -366,6 +700,8 @@ class RecordController:
                 raise RuntimeError("missing config")
             updated = replace(
                 cfg,
+                project_type=str(cfg.project_type if project_type is None else project_type),
+                fps=float(cfg.fps if fps is None else fps),
                 webcam_index=int(cfg.webcam_index if webcam_index is None else webcam_index),
                 webcam_id=(str(cfg.webcam_id) if cfg.webcam_id else "") if webcam_id is None else str(webcam_id),
                 img_size=int(cfg.img_size if img_size is None else img_size),
@@ -591,8 +927,16 @@ class RecordController:
                     "/dev/tty.bluetooth-incoming-port",
                     "/dev/tty.debug-console",
                 }
+                seen = set()
                 for p in list_serial_ports():
                     dev = str(p.device or "")
+                    # Skip entries we have already emitted — some adapters
+                    # enumerate the same COM port under multiple interface
+                    # descriptions, which would otherwise produce duplicate
+                    # dropdown entries.
+                    if dev in seen:
+                        continue
+                    seen.add(dev)
                     desc = str(getattr(p, "description", "") or "")
                     d_low = dev.strip().lower()
                     if d_low in blocked:
@@ -622,7 +966,7 @@ class RecordController:
                 _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
                 return
             p = _save_png(cfg.dataset_root, class_name, png)
-            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             _send_json(req, {"ok": "1", "class": class_name, "filename": p.name}, cors=True)
             return
         if path == "/live/open":
@@ -658,9 +1002,22 @@ class RecordController:
             serial_frame_side_raw = (qs.get("serial_frame_side") or [None])[0]
             serial_channels_raw = (qs.get("serial_channels") or [None])[0]
             direct_tensor_raw = (qs.get("direct_tensor_stream") or [None])[0]
+            project_type_raw = (qs.get("project_type") or [None])[0]
+            fps_raw = (qs.get("fps") or [None])[0]
+            auto_seed_raw = (qs.get("auto_seed_emnist") or [None])[0]
+            include_state_raw = (qs.get("include_state") or [None])[0]
+            # The SPA's target sign travels with the auto-fill request so
+            # this endpoint can both persist it and hand it to the seeder,
+            # which uses it to prepare a synthetic Preview image.
+            sign_seq_raw = (qs.get("sign_sequence") or qs.get("sign_seq") or [None])[0]
+            reading_order_raw = (qs.get("reading_order") or qs.get("reading") or [None])[0]
             try:
                 if serial_sync_raw not in (None, ""):
                     parse_sync_header(serial_sync_raw)
+                if fps_raw not in (None, ""):
+                    fps_val = float(fps_raw)
+                    if fps_val < 1.0 or fps_val > 60.0:
+                        raise ValueError("fps must be between 1 and 60")
                 if serial_frame_side_raw not in (None, ""):
                     side = int(float(serial_frame_side_raw))
                     if side < 8 or side > 512:
@@ -680,6 +1037,8 @@ class RecordController:
                     serial_frame_side=None if serial_frame_side_raw in (None, "") else int(float(serial_frame_side_raw)),
                     serial_channels=None if serial_channels_raw in (None, "") else int(float(serial_channels_raw)),
                     direct_tensor_stream=None if direct_tensor_raw in (None, "") else direct_tensor_raw in ("1", "true", "True"),
+                    project_type=None if project_type_raw in (None, "") else str(project_type_raw).strip().lower(),
+                    fps=None if fps_raw in (None, "") else float(fps_raw),
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -687,24 +1046,65 @@ class RecordController:
             with self._lock:
                 wc_state = self._live.get(self._live_key(session_id, "webcam"))
             wc_actual = dict((wc_state or {}).get("actual") or {})
-            _send_json(
-                req,
-                {
-                    "ok": "1",
-                    "direct_tensor_stream": "1" if bool(getattr(cfg, "direct_tensor_stream", False)) else "0",
-                    "webcam_index": str(int(cfg.webcam_index)),
-                    "webcam_id": str(cfg.webcam_id or ""),
-                    "webcam_actual_backend": str(wc_actual.get("backend") or ""),
-                    "webcam_actual_uid": str(wc_actual.get("unique_id") or ""),
-                    "img_size": str(int(cfg.img_size)),
-                    "serial_port": str(cfg.serial_port),
-                    "serial_baud": str(int(cfg.serial_baud)),
-                    "serial_sync": str(cfg.serial_sync),
-                    "serial_frame_side": str(int(cfg.serial_frame_side)),
-                    "serial_channels": str(int(cfg.serial_channels)),
-                },
-                cors=True,
-            )
+            # The Settings checkbox speaks through this endpoint when it
+            # flips: persist the flag, then backfill any class that is
+            # already on disk with zero samples.  `include_state=1` is the
+            # read-only variant used when the SPA wants the full state back
+            # after a live-setting change.
+            response: Dict[str, Any] = {
+                "ok": "1",
+                "direct_tensor_stream": "1" if bool(getattr(cfg, "direct_tensor_stream", False)) else "0",
+                "webcam_index": str(int(cfg.webcam_index)),
+                "webcam_id": str(cfg.webcam_id or ""),
+                "webcam_actual_backend": str(wc_actual.get("backend") or ""),
+                "webcam_actual_uid": str(wc_actual.get("unique_id") or ""),
+                "img_size": str(int(cfg.img_size)),
+                "project_type": str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                "serial_port": str(cfg.serial_port),
+                "serial_baud": str(int(cfg.serial_baud)),
+                "serial_sync": str(cfg.serial_sync),
+                "serial_frame_side": str(int(cfg.serial_frame_side)),
+                "serial_channels": str(int(cfg.serial_channels)),
+                # Read-back for the Settings FPS field.  fps PACES the
+                # record thread, so a page that showed its local default
+                # (8.0) while the session actually ran at another rate was
+                # reporting a number the capture did not obey.
+                "fps": str(float(cfg.fps)),
+            }
+            if sign_seq_raw not in (None, "") or reading_order_raw not in (None, ""):
+                try:
+                    patch: Dict[str, Any] = {}
+                    if sign_seq_raw not in (None, ""):
+                        patch["sign_sequence"] = normalize_sign_sequence(sign_seq_raw)
+                    if reading_order_raw not in (None, ""):
+                        order = str(reading_order_raw).strip().lower()
+                        if order in ("ltr", "rtl"):
+                            patch["reading_order"] = order
+                    if patch:
+                        self._save_train_cfg(session_id, patch)
+                except Exception:
+                    pass
+            if auto_seed_raw is not None:
+                try:
+                    enabled = _is_truthy(auto_seed_raw)
+                    self._save_train_cfg(
+                        session_id,
+                        {"auto_seed_emnist_samples": enabled},
+                    )
+                    if enabled:
+                        self._seed_empty_char_classes(
+                            session_id,
+                            sign_sequence=sign_seq_raw,
+                            reading_order=reading_order_raw,
+                        )
+                except Exception:
+                    pass
+            if auto_seed_raw is not None or _is_truthy(include_state_raw):
+                try:
+                    response.update(self._runtime_state_payload(session_id))
+                except Exception:
+                    pass
+            _send_json(req, response, cors=True)
             return
         if path == "/live/frame":
             session_id = (qs.get("session") or [""])[0]
@@ -731,8 +1131,12 @@ class RecordController:
             ood_sign_max_raw = (qs.get("ood_sign_max") or [""])[0]
             ood_max_prob_raw = (qs.get("ood_max_prob") or [""])[0]
             ood_entropy_max_raw = (qs.get("ood_entropy_max") or [""])[0]
+            sign_seq_raw = (qs.get("sign_seq") or [""])[0]
+            reading_raw = (qs.get("reading") or [""])[0]
+            match_min_raw = (qs.get("match_min") or [""])[0]
             bg_dark_thresh = int(bg_dark_raw) if str(bg_dark_raw).strip() != "" else None
             bg_lum_thresh  = int(bg_lum_raw)  if str(bg_lum_raw).strip()  != "" else None
+            sign_match_min = float(match_min_raw) if str(match_min_raw).strip() != "" else None
             ood_sign_pct_min = float(ood_sign_min_raw) if str(ood_sign_min_raw).strip() != "" else None
             ood_sign_pct_max = float(ood_sign_max_raw) if str(ood_sign_max_raw).strip() != "" else None
             ood_max_prob_min = float(ood_max_prob_raw) if str(ood_max_prob_raw).strip() != "" else None
@@ -753,24 +1157,34 @@ class RecordController:
                 # to what their downstream MCU classifier will ingest.
                 capture_png = self._get_live_capture(session_id=session_id, source=source)
                 predict_png = capture_png if capture_png else preview_png
-                pred = self._preview_predict(
-                    session_id=session_id,
-                    png=predict_png,
-                    preprocess_mode=preprocess_mode,
-                    bg_dark_thresh=bg_dark_thresh,
-                    bg_lum_thresh=bg_lum_thresh,
-                    ood_sign_pct_min=ood_sign_pct_min,
-                    ood_sign_pct_max=ood_sign_pct_max,
-                    ood_max_prob_min=ood_max_prob_min,
-                    ood_entropy_ratio_max=ood_entropy_ratio_max,
-                    source=source,
-                )
+                if self._is_sign_ocr_session(session_id):
+                    pred = self._preview_predict_sign_ocr(
+                        session_id=session_id,
+                        png=predict_png,
+                        sign_sequence=sign_seq_raw,
+                        reading_order=reading_raw,
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        match_min_prob=sign_match_min,
+                        source=source,
+                    )
+                else:
+                    pred = self._preview_predict(
+                        session_id=session_id,
+                        png=predict_png,
+                        preprocess_mode=preprocess_mode,
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        ood_sign_pct_min=ood_sign_pct_min,
+                        ood_sign_pct_max=ood_sign_pct_max,
+                        ood_max_prob_min=ood_max_prob_min,
+                        ood_entropy_ratio_max=ood_entropy_ratio_max,
+                        source=source,
+                    )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(
-                req,
-                {
+            payload = {
                     "ok": "1",
                     "labels": pred.get("labels") or [],
                     "probs": pred.get("probs") or [],
@@ -788,9 +1202,10 @@ class RecordController:
                     "processed_variant": str(pred.get("processed_variant") or ""),
                     "crop": pred.get("crop"),
                     "model_source": str(pred.get("model_source") or "latest"),
-                },
-                cors=True,
-            )
+            }
+            if pred.get("sign_ocr"):
+                payload.update(sign_ocr_payload_extras(pred))
+            _send_json(req, payload, cors=True)
             return
         if path == "/export/pick_dir":
             picked: Optional[str] = None
@@ -979,7 +1394,7 @@ class RecordController:
                 _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
                 return
             p = _save_png(cfg.dataset_root, class_name, png)
-            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             _send_json(
                 req,
                 {
@@ -1041,11 +1456,17 @@ class RecordController:
             "/project/reset",
             "/classes/rename",
             "/classes/add",
+            "/classes/add_named",
+            "/classes/sync_ocr",
             "/classes/delete",
             "/samples/delete",
             "/samples/clear",
+            "/samples/seed_emnist",
+            "/classes/seed_emnist",
             "/preprocess/preview",
             "/preview/predict_upload",
+            "/preview/upload",
+            "/preview/synthesize_sign",
             "/classes/save_config",
             "/classes/reorder",
         }:
@@ -1057,7 +1478,35 @@ class RecordController:
             _send_json(req, {"ok": "0", "error": "empty body"}, status=400, cors=True)
             return
         raw = req.rfile.read(content_len)
-        payload = json.loads(raw.decode("utf-8"))
+        content_type = str(req.headers.get("Content-Type", "") or "").lower()
+        if path == "/preview/upload" and "application/json" not in content_type:
+            # A real file upload: the body IS the PNG/JPG bytes (either raw
+            # with an image/* Content-Type or multipart/form-data).  Session
+            # and options may ride on the query string so a bare `curl
+            # --data-binary @sign.png` works without a JSON envelope.
+            qs_params = parse_qs(parsed.query)
+            payload: Dict[str, Any] = {
+                "session": (qs_params.get("session") or [""])[0],
+                "image_bytes": raw,
+            }
+            if "multipart/form-data" in content_type:
+                payload.update(_parse_multipart_form(raw, content_type))
+            for key in (
+                "reuse",
+                "filename",
+                "preprocess",
+                "dark",
+                "bg_dark",
+                "lum",
+                "bg_lum",
+                "sign_sequence",
+                "reading_order",
+                "match_min",
+            ):
+                if key in qs_params:
+                    payload[key] = (qs_params[key] or [""])[0]
+        else:
+            payload = json.loads(raw.decode("utf-8"))
         if path == "/blockcoding-export":
             session_id = str(payload.get("session") or "").strip()
             if not session_id:
@@ -1117,7 +1566,7 @@ class RecordController:
                     except Exception:
                         pass
                 p = _save_png(cfg.dataset_root, class_name, png)
-                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
@@ -1162,10 +1611,28 @@ class RecordController:
                         self.update_config(session_id, img_size=size)
                 except Exception:
                     pass
+                # The auto-fill toggle lives in TrainConfig, so saving a
+                # config that turns it ON is exactly the moment to backfill
+                # classes that already exist and are still empty — no page
+                # reload, no waiting for the next class edit.
+                try:
+                    if isinstance(cfg, dict) and _is_truthy(cfg.get("auto_seed_emnist_samples")):
+                        self._seed_empty_char_classes(
+                            session_id,
+                            sign_sequence=cfg.get("sign_sequence"),
+                            reading_order=cfg.get("reading_order"),
+                        )
+                except Exception:
+                    pass
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(req, {"ok": "1"}, cors=True)
+            response = {"ok": "1"}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
             return
         if path == "/train/recommend":
             session_id = str(payload.get("session") or "").strip()
@@ -1216,6 +1683,7 @@ class RecordController:
         if path == "/classes/save_config":
             session_id = str(payload.get("session") or "").strip()
             class_preprocess = payload.get("class_preprocess")
+            sample_preprocess = payload.get("sample_preprocess")
             if not session_id:
                 _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
                 return
@@ -1226,10 +1694,22 @@ class RecordController:
                     _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
                     return
                 classes = self._classes_load(sess_cfg.dataset_root)
+                # BOTH maps, and each one only when the caller actually sent
+                # it: _classes_save treats None as "keep what is on disk", so a
+                # save that carries only one of them cannot blank the other.
+                # sample_preprocess had no writer at all before this — the Edit
+                # modal's per-sample ROI reached the disk only if the user
+                # happened to save the whole .tmproj, so a drag + "Save Sample"
+                # silently died on reload.
                 self._classes_save(
                     sess_cfg.dataset_root,
                     classes,
                     class_preprocess=normalize_class_preprocess_map(class_preprocess) if class_preprocess else None,
+                    # `is not None`, not truthiness: an EMPTY map is what the
+                    # client sends after removing the last sample override, and
+                    # that has to clear the stored map rather than be read as
+                    # "no opinion, keep what is on disk".
+                    sample_preprocess=normalize_sample_preprocess_map(sample_preprocess) if sample_preprocess is not None else None,
                 )
                 # Thresholds / ROI config changed — the processed cache must
                 # follow so previews and the next training use the new
@@ -1238,8 +1718,10 @@ class RecordController:
                     self._rebuild_processed_cache(
                         sess_cfg.dataset_root,
                         class_preprocess=normalize_class_preprocess_map(class_preprocess) if class_preprocess else None,
+                        sample_preprocess=normalize_sample_preprocess_map(sample_preprocess) if sample_preprocess is not None else None,
                         fast_mode=False,
                         out_size=int(sess_cfg.img_size),
+                        project_type=str(sess_cfg.project_type),
                     )
                 except Exception:
                     pass
@@ -1269,17 +1751,32 @@ class RecordController:
                 return
             try:
                 png = base64.b64decode(image_b64, validate=True)
-                pred = self._preview_predict(
-                    session_id=session_id,
-                    png=png,
-                    preprocess_mode=preprocess_mode,
-                    bg_dark_thresh=bg_dark_thresh,
-                    bg_lum_thresh=bg_lum_thresh,
-                    ood_sign_pct_min=ood_sign_pct_min,
-                    ood_sign_pct_max=ood_sign_pct_max,
-                    ood_max_prob_min=ood_max_prob_min,
-                    ood_entropy_ratio_max=ood_entropy_ratio_max,
-                )
+                if self._is_sign_ocr_session(session_id):
+                    pred = self._preview_predict_sign_ocr(
+                        session_id=session_id,
+                        png=png,
+                        sign_sequence=payload.get("sign_sequence"),
+                        reading_order=payload.get("reading_order"),
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        match_min_prob=(
+                            float(payload.get("match_min"))
+                            if payload.get("match_min") is not None and str(payload.get("match_min")).strip() != ""
+                            else None
+                        ),
+                    )
+                else:
+                    pred = self._preview_predict(
+                        session_id=session_id,
+                        png=png,
+                        preprocess_mode=preprocess_mode,
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        ood_sign_pct_min=ood_sign_pct_min,
+                        ood_sign_pct_max=ood_sign_pct_max,
+                        ood_max_prob_min=ood_max_prob_min,
+                        ood_entropy_ratio_max=ood_entropy_ratio_max,
+                    )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
@@ -1293,12 +1790,291 @@ class RecordController:
                 cors=True,
             )
             return
+        if path == "/preview/upload":
+            # Accepts the image either as JSON (image_b64) or as the raw
+            # request body (see the parser at the top of _handle_post), keeps
+            # the most recent one per session, and answers with everything
+            # the Preview card draws: the ORIGINAL picture, the processed
+            # ROI, the per-slot glyphs and the sign verdict (sign projects)
+            # or class ranking (image/OCR).  `reuse=1` re-runs inference on
+            # the stored image when the Dark/Lum sliders or the ROI/Orig
+            # tabs change — no second upload.
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            image_bytes = payload.get("image_bytes")
+            image_b64_in = str(payload.get("image_b64") or "").strip()
+            reuse = _is_truthy(payload.get("reuse"))
+            filename = str(payload.get("filename") or "").strip()
+            if not image_bytes and image_b64_in:
+                try:
+                    image_bytes = base64.b64decode(image_b64_in, validate=True)
+                except Exception as e:
+                    _send_json(req, {"ok": "0", "error": f"invalid image data: {e}"}, status=400, cors=True)
+                    return
+            if not image_bytes and reuse:
+                with self._lock:
+                    stored = dict(self._preview_uploads.get(session_id) or {})
+                image_bytes = stored.get("bytes")
+                filename = filename or str(stored.get("filename") or "")
+            if not image_bytes:
+                _send_json(
+                    req,
+                    {"ok": "0", "error": "missing image (send image_b64 or raw image bytes)"},
+                    status=400,
+                    cors=True,
+                )
+                return
+            # Re-encode to a clean PNG BEFORE storing: EXIF-rotated phone
+            # photos and palette/CMYK JPEGs would otherwise make the same
+            # upload preprocess differently from the preview shown.
+            try:
+                src_img = Image.open(_bytes_io(image_bytes))
+                try:
+                    src_img = ImageOps.exif_transpose(src_img)
+                    if src_img.mode not in {"L", "RGB"}:
+                        src_img = src_img.convert("RGB")
+                    orig_png = _to_png_bytes(src_img)
+                finally:
+                    try:
+                        src_img.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": f"unsupported image: {e}"}, status=400, cors=True)
+                return
+            with self._lock:
+                self._preview_uploads[session_id] = {
+                    "bytes": orig_png,
+                    "filename": filename,
+                    # A real file the user chose; the sign auto-preview must
+                    # never replace it on the next auto-fill / training run.
+                    "synthetic": False,
+                }
+
+            def _opt_int(*keys: str) -> Optional[int]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return int(float(raw))
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            def _opt_float(*keys: str) -> Optional[float]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return float(raw)
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            bg_dark_thresh = _opt_int("bg_dark", "dark")
+            bg_lum_thresh = _opt_int("bg_lum", "lum")
+            try:
+                if self._is_sign_ocr_session(session_id):
+                    pred = self._preview_predict_sign_ocr(
+                        session_id=session_id,
+                        png=orig_png,
+                        sign_sequence=payload.get("sign_sequence"),
+                        reading_order=payload.get("reading_order"),
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        match_min_prob=_opt_float("match_min", "match_min_prob"),
+                    )
+                else:
+                    pred = self._preview_predict(
+                        session_id=session_id,
+                        png=orig_png,
+                        preprocess_mode=str(payload.get("preprocess") or "").strip(),
+                        bg_dark_thresh=bg_dark_thresh,
+                        bg_lum_thresh=bg_lum_thresh,
+                        ood_sign_pct_min=_opt_float("ood_sign_min"),
+                        ood_sign_pct_max=_opt_float("ood_sign_max"),
+                        ood_max_prob_min=_opt_float("ood_max_prob"),
+                        ood_entropy_ratio_max=_opt_float("ood_entropy_max"),
+                    )
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            orig_b64 = base64.b64encode(orig_png).decode("ascii")
+            _send_json(
+                req,
+                {
+                    "ok": "1",
+                    **pred,
+                    # `orig` is the untouched upload (EXIF-corrected); `roi`
+                    # is the exact model-input rendering.  Kept as separate
+                    # keys because the SPA's ROI/Orig toggles use them by
+                    # name; image_b64 stays for older callers.
+                    "image_b64": orig_b64,
+                    "orig_b64": orig_b64,
+                    "roi_b64": str(pred.get("processed_image_b64") or ""),
+                    "filename": filename or "upload",
+                },
+                cors=True,
+            )
+            return
+        if path == "/preview/synthesize_sign":
+            # The zero-files version of /preview/upload: draw a whole 3-char
+            # sign from the project's own samples (EMNIST fallback), store
+            # it as the active Preview frame, and immediately run the same
+            # sign split + three invokes the upload path runs.  One response
+            # shape, so the SPA card does not care which one produced it.
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            if not self._is_sign_ocr_session(session_id):
+                _send_json(
+                    req,
+                    {"ok": "0", "error": "sign synthesis is only available in a sign_ocr project"},
+                    status=400,
+                    cors=True,
+                )
+                return
+
+            def _synth_int(*keys: str) -> Optional[int]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return int(float(raw))
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            def _synth_float(*keys: str) -> Optional[float]:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is not None and str(raw).strip() != "":
+                        try:
+                            return float(raw)
+                        except (TypeError, ValueError):
+                            return None
+                return None
+
+            try:
+                variant = str(payload.get("variant") or "match").strip().lower()
+                candidates: List[Any] = [None]
+                if variant == "mismatch":
+                    # The model only has the project's own classes to answer
+                    # with, so an unseen replacement glyph can be MISREAD as
+                    # the target character — which would paint a false green
+                    # YES on a plate that is genuinely a different sign.
+                    # Retry replacement characters until the reading is
+                    # actually wrong.
+                    seq_for_alt, _order = self._sign_preview_sequence(
+                        session_id,
+                        chars=payload.get("chars"),
+                        sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
+                        reading_order=payload.get("reading_order") or payload.get("reading"),
+                    )
+                    candidates = [
+                        c for c in "56789ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in seq_for_alt
+                    ][:10] or [None]
+                else:
+                    # Even a MATCH plate can draw an unlucky glyph variant
+                    # (a thin EMNIST '1', a slanted 'A') that the current
+                    # model reads just under the confidence floor, and a
+                    # REVERSED plate can be read as the target by chance.
+                    # Redraw — fresh glyph pick, size and jitter — until the
+                    # plate shows the verdict the button promises.  Every
+                    # variant has an intended answer, and the whole point of
+                    # the button is to demonstrate it.
+                    candidates = [None] * 8
+                synth = None
+                pred = None
+                for alt_char in candidates:
+                    synth = self._synthesize_sign_preview_png(
+                        session_id=session_id,
+                        variant=variant,
+                        chars=payload.get("chars"),
+                        sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
+                        reading_order=payload.get("reading_order") or payload.get("reading"),
+                        alt_char=alt_char,
+                    )
+                    pred = self._preview_predict_sign_ocr(
+                        session_id=session_id,
+                        png=synth["png"],
+                        sign_sequence=synth["sign_sequence"],
+                        reading_order=synth["reading_order"],
+                        bg_dark_thresh=_synth_int("bg_dark", "dark"),
+                        bg_lum_thresh=_synth_int("bg_lum", "lum"),
+                        match_min_prob=_synth_float("match_min", "match_min_prob"),
+                    )
+                    if variant == "match":
+                        intended = True
+                    elif variant == "reversed":
+                        # Reversed pixels read right-to-left are the target.
+                        intended = synth["reading_order"] == "rtl"
+                    else:
+                        intended = False
+                    # The LAST attempted plate is the one the synthesizer
+                    # stored, so the response, the buffer and the drawn slots
+                    # always describe the same frame.
+                    if bool(pred.get("match")) == intended:
+                        break
+                if synth is None or pred is None:
+                    raise ValueError("could not draw a sign preview")
+                png = synth["png"]
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            orig_b64 = base64.b64encode(png).decode("ascii")
+            _send_json(
+                req,
+                {
+                    "ok": "1",
+                    **pred,
+                    "image_b64": orig_b64,
+                    "orig_b64": orig_b64,
+                    "roi_b64": str(pred.get("processed_image_b64") or ""),
+                    "filename": synth["filename"],
+                    # Provenance for the card's note and for a test that
+                    # wants to assert WHICH plate was drawn.
+                    "synth_variant": synth["variant"],
+                    "synth_chars": synth["chars"],
+                },
+                cors=True,
+            )
+            return
         if path == "/export/run":
             session_id = str(payload.get("session") or "").strip()
             export_dir = str(payload.get("export_dir") or "").strip()
             model_name = str(payload.get("model_name") or "model").strip() or "model"
             array_name = str(payload.get("array_name") or "g_model").strip() or "g_model"
             overwrite = _is_truthy(payload.get("overwrite"))
+            # Preview-time OOD + preprocessing thresholds, forwarded from the
+            # SPA so the device export stamps them into model_settings.h.
+            # Defaults mirror the predict endpoint so an export never ships a
+            # None / unset value.
+            def _num(key, default, cast=float):
+                raw = payload.get(key)
+                if raw is None or str(raw).strip() == "":
+                    return default
+                try:
+                    return cast(raw)
+                except (TypeError, ValueError):
+                    return default
+            runtime_config = {
+                "ood_sign_min": _num("ood_sign_min", 0.3),
+                "ood_sign_max": _num("ood_sign_max", 70.0),
+                "ood_max_prob": _num("ood_max_prob", 0.60),
+                "ood_entropy_max": _num("ood_entropy_max", 0.70),
+                "bg_dark_thresh": _num("bg_dark_thresh", 0, cast=int),
+                "bg_lum_thresh": _num("bg_lum_thresh", 100, cast=int),
+                # sign_ocr only.  String/None pass through; _export_run
+                # normalises them and falls back to the TrainConfig when the
+                # SPA did not send them (older SPA builds).
+                "sign_sequence": payload.get("sign_sequence"),
+                "reading_order": payload.get("reading_order"),
+                "match_min_prob": _num("match_min_prob", 0.60),
+            }
             if not session_id or not export_dir:
                 _send_json(req, {"ok": "0", "error": "missing fields"}, status=400, cors=True)
                 return
@@ -1309,6 +2085,7 @@ class RecordController:
                     model_name=model_name,
                     array_name=array_name,
                     overwrite=overwrite,
+                    runtime_config=runtime_config,
                 )
             except ExportConflictError as e:
                 _send_json(
@@ -1396,10 +2173,149 @@ class RecordController:
                 return
             try:
                 classes = self._classes_add(session_id=session_id)
+                self._seed_empty_char_classes(session_id)
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
-            _send_json(req, {"ok": "1", "classes": classes}, cors=True)
+            response = {"ok": "1", "classes": classes}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
+            return
+        if path == "/classes/add_named":
+            # Same response shape as /classes/add so the two are interchangeable
+            # on the client: both hand back the whole ordered class list, which
+            # is what applyClassesState() wants.
+            session_id = str(payload.get("session") or "").strip()
+            names = payload.get("names")
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            if not isinstance(names, list) or not names:
+                _send_json(req, {"ok": "0", "error": "missing names"}, status=400, cors=True)
+                return
+            try:
+                classes = self._classes_add_named(
+                    session_id=session_id,
+                    names=names,
+                    prune_empty_placeholders=bool(payload.get("prune_placeholders")),
+                )
+                self._seed_empty_char_classes(session_id)
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            response = {"ok": "1", "classes": classes}
+            try:
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
+            return
+        if path == "/classes/sync_ocr":
+            # The road-sign UI has no class editor: its three inline slots ARE
+            # the class list.  This endpoint is the one write that makes the
+            # stored list (and, with it, the model's label order) agree with
+            # them after every edit.  Response shape matches the other class
+            # routes so the client can hand it straight to applyClassesState().
+            session_id = str(payload.get("session") or "").strip()
+            names = payload.get("names")
+            seq_raw = payload.get("sign_sequence")
+            order_raw = payload.get("reading_order")
+            auto_seed_raw = payload.get("auto_seed_emnist_samples")
+            if auto_seed_raw is None:
+                auto_seed_raw = payload.get("auto_seed_emnist")
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            # The sequence, when the caller sends it, IS the class list.  The
+            # SPA derives `names` from the same slots and keeps sending it for
+            # older servers, but taking the sequence here means a client can
+            # never sync a class list that disagrees with the target it just
+            # committed to the train config.
+            sequence: Optional[List[str]] = None
+            if seq_raw not in (None, ""):
+                sequence = normalize_sign_sequence(seq_raw)
+                derived: List[str] = []
+                for ch in sequence:
+                    if ch != SIGN_SEQUENCE_PAD and ch not in derived:
+                        derived.append(ch)
+                if derived:
+                    names = derived
+            if not isinstance(names, list) or not names:
+                _send_json(req, {"ok": "0", "error": "missing names"}, status=400, cors=True)
+                return
+            try:
+                with self._lock:
+                    sess_cfg = self._configs.get(session_id)
+                if sess_cfg is None:
+                    raise RuntimeError("missing config")
+                # Persist the target BEFORE the class sync / backfill: the
+                # synthetic preview drawn by the seeder, a later reopen and
+                # the export all read it from the project's train config.
+                patch: Dict[str, Any] = {}
+                if sequence is not None and any(
+                    ch != SIGN_SEQUENCE_PAD for ch in sequence
+                ):
+                    patch["sign_sequence"] = sequence
+                if order_raw not in (None, ""):
+                    order = str(order_raw).strip().lower()
+                    if order in ("ltr", "rtl"):
+                        patch["reading_order"] = order
+                if patch:
+                    self._save_train_cfg(session_id, patch)
+
+                classes = self._classes_sync_ocr(session_id=session_id, names=names)
+                # A slot character that just became a class starts empty.
+                # Backfill when EITHER the caller's current checkbox state or
+                # the project's persisted TrainConfig says auto-fill is on.
+                # The two can disagree — the checkbox is browser-local and
+                # survives a project switch, while the persisted flag follows
+                # the project — and OR-ing them is what makes "on" mean on
+                # regardless of which side last wrote it.
+                persisted_seed = self._auto_seed_emnist_enabled(sess_cfg.dataset_root)
+                incoming_seed = auto_seed_raw is not None and _is_truthy(auto_seed_raw)
+                if incoming_seed and not persisted_seed:
+                    # Heal the divergence: the next class-write endpoint (and
+                    # a later training run) must see what this request said.
+                    self._save_train_cfg(session_id, {"auto_seed_emnist_samples": True})
+                    persisted_seed = True
+                seeded: List[str] = []
+                seed_error = ""
+                if incoming_seed or persisted_seed:
+                    try:
+                        seeded = self._seed_empty_char_classes(
+                            session_id,
+                            sign_sequence=sequence if sequence is not None else seq_raw,
+                            reading_order=order_raw,
+                            strict=True,
+                        )
+                    except Exception as exc:
+                        # The classes were synced and persisted; report the
+                        # seeding failure without turning the whole edit into
+                        # a 400 (the SPA can retry with the error visible).
+                        seed_error = str(exc)
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            response = {
+                "ok": "1",
+                "classes": classes,
+                "seeded": seeded,
+                "seed_error": seed_error,
+            }
+            if sequence is not None:
+                response["sign_sequence"] = sequence
+            try:
+                # Runtime state is rebuilt AFTER seeding, so counts,
+                # sample_previews and train_enabled describe the files that
+                # are actually on disk when this response lands.  It also
+                # overrides `classes` with the persisted order.
+                response.update(self._runtime_state_payload(session_id))
+            except Exception:
+                pass
+            _send_json(req, response, cors=True)
             return
         if path == "/samples/delete":
             session_id = str(payload.get("session") or "").strip()
@@ -1427,6 +2343,30 @@ class RecordController:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
                 return
             _send_json(req, {"ok": "1", "state": state}, cors=True)
+            return
+        if path in ("/samples/seed_emnist", "/classes/seed_emnist"):
+            session_id = str(payload.get("session") or "").strip()
+            names = payload.get("classes")
+            only_empty = any(
+                _is_truthy(payload.get(key))
+                for key in ("only_empty", "fill_empty", "all_empty")
+            )
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            try:
+                result = self._samples_seed_emnist(
+                    session_id=session_id,
+                    classes=names if isinstance(names, list) and names else None,
+                    count=payload.get("count", TEMPLATE_SAMPLE_DEFAULT_COUNT),
+                    only_empty=only_empty,
+                    sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
+                    reading_order=payload.get("reading_order") or payload.get("reading"),
+                )
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {"ok": "1", **result}, cors=True)
             return
         if path == "/classes/delete":
             session_id = str(payload.get("session") or "").strip()
@@ -1476,7 +2416,7 @@ class RecordController:
         img = img.resize((int(cfg.img_size), int(cfg.img_size)))
         out_png = _to_png_bytes(img)
         p = _save_png(cfg.dataset_root, class_name, out_png)
-        self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+        self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
         _send_json(
             req,
             {
@@ -1585,6 +2525,262 @@ class RecordController:
         classes = list(classes) + [self._next_class_name(classes)]
         self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
         return classes
+
+    # The names _next_class_name / _tm_apply_project_defaults hand out.  A
+    # class still wearing one has never been named by anyone, which is what
+    # makes it safe to clean up without asking.
+    _PLACEHOLDER_CLASS_RE = re.compile(r"^Class [0-9]+$")
+
+    def _is_empty_placeholder(self, dataset_root: Path, name: str) -> bool:
+        """True for an untouched auto-named class: "Class N" with zero samples.
+
+        The sample test uses _list_class_image_files — the same helper the
+        workspace payload counts with — so the rule matches the number the user
+        sees on the card.  Anything unreadable is KEPT: this decides whether to
+        delete someone's class, so it fails closed.
+        """
+        if not self._PLACEHOLDER_CLASS_RE.match(str(name).strip()):
+            return False
+        class_dir = dataset_root / sanitize_class_name(name)
+        if not class_dir.exists():
+            return True  # never captured into — the directory is created lazily
+        try:
+            return len(_list_class_image_files(class_dir)) == 0
+        except Exception:
+            return False
+
+    def _classes_add_named(
+        self,
+        session_id: str,
+        names: List[Any],
+        prune_empty_placeholders: bool = False,
+    ) -> List[str]:
+        """Add classes under caller-chosen names — the OCR character selector.
+
+        _classes_add invents "Class N"; this one takes the names the user
+        picked.  Nothing else differs, and deliberately so: a class in this
+        app is a string in an ordered list plus whatever class_preprocess /
+        sample_preprocess entries hang off it, and all of that materialises on
+        demand (directories on first capture, preprocess defaults out of
+        normalize_class_preprocess).  So appending the name IS creating the
+        class, and capture, preview, training and export already treat it as
+        first-class without being told it came from a selector.
+
+        Names that are already classes are skipped rather than rejected, so
+        the selector can resend its whole selection on every click and stay
+        idempotent.  Names that cannot be classes raise — those are bad input,
+        not races, and failing loudly beats writing a half-built list.
+
+        prune_empty_placeholders drops untouched "Class N" placeholders in the
+        SAME write, so the selector's first click leaves the user with the
+        characters they asked for and nothing else.  Only classes with zero
+        samples go, so a placeholder someone has captured into is never touched,
+        and nothing being added in this request can be a candidate — `added` is
+        disjoint from `classes` by the dedupe above.
+
+        Only the app's own naming convention is subject to this.  A user who
+        deliberately types "Class 1" as a character in an OCR project is
+        wearing the app's namespace, and an empty class by that name will be
+        cleaned up on the next pick — which is the intended trade.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        classes = self._classes_load(cfg.dataset_root)
+        class_preprocess = self._class_preprocess_load(cfg.dataset_root)
+        sample_preprocess = self._sample_preprocess_load(cfg.dataset_root)
+
+        # Reserved: the OCR trainer appends this one itself as the reject
+        # class (ocr_dataset.BACKGROUND_CLASS_NAME).  A user class by that
+        # name would give the model two heads wearing one label.  Imported
+        # here rather than at module scope to keep this module independent of
+        # the OCR stack.
+        from ocr_dataset import BACKGROUND_CLASS_NAME
+
+        # Collisions are judged on the sanitised, lowercased name, because
+        # that is what actually collides: sanitize_class_name is what turns a
+        # class into a directory, so two classes that sanitise alike share
+        # their samples.  Case-insensitivity also stops "a" and "A" becoming
+        # two model outputs nobody can tell apart on the device.
+        taken = {sanitize_class_name(str(c)).lower() for c in classes}
+        reserved = {
+            BACKGROUND_CLASS_NAME.lower(),
+            sanitize_class_name(BACKGROUND_CLASS_NAME).lower(),
+        }
+
+        added: List[str] = []
+        for raw in names:
+            name = str(raw).strip()
+            if not name:
+                continue
+            if len(name) > 64:
+                raise ValueError(
+                    f"Class name is too long (max 64 characters): {name[:32]}..."
+                )
+            safe = sanitize_class_name(name)
+            if safe.lower() in reserved:
+                raise ValueError(f'"{name}" is reserved for the reject class.')
+            if safe.lower() in taken:
+                continue
+            taken.add(safe.lower())
+            added.append(name)
+
+        if not added:
+            return list(classes)  # nothing to do; not an error
+
+        if prune_empty_placeholders:
+            survivors = [c for c in classes if not self._is_empty_placeholder(cfg.dataset_root, c)]
+            dropped = [c for c in classes if c not in survivors]
+            if dropped:
+                # Mirror _classes_delete: a placeholder that is leaving takes
+                # its directory, its processed-cache directory and both of its
+                # preprocess entries with it.  Leaving any of them behind
+                # leaves a class that reappears on the next directory scan.
+                for name in dropped:
+                    class_preprocess.pop(name, None)
+                    sample_preprocess.pop(name, None)
+                    class_dir = cfg.dataset_root / sanitize_class_name(name)
+                    processed_dir = self._processed_cache_dir(cfg.dataset_root) / sanitize_class_name(name)
+                    for d in (class_dir, processed_dir):
+                        if d.exists():
+                            try:
+                                shutil.rmtree(d)
+                            except Exception:
+                                pass
+                classes = survivors
+
+        classes = list(classes) + added
+        self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
+        return classes
+
+    def _classes_sync_ocr(self, session_id: str, names: List[Any]) -> List[str]:
+        """Make the class list exactly the sign's characters, in sequence order.
+
+        The road-sign UI has no class editor of its own: the three inline slots
+        ARE the class list.  Every edit — typing a slot, swapping two, opening
+        a saved project — calls this, so STATE.classes and the dataset can
+        never drift from the sequence the model is being trained to read.
+
+        Keeping a character keeps its samples: a class is a name in an ordered
+        list plus its directory, so an existing class contributes its name and
+        directory and only the list is rewritten.  A character the sequence
+        does NOT name is removed together with its preprocess entries and
+        processed cache — in this project type such a class has no card to
+        capture into and no slot that can match it, so it would survive only
+        as a stale model output that makes every real sign carry an extra
+        near-miss.
+
+        Case is reconciled rather than treated as a second class:
+        sanitize_class_name() collides "a" with "A", and the device compares
+        characters uppercased, so an old lowercase class is renamed to the
+        slot's character instead of being duplicated.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+
+        wanted: List[str] = []
+        for raw in names:
+            text = str(raw).strip()
+            if not text:
+                continue
+            if len(text) != 1:
+                raise ValueError("Sign characters must be one character each.")
+            text = text.upper()
+            if not re.fullmatch(r"[0-9A-Z]", text):
+                raise ValueError(f"Not a sign character: {raw!r}")
+            if text not in wanted:
+                wanted.append(text)
+        if not wanted:
+            raise ValueError("The sign needs at least one character.")
+
+        from ocr_dataset import BACKGROUND_CLASS_NAME
+
+        if any(n.lower() == BACKGROUND_CLASS_NAME.lower() for n in wanted):
+            raise ValueError(f'"{BACKGROUND_CLASS_NAME}" is reserved for the reject class.')
+
+        classes = self._classes_load(cfg.dataset_root)
+        class_preprocess = self._class_preprocess_load(cfg.dataset_root)
+        sample_preprocess = self._sample_preprocess_load(cfg.dataset_root)
+
+        # Existing names are matched the way the filesystem matches them —
+        # through sanitize_class_name(), case-insensitively — so this never
+        # creates a second class beside one that is already training samples.
+        wanted_keys = {n.lower() for n in wanted}
+        actual_by_key: Dict[str, str] = {}
+        for c in classes:
+            actual_by_key.setdefault(sanitize_class_name(str(c)).lower(), str(c))
+
+        keep: List[str] = []
+        for name in wanted:
+            actual = actual_by_key.get(name.lower())
+            if actual is None:
+                keep.append(name)
+                continue
+            if actual != name:
+                self._rename_class_storage(cfg.dataset_root, actual, name)
+                if actual in class_preprocess:
+                    class_preprocess[name] = class_preprocess.pop(actual)
+                if actual in sample_preprocess:
+                    sample_preprocess[name] = sample_preprocess.pop(actual)
+            keep.append(name)
+
+        # Decide what leaves BEFORE any rename: a case-variant of a kept
+        # character must not be deleted after its directory became the kept
+        # one's directory (a no-op rename on a case-insensitive filesystem).
+        dropped = [
+            c for c in classes
+            if sanitize_class_name(str(c)).lower() not in wanted_keys
+        ]
+        for name in dropped:
+            class_preprocess.pop(name, None)
+            sample_preprocess.pop(name, None)
+            # Mirror _classes_delete: the directory, the processed cache and
+            # both preprocess records travel together.  A survivor would
+            # otherwise reappear on the next directory scan.
+            for d in (
+                cfg.dataset_root / sanitize_class_name(name),
+                self._processed_cache_dir(cfg.dataset_root) / sanitize_class_name(name),
+            ):
+                if d.exists():
+                    try:
+                        shutil.rmtree(d)
+                    except Exception:
+                        pass
+
+        self._classes_save(
+            cfg.dataset_root,
+            keep,
+            class_preprocess=class_preprocess,
+            sample_preprocess=sample_preprocess,
+        )
+        return list(keep)
+
+    def _rename_class_storage(self, dataset_root: Path, old_name: str, new_name: str) -> None:
+        """Move a class's directory and processed cache to a new spelling.
+
+        Only the case can differ here (the caller has already matched the two
+        names through sanitize_class_name), and on macOS those paths are the
+        same inode: rename() then reports the destination exists, which is
+        success from the class list's point of view.  Both failures are
+        non-fatal because the class NAME is what the UI and the model use.
+        """
+        old_dir = dataset_root / sanitize_class_name(old_name)
+        new_dir = dataset_root / sanitize_class_name(new_name)
+        if old_dir.exists() and not new_dir.exists():
+            try:
+                old_dir.rename(new_dir)
+            except Exception:
+                pass
+        old_cache = self._processed_cache_dir(dataset_root) / sanitize_class_name(old_name)
+        new_cache = self._processed_cache_dir(dataset_root) / sanitize_class_name(new_name)
+        if old_cache.exists() and not new_cache.exists():
+            try:
+                old_cache.rename(new_cache)
+            except Exception:
+                pass
 
     def _classes_delete(self, session_id: str, name: str) -> List[str]:
         with self._lock:
@@ -1827,6 +3023,14 @@ class RecordController:
             cfg = self._configs.get(session_id)
         if cfg is None:
             raise RuntimeError("missing config")
+        if str(getattr(cfg, "project_type", "") or "").strip().lower() in (
+            PROJECT_TYPE_OCR,
+            PROJECT_TYPE_SIGN_OCR,
+        ):
+            raise RuntimeError(
+                "OCR and Road Sign (3-Char) models deploy to their own sketch "
+                "(TFLite_OCR / TFLite_Sign), not Block Coding — use Export Model"
+            )
         latest = self._train_result_path(cfg.dataset_root)
         if not latest.exists():
             raise RuntimeError("no trained model yet — train first, then export")
@@ -1889,11 +3093,21 @@ class RecordController:
     def _train_result_path(self, dataset_root: Path) -> Path:
         return dataset_root.parent / "tm_train_latest.json"
 
-    def _export_run(self, session_id: str, export_dir: Path, model_name: str, array_name: str, overwrite: bool = False) -> Path:
+    def _export_run(self, session_id: str, export_dir: Path, model_name: str, array_name: str, overwrite: bool = False, runtime_config: Optional[Dict[str, Any]] = None) -> Path:
         with self._lock:
             cfg = self._configs.get(session_id)
         if cfg is None:
             raise RuntimeError("missing config")
+        # Preview-time OOD + preprocessing thresholds. Fall back to the same
+        # defaults the /preview/predict endpoint uses so the device header is
+        # always self-contained even if the SPA didn't send a value.
+        rc = runtime_config if isinstance(runtime_config, dict) else {}
+        ood_sign_min = float(rc.get("ood_sign_min", 0.3))
+        ood_sign_max = float(rc.get("ood_sign_max", 70.0))
+        ood_max_prob = float(rc.get("ood_max_prob", 0.60))
+        ood_entropy_max = float(rc.get("ood_entropy_max", 0.70))
+        bg_dark_thresh = int(rc.get("bg_dark_thresh", 0))
+        bg_lum_thresh = int(rc.get("bg_lum_thresh", 100))
         latest = self._train_result_path(cfg.dataset_root)
         if not latest.exists():
             raise RuntimeError("missing trained model")
@@ -1957,6 +3171,83 @@ class RecordController:
             return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
         h_guard = "TFLITE_MODEL_SETTINGS_H_"
+        # OCR projects feed the device a 28x28 glyph canvas built by the
+        # integer-exact front-end (ocr_glyph.c), not the 96x96 sign pipeline.
+        # The two device sketches are separate folders now, and each one
+        # #errors if handed the other's export — so this macro travels with the
+        # model and IS the routing decision.  A project type is a property of
+        # the export, not of the sketch that happens to compile it.
+        # Detected two ways on purpose: the project type is authoritative, and
+        # the "_background" class is the contract the device itself keys on
+        # (background_class_id()), so an export carrying one needs the flag
+        # even if its project_type metadata says otherwise.
+        ocr_export = (
+            is_glyph_project(getattr(cfg, "project_type", ""))
+            or any(str(x).strip().lower() == "_background" for x in labels)
+        )
+        # sign_ocr is a glyph project too, but it belongs to its OWN sketch:
+        # the sign model reads three 28x28 slots per frame, while TFLite_OCR/
+        # is the single-glyph reader.  The routing therefore needs both flags,
+        # and each .ino refuses the other's export at compile time.
+        sign_export = (
+            str(getattr(cfg, "project_type", "") or "").strip().lower()
+            == PROJECT_TYPE_SIGN_OCR
+        )
+        # The target the exported model is expected to read.  runtime_config
+        # wins (the SPA forwards the live editor values), then the TrainConfig
+        # the model was trained with.  normalize_sign_sequence pads a short
+        # sequence, so the arrays below always have SIGN_SEQUENCE_LEN entries.
+        # The sequence is a property of the TRAINING RUN, not of the session
+        # config: the SPA forwards its live editor state in runtime_config,
+        # and the run's train_config.json is the fallback for an older SPA.
+        sign_seq_src = rc.get("sign_sequence")
+        if sign_seq_src is None or sign_seq_src == "" or sign_seq_src == []:
+            train_cfg_saved = self._project_train_cfg(cfg.dataset_root)
+            sign_seq_src = train_cfg_saved.get("sign_sequence")
+        else:
+            train_cfg_saved = None
+        sign_seq = normalize_sign_sequence(sign_seq_src)
+        reading_src = rc.get("reading_order")
+        if reading_src is None or str(reading_src).strip() == "":
+            if train_cfg_saved is None:
+                train_cfg_saved = self._project_train_cfg(cfg.dataset_root)
+            reading_src = train_cfg_saved.get("reading_order")
+        reading_order = str(reading_src or "ltr").strip().lower()
+        if reading_order not in ("ltr", "rtl"):
+            reading_order = "ltr"
+        try:
+            sign_match_min_prob = float(rc.get("match_min_prob", 0.60))
+        except (TypeError, ValueError):
+            sign_match_min_prob = 0.60
+        sign_match_min_prob = max(0.0, min(1.0, sign_match_min_prob))
+        # Map each target character to its class index the same way the
+        # device's match rule compares: label.upper() == char.upper().  -1
+        # means "no such class" and the device treats that slot as never
+        # matching (it refuses anything outside [-1, kCategoryCount)).
+        upper_labels = [str(x).strip().upper() for x in labels]
+        sign_class_indices = []
+        for ch in sign_seq:
+            try:
+                sign_class_indices.append(upper_labels.index(str(ch).strip().upper()))
+            except ValueError:
+                sign_class_indices.append(-1)
+        sign_target_lines = []
+        if sign_export:
+            sign_target_lines = [
+                "// ── Sign OCR target (project_type == sign_ocr) ─────────────────",
+                "// The character the model is expected to read in each slot, in",
+                "// LABEL order.  kSignReadingOrder applies AFTER the split: 0 =",
+                "// left-to-right, 1 = right-to-left (boxes reversed, never mirrored).",
+                "// A class index of -1 means the character has no class in this",
+                "// export, so that slot can never match.",
+                "constexpr char kTargetSignSequence[] = " + _c_str("".join(sign_seq)) + ";",
+                "constexpr int kTargetSignClassIndices["
+                + str(int(len(sign_class_indices))) + "] = {"
+                + ", ".join(str(int(i)) for i in sign_class_indices) + "};",
+                "constexpr int kSignReadingOrder = " + ("1" if reading_order == "rtl" else "0") + ";",
+                "constexpr float kSignMatchMinProb = " + f"{sign_match_min_prob:.6f}f;",
+                "",
+            ]
         model_settings_h = "\n".join(
             [
                 "/*",
@@ -1972,8 +3263,48 @@ class RecordController:
                 "",
                 "constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;",
                 "",
+                # 1 = OCR glyph model (28x28 canvas, "_background" rejector,
+                # ocr_glyph.c front-end) / 0 = legacy 96x96 sign model.
+                "// TM_OCR_GLYPH_MODEL says which device sketch this model belongs to:",
+                "//   1 = TFLite_OCR/ (single-glyph, 28x28 canvas, \"_background\" rejector)",
+                "//   0 = TFLite/ (legacy 96x96) or TFLite_Sign/ (3-character sign reader)",
+                "// Each sketch #errors if it is handed another sketch's export.",
+                "#define TM_OCR_GLYPH_MODEL " + ("1" if (ocr_export and not sign_export) else "0"),
+                "// TM_SIGN_OCR_MODEL is the 3-character sign reader:",
+                "//   1 = TFLite_Sign/ (split -> three 28x28 slots -> binary verdict)",
+                "//   0 = every other sketch",
+                "#define TM_SIGN_OCR_MODEL " + ("1" if sign_export else "0"),
+                "",
+                "// ── The Dark Thr / Lum Thr window the project was trained through ──",
+                "// The device derives its ink bounds exactly as the host does:",
+                "//   adjusted = (kDarkThr != 0) || (kLumThr != 100)   // 0/100 = Otsu",
+                "//   thresh   = adjusted ? clamp(kLumThr - 1, 1, 254) : -1  (Otsu)",
+                "//   dark_thr = adjusted ? clamp(kDarkThr + 1, 0, 255) : 0",
+                "// so the defaults are a bit-exact no-op.",
+                "#define TM_THRESHOLD_WINDOW_EXPORTED 1",
+                "#define kDarkThr " + str(int(bg_dark_thresh)),
+                "#define kLumThr " + str(int(bg_lum_thresh)),
+                "",
                 "constexpr int kCategoryCount = " + str(int(len(labels))) + ";",
                 "extern const char* kCategoryLabels[kCategoryCount];",
+                "",
+                *sign_target_lines,
+                "// ── Runtime tuning exported from the Preview panel ───────────────",
+                "// OOD (out-of-distribution) rejection thresholds.  The device loop",
+                "// uses these the same way the Python preview does so a sign is only",
+                "// accepted when sign_pct is in range, max softmax prob is high",
+                "// enough, and entropy is low enough.",
+                "constexpr float kOodSignMinPct = " + f"{ood_sign_min:.6f}f;",
+                "constexpr float kOodSignMaxPct = " + f"{ood_sign_max:.6f}f;",
+                "constexpr float kOodMaxProbMin = " + f"{ood_max_prob:.6f}f;",
+                "constexpr float kOodEntropyRatioMax = " + f"{ood_entropy_max:.6f}f;",
+                "",
+                "// Preprocessing brightness/darkness thresholds used by the device",
+                "// sign-search front-end.  Pixels darker than kBgDarkThresh become",
+                "// white (shadow/background); pixels above kBgLumThresh are treated",
+                "// as background.  Values are 0-255 (luma).",
+                "constexpr int kBgDarkThresh = " + str(int(bg_dark_thresh)) + ";",
+                "constexpr int kBgLumThresh = " + str(int(bg_lum_thresh)) + ";",
                 "",
                 f"#endif  // {h_guard}",
                 "",
@@ -2086,10 +3417,36 @@ class RecordController:
                 meta = {}
 
         merged_project_state = self._project_state_payload(dataset_root, project_state=project_state)
-        manifest = {
+        # The session's project type is what decides every transform below
+        # AND what the Start Page needs in order to route the reopened file
+        # back to the right workspace — so it is written here, in the one
+        # manifest writer, rather than inferred from the payload later.
+        project_type = str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE)
+        # Header first, and in BOTH halves of the archive: the manifest is the
+        # door (a reader classifies the file without parsing anything else),
+        # and the state file repeats it so the half carrying the settings is
+        # self-describing too — a bug report pasted from disk, or a future
+        # import tool handed only tm_project_state.json, can still tell what
+        # it is holding and whether it predates the complete train_cfg.
+        merged_project_state.update(project_header(project_type))
+        # The snapshot inside train_cfg is reconciled the same way, so the
+        # archive cannot disagree with itself: whatever the session was when
+        # it saved is what a later open must report, regardless of what the
+        # client put in the payload.
+        _saved_train_cfg = merged_project_state.get("train_cfg")
+        if isinstance(_saved_train_cfg, dict):
+            _saved_train_cfg["project_type"] = project_type
+            _saved_train_cfg["img_size"] = int(cfg.img_size)
+        manifest: Dict[str, Any] = {
+            **project_header(project_type),
+            # The v1 spelling of the same thing the magic says.  Kept so a
+            # reader written against the old format still recognises the file.
             "format": "tmproj",
-            "version": 1,
-            "project_type": "image",
+            # Persisted alongside the type so reopening restores the model
+            # input size too (the processed cache in the archive is already
+            # at this size — a reopen that guessed 96 would silently let a
+            # later capture overwrite it with the wrong geometry).
+            "img_size": int(cfg.img_size),
             "created_at": int(time.time()),
             "dataset_dir": "dataset",
             "dataset_labels_txt": "dataset/labels.txt",
@@ -2109,11 +3466,24 @@ class RecordController:
         sample_preprocess = normalize_sample_preprocess_map(merged_project_state.get("sample_preprocess"))
         if processed_cache_dir.exists():
             shutil.rmtree(processed_cache_dir)
+        # The global mode is the FALLBACK for a class with no entry of its own,
+        # so it has to come from the same place the session reads it — the
+        # train_cfg the SPA actually edits.  (It used to be read from a root
+        # key no writer ever set, which meant a save always rebuilt the cache
+        # with the default mode.)
+        _state_train_cfg = merged_project_state.get("train_cfg")
+        _state_mode = ""
+        if isinstance(_state_train_cfg, dict):
+            _state_mode = str(_state_train_cfg.get("preprocess_mode") or "")
         self._rebuild_processed_cache(
             dataset_root,
             class_preprocess=class_preprocess,
             sample_preprocess=sample_preprocess,
-            global_preprocess_mode=str(merged_project_state.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL),
+            global_preprocess_mode=str(
+                _state_mode or merged_project_state.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL
+            ),
+            out_size=int(cfg.img_size),
+            project_type=project_type,
         )
         if processed_cache_dir.exists():
             manifest["processed_cache_dir"] = "processed_cache"
@@ -2126,6 +3496,26 @@ class RecordController:
             for class_dir in sorted([d for d in dataset_root.iterdir() if d.is_dir()]):
                 sample_order[str(class_dir.name)] = [p.name for p in _list_class_image_files(class_dir)]
         manifest["sample_order"] = sample_order
+
+        # ── Flush the client's preprocessing settings into tm_classes.json ──
+        # The archive carries tm_classes.json verbatim, so a setting the
+        # payload reports but the file was never told would be SAVED AS
+        # SOMETHING ELSE — the reader would show a value the writer never
+        # agreed to.  class_preprocess has its own endpoint (/classes/
+        # save_config) that persists on every edit; sample_preprocess has no
+        # such writer and lives in the SPA until something flushes it.  This
+        # is that flush, and it happens before the zip is opened so both
+        # halves of the archive carry the same settings.
+        if isinstance(project_state, dict) and (
+            project_state.get("class_preprocess") is not None
+            or project_state.get("sample_preprocess") is not None
+        ):
+            self._classes_save(
+                dataset_root,
+                self._classes_load(dataset_root),
+                class_preprocess=merged_project_state.get("class_preprocess"),
+                sample_preprocess=merged_project_state.get("sample_preprocess"),
+            )
 
         tmp_path = save_path.with_suffix(".tmproj.tmp")
         if tmp_path.exists():
@@ -2215,6 +3605,45 @@ class RecordController:
             if not in_dataset.exists():
                 raise ValueError("missing dataset")
 
+            # What kind of file is this?  Not a gate — every v1 archive on a
+            # user's disk still opens — but the answer decides how much of the
+            # rest of the payload to trust, and gets reported back so the UI
+            # can tell the user which settings came back at their defaults.
+            header = read_project_header(manifest)
+
+            # Adopt the archived project type BEFORE anything re-preprocesses
+            # a sample, so every later capture / preview / training of this
+            # session uses the transform the file was built with.  Old
+            # archives have no such key and stay image projects.
+            archived_type = str(manifest.get("project_type") or "").strip().lower()
+            resolved_type = archived_type if archived_type in KNOWN_PROJECT_TYPES else ""
+            if resolved_type:
+                self.update_config(session_id, project_type=resolved_type)
+            # Resolved here, not just applied: the state payload below has to
+            # report the size and type the session is ACTUALLY running with,
+            # or the SPA keeps displaying the previous project's 96 while the
+            # backend has already switched to 28.
+            resolved_size = 0
+            archived_size = manifest.get("img_size")
+            if archived_size not in (None, ""):
+                try:
+                    size = int(archived_size)
+                    if 8 <= size <= 512:
+                        self.update_config(session_id, img_size=size)
+                        resolved_size = size
+                except Exception:
+                    pass
+            # An archive with no recorded geometry still declares a project
+            # type, and the type implies one.  Without this, opening a legacy
+            # OCR file from an Image session left the session at 96x96 while
+            # the glyph pipeline ran at 28x28 — the next capture would then
+            # write 96x96 frames into a cache the file restored at 28x28.
+            if not resolved_size and resolved_type:
+                implied = int(default_img_size(resolved_type) or 0)
+                if 8 <= implied <= 512:
+                    self.update_config(session_id, img_size=implied)
+                    resolved_size = implied
+
             self._project_reset(session_id=session_id)
 
             for p in in_dataset.rglob("*"):
@@ -2266,26 +3695,48 @@ class RecordController:
             if processed_cache_in.exists():
                 shutil.copytree(processed_cache_in, processed_cache_out)
 
+            # A trained model survives this open only when the ARCHIVE ITSELF
+            # bundled one.  The record inside names absolute paths from the
+            # machine that saved the file, and those routinely still resolve
+            # here (two projects saved in the same default workspace share
+            # `runs/latest`), so writing it back would let
+            # _project_state_payload report export_enabled="1" off a graph
+            # this session never loaded — which is exactly how an Image model
+            # stayed "trained" inside a freshly opened OCR project.  Bundled
+            # wins; absent means no model, never a stale one.
             latest_in = tmp_dir / "tm_train_latest.json"
             latest_out = self._train_result_path(dataset_root)
             run_dir_hint = str(manifest.get("train_run_dir") or "")
+            run_dst = workspace_root / "runs" / "latest"
+            restored = False
             if latest_in.exists():
-                meta = json.loads(latest_in.read_text(encoding="utf-8"))
+                try:
+                    meta = json.loads(latest_in.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = None
                 run_src = (tmp_dir / run_dir_hint) if run_dir_hint else None
-                run_dst = workspace_root / "runs" / "latest"
-                if run_src is not None and run_src.exists():
+                if isinstance(meta, dict) and run_src is not None and run_src.exists():
                     if run_dst.exists():
                         shutil.rmtree(run_dst)
                     run_dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copytree(run_src, run_dst)
-                    if isinstance(meta, dict):
-                        meta["run_dir"] = str(run_dst)
-                        for key in ["keras_model_path", "tflite_path", "model_h_path", "model_cpp_path"]:
-                            nm = Path(str(meta.get(key) or "")).name
-                            cand = run_dst / nm if nm else None
-                            if cand is not None and cand.exists():
-                                meta[key] = str(cand)
-                latest_out.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    meta["run_dir"] = str(run_dst)
+                    for key in ["keras_model_path", "tflite_path", "model_h_path", "model_cpp_path"]:
+                        nm = Path(str(meta.get(key) or "")).name
+                        cand = run_dst / nm if nm else None
+                        if cand is not None and cand.exists():
+                            meta[key] = str(cand)
+                    restored = self._run_matches_project(run_dst, resolved_type, resolved_size)
+                if restored:
+                    latest_out.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                else:
+                    # Nothing usable came out of the archive: leave the
+                    # RESET state alone (no latest record, no run directory),
+                    # so export_enabled is false and the preview has no
+                    # interpreter to reuse.
+                    if run_dst.exists():
+                        shutil.rmtree(run_dst, ignore_errors=True)
+                    latest_out.unlink(missing_ok=True)
             project_state_in = tmp_dir / str(manifest.get("project_state") or "tm_project_state.json")
             project_state: Optional[Dict[str, Any]] = None
             if project_state_in.exists():
@@ -2295,10 +3746,70 @@ class RecordController:
                         project_state = loaded
                 except Exception:
                     project_state = None
+            if project_state is None:
+                project_state = {}
+            # Reconcile the two halves of the archive.  The manifest is the
+            # header (written by the one save path from the session's own
+            # config); the state file is whatever the saver happened to
+            # snapshot, and a v1 one carries no project_type at all.  So the
+            # manifest wins where the two disagree, and the state is filled in
+            # where it is silent — otherwise a legacy project reopens with the
+            # SPA still gating the PREVIOUS project's workspace.
+            state_cfg = project_state.get("train_cfg")
+            # Measured from the FILE's own contents, before anything below is
+            # added to it: a setting the manifest supplied is a value the user
+            # chose when they saved, not a default filled in on load.
+            missing = missing_train_cfg_fields(state_cfg)
+            if not isinstance(state_cfg, dict):
+                state_cfg = {}
+                project_state["train_cfg"] = state_cfg
+            if resolved_type:
+                project_state["project_type"] = resolved_type
+                state_cfg["project_type"] = resolved_type
+            if resolved_size:
+                state_cfg["img_size"] = resolved_size
+            project_state["project_format"] = {
+                **header,
+                "missing_train_cfg_fields": missing,
+            }
             return self._project_state_payload(dataset_root, project_state=project_state)
         finally:
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir)
+
+    def _run_matches_project(self, run_dir: Path, project_type: str, img_size: int) -> bool:
+        """Does a restored run belong to the project being opened?
+
+        A quantized graph is only usable by the workspace that will run it:
+        an OCR archive must not adopt an Image project's 96x96 model — nor a
+        28x28 one the other way round — just because both were trained in a
+        `runs/latest` this machine still has.  The run's own
+        `train_config.json` is the record the trainer wrote, and it carries
+        both the project type and the input geometry, so it answers the
+        question without guessing.  A run that does not say (an older
+        archive, or a hand-made directory) is not refused on this basis
+        alone — the archive's own header already gates it.
+        """
+        cfg_path = run_dir / "train_config.json"
+        if not cfg_path.exists():
+            return True
+        try:
+            loaded = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            return True
+        run_cfg = pick_train_cfg(loaded) if isinstance(loaded, dict) else {}
+        if project_type:
+            run_type = str(run_cfg.get("project_type") or "").strip().lower()
+            if run_type and run_type != project_type:
+                return False
+        if img_size:
+            try:
+                run_size = int(run_cfg.get("img_size") or 0)
+            except Exception:
+                run_size = 0
+            if run_size and run_size != int(img_size):
+                return False
+        return True
 
     def _project_reset(self, session_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -2354,56 +3865,18 @@ class RecordController:
     def _project_train_cfg(
         self, dataset_root: Path, project_state: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        def _pick_cfg(raw: Any) -> Dict[str, Any]:
-            src = raw if isinstance(raw, dict) else {}
-            out: Dict[str, Any] = {}
-            int_fields = {
-                "batch_size": 16,
-                "epochs": 10,
-                "conv1_filters": 8,
-                "conv2_filters": 16,
-                "dense_units": 32,
-            }
-            float_fields = {
-                "validation_split": 0.2,
-                "learning_rate": 0.001,
-            }
-            for key, fallback in int_fields.items():
-                if key not in src:
-                    continue
-                try:
-                    out[key] = int(src.get(key))
-                except Exception:
-                    out[key] = int(fallback)
-            for key, fallback in float_fields.items():
-                if key not in src:
-                    continue
-                try:
-                    out[key] = float(src.get(key))
-                except Exception:
-                    out[key] = float(fallback)
-            preprocess_mode = str(src.get("preprocess_mode") or "").strip().lower()
-            if preprocess_mode in {"auto_by_label", "manual_roi"}:
-                out["preprocess_mode"] = preprocess_mode
-            manual_roi = normalize_manual_roi(src.get("manual_roi"))
-            if manual_roi is not None:
-                out["manual_roi"] = list(manual_roi)
-            class_preprocess = normalize_class_preprocess_map(src.get("class_preprocess"))
-            if class_preprocess:
-                out["class_preprocess"] = class_preprocess
-            sample_preprocess = normalize_sample_preprocess_map(src.get("sample_preprocess"))
-            if sample_preprocess:
-                out["sample_preprocess"] = sample_preprocess
-            return out
-
+        # Three sources, most authoritative first: the state being saved (or
+        # the one that was just loaded), the run's own train_config.json, and
+        # the train meta.  Each is projected through the SAME schema, so a
+        # field cannot survive from one source and vanish from another.
         if isinstance(project_state, dict):
-            cfg = _pick_cfg(project_state.get("train_cfg"))
+            cfg = pick_train_cfg(project_state.get("train_cfg"))
             if cfg:
                 return cfg
         run_cfg = dataset_root.parent / "runs" / "latest" / "train_config.json"
         if run_cfg.exists():
             try:
-                cfg = _pick_cfg(json.loads(run_cfg.read_text(encoding="utf-8")))
+                cfg = pick_train_cfg(json.loads(run_cfg.read_text(encoding="utf-8")))
                 if cfg:
                     return cfg
             except Exception:
@@ -2413,7 +3886,7 @@ class RecordController:
             try:
                 meta = json.loads(latest.read_text(encoding="utf-8"))
                 if isinstance(meta, dict):
-                    return _pick_cfg(meta)
+                    return pick_train_cfg(meta)
             except Exception:
                 pass
         return {}
@@ -2478,10 +3951,306 @@ class RecordController:
             )
         return self._class_state_payload(cfg.dataset_root, class_name)
 
+    def _samples_seed_emnist(
+        self,
+        session_id: str,
+        classes: Optional[List[Any]] = None,
+        count: Any = TEMPLATE_SAMPLE_DEFAULT_COUNT,
+        only_empty: bool = False,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+    ) -> Dict[str, Any]:
+        """Fill character classes with camera-realistic EMNIST template samples.
+
+        The developer shortcut for trying the sign pipeline before a camera
+        is wired up.  Each glyph is rendered as a 96x96 DARK-INK-ON-LIGHT
+        frame (see `ocr_dataset.template_capture_from_glyph`) so the exact
+        same `preprocess_glyph` path Otsu-binarizes and crops it as a real
+        capture — raw EMNIST is bright-on-dark and would binarize inverted.
+
+        Seeded files are named `emnist_seed_NN.png`; a re-seed replaces only
+        those, never a camera capture in the same class folder.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        project_type = str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE)
+        if not is_glyph_project(project_type):
+            raise ValueError("template samples are only available for OCR projects")
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            n = TEMPLATE_SAMPLE_DEFAULT_COUNT
+        n = max(1, min(500, n))
+
+        from ocr_dataset import (
+            TEMPLATE_SIGN_CHARS,
+            build_template_capture_samples,
+            emnist_cache_dir,
+            load_emnist_template_bank,
+            map_class_to_char,
+        )
+
+        dataset_root = cfg.dataset_root
+        available = self._classes_load(dataset_root)
+        # Match requested names case-insensitively but seed under the class
+        # name the project actually stores (the folder is the class name).
+        by_fold = {name.strip().upper(): name for name in available if name.strip()}
+        requested: List[str] = []
+        if classes:
+            for raw in classes:
+                name = by_fold.get(str(raw or "").strip().upper())
+                if name and name not in requested:
+                    requested.append(name)
+        else:
+            requested = list(available)
+
+        targets: List[str] = []
+        skipped: List[str] = []
+        for name in requested:
+            ch = map_class_to_char(name)
+            ch = ch.upper() if ch else ""
+            if len(ch) == 1 and ch in TEMPLATE_SIGN_CHARS:
+                # only_empty is the auto-fill rule: a class that already holds
+                # ANY sample — a camera capture or a previous seed — is left
+                # alone.  "Empty" is the same count the class card shows.
+                if only_empty:
+                    class_dir = dataset_root / sanitize_class_name(name)
+                    if class_dir.exists() and _list_class_image_files(class_dir):
+                        continue
+                targets.append(name)
+            else:
+                skipped.append(name)
+        if not targets:
+            if only_empty:
+                # Nothing to do is the steady state of an auto-fill pass, not
+                # an error: every class is already populated.  The caller
+                # still gets the full runtime state so the UI can re-render.
+                return {
+                    "seeded": [],
+                    "skipped": skipped,
+                    "count": str(n),
+                    "states": {},
+                    "processed_previews": {},
+                    **self._runtime_state_payload(session_id, dataset_root),
+                }
+            raise ValueError("no character classes to seed")
+
+        bank = load_emnist_template_bank(cache_root=emnist_cache_dir(app_data_dir()))
+        sample_preprocess = self._sample_preprocess_load(dataset_root)
+        preprocess_changed = False
+        for name in targets:
+            char = map_class_to_char(name).upper()
+            class_dir = dataset_root / sanitize_class_name(name)
+            class_dir.mkdir(parents=True, exist_ok=True)
+            processed_dir = self._processed_cache_dir(dataset_root) / sanitize_class_name(name)
+            # Replace this seeder's own previous output only.
+            for folder in (class_dir, processed_dir):
+                if not folder.exists():
+                    continue
+                for p in list(folder.iterdir()):
+                    if (
+                        p.is_file()
+                        and p.name.startswith(TEMPLATE_SAMPLE_PREFIX)
+                        and p.suffix.lower() in IMAGE_EXTS
+                    ):
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+            class_map = sample_preprocess.get(name)
+            if isinstance(class_map, dict):
+                for fname in [k for k in list(class_map) if str(k).startswith(TEMPLATE_SAMPLE_PREFIX)]:
+                    class_map.pop(fname, None)
+                    preprocess_changed = True
+                if not class_map:
+                    sample_preprocess.pop(name, None)
+            for i, arr in enumerate(build_template_capture_samples(char, count=n, bank=bank)):
+                sample_path = class_dir / f"{TEMPLATE_SAMPLE_PREFIX}{i:02d}.png"
+                sample_path.write_bytes(
+                    _to_png_bytes(Image.fromarray(np.asarray(arr, dtype=np.uint8), mode="L"))
+                )
+                self._cache_one_sample(
+                    dataset_root,
+                    name,
+                    sample_path,
+                    img_size=int(cfg.img_size),
+                    project_type=project_type,
+                )
+        if preprocess_changed:
+            self._classes_save(
+                dataset_root,
+                available,
+                class_preprocess=self._class_preprocess_load(dataset_root),
+                sample_preprocess=sample_preprocess,
+            )
+
+        # A sign project now has enough glyphs to draw a test sign without
+        # the user hunting for a road-sign photo.  Storing it here is what
+        # makes Preview -> Upload immediately show a ready-to-test frame;
+        # it never replaces a REAL upload, and a failure is ignored.
+        if str(project_type) == PROJECT_TYPE_SIGN_OCR:
+            self._maybe_autostore_synth_preview(
+                session_id,
+                sign_sequence=sign_sequence,
+                reading_order=reading_order,
+            )
+
+        # Full post-seed state, not just the classes this call touched: the
+        # SPA applies it verbatim (STATE.classes / counts / sample_previews /
+        # train_enabled / train_rec) and re-renders the cards in place, so a
+        # class that was empty when the toggle flipped must show "24 Image
+        # Samples" before the toast even fades.  `classes` is the project's
+        # COMPLETE list; `seeded` names the ones this call actually drew.
+        return {
+            "seeded": targets,
+            "skipped": skipped,
+            "count": str(n),
+            "states": {
+                name: self._class_state_payload(dataset_root, name) for name in targets
+            },
+            **self._runtime_state_payload(session_id, dataset_root),
+        }
+
+    def _auto_seed_emnist_enabled(self, dataset_root: Path) -> bool:
+        """Is the project's "fill empty classes" developer shortcut on?
+
+        Read from the persisted train config, never from a request: the flag
+        is project state, so a class-write endpoint must honour the same
+        value the Settings checkbox last saved even when the caller is a
+        background sync that carries no options at all.
+        """
+        run_cfg = Path(dataset_root).parent / "runs" / "latest" / "train_config.json"
+        if not run_cfg.exists():
+            return False
+        try:
+            saved = pick_train_cfg(json.loads(run_cfg.read_text(encoding="utf-8")))
+        except Exception:
+            return False
+        return bool(saved.get("auto_seed_emnist_samples"))
+
+    def _seed_empty_char_classes(
+        self,
+        session_id: str,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+        strict: bool = False,
+    ) -> List[str]:
+        """Auto-fill every EMPTY character class, when the shortcut is on.
+
+        Runs after every class mutation (`/classes/add_named`,
+        `/classes/sync_ocr`, ...) and after `/train/config` saves the toggle,
+        so a class created before the flag flipped is filled by the very next
+        write instead of waiting for the next page load.  Returns the names
+        actually seeded.  Failures are swallowed by default — a seeder
+        problem must never turn "add a class" into an error — but a caller
+        that promises the fill in its own response (`/classes/sync_ocr`
+        passes strict=True) needs the failure surfaced instead of silently
+        leaving the class at zero.
+
+        `sign_sequence`/`reading_order` are the SPA's current target, when
+        the caller has it.  They are forwarded to the seeder so a sign
+        project also gets a matching synthetic preview image in the same
+        call; a background caller may omit them and the persisted train
+        config is used instead.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            return []
+        try:
+            if not self._auto_seed_emnist_enabled(cfg.dataset_root):
+                return []
+            from ocr_dataset import TEMPLATE_SIGN_CHARS, map_class_to_char
+
+            empty: List[str] = []
+            for name in self._classes_load(cfg.dataset_root):
+                ch = (map_class_to_char(name) or "").upper()
+                if len(ch) != 1 or ch not in TEMPLATE_SIGN_CHARS:
+                    continue
+                class_dir = cfg.dataset_root / sanitize_class_name(name)
+                if class_dir.exists() and _list_class_image_files(class_dir):
+                    continue
+                empty.append(name)
+            if not empty:
+                return []
+            result = self._samples_seed_emnist(
+                session_id=session_id,
+                classes=empty,
+                count=TEMPLATE_SAMPLE_DEFAULT_COUNT,
+                only_empty=True,
+                sign_sequence=sign_sequence,
+                reading_order=reading_order,
+            )
+            return list(result.get("seeded") or [])
+        except Exception:
+            if strict:
+                raise
+            return []
+
+    def _runtime_state_payload(
+        self, session_id: str, dataset_root: Optional[Path] = None
+    ) -> Dict[str, Any]:
+        """The whole workspace state a class mutation can change.
+
+        The SPA's `STATE` is the source of truth for the cards, so a write
+        that only returns `classes` leaves counts, thumbnails and the Train
+        button stale until a reload.  This payload is the one shape every
+        such response carries: the ordered class list, the per-class counts
+        and sample previews, whether training is now enabled (the SAME rule
+        the client applies — >=2 classes, every class non-empty), and the
+        dataset-aware training recommendation.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        root = Path(dataset_root if dataset_root is not None else (cfg.dataset_root if cfg is not None else ""))
+        classes = self._classes_load(root)
+        counts: Dict[str, int] = {}
+        sample_previews: Dict[str, List[Dict[str, str]]] = {}
+        for name in classes:
+            class_dir = root / sanitize_class_name(name)
+            files = _list_class_image_files(class_dir) if class_dir.exists() else []
+            counts[name] = len(files)
+            previews: List[Dict[str, str]] = []
+            for sample in files[:12]:
+                try:
+                    previews.append(_preview_item_payload(sample))
+                except Exception:
+                    continue
+            sample_previews[name] = previews
+        non_empty = sum(1 for name in classes if counts.get(name, 0) > 0)
+        total = sum(counts.values())
+        payload: Dict[str, Any] = {
+            "classes": classes,
+            "counts": counts,
+            "sample_previews": sample_previews,
+            "processed_previews": self._processed_previews_payload(root, classes),
+            "train_enabled": bool(
+                len(classes) >= 2
+                and non_empty >= 2
+                and non_empty == len(classes)
+                and total > 0
+            ),
+        }
+        if session_id:
+            try:
+                payload.update(self._train_recommend(session_id=session_id, cfg={}))
+            except Exception:
+                pass
+        return payload
+
     def _processed_preview_item_payload(self, path: Path) -> Dict[str, str]:
         return _preview_item_payload(path)
 
-    def _cache_one_sample(self, dataset_root: Path, class_name: str, sample_path: Path, img_size: int = 96) -> None:
+    def _cache_one_sample(
+        self,
+        dataset_root: Path,
+        class_name: str,
+        sample_path: Path,
+        img_size: int = 96,
+        project_type: str = PROJECT_TYPE_IMAGE,
+    ) -> None:
         """Process one newly saved sample into the processed cache so the
         class-edit previews and the next training see it immediately."""
         try:
@@ -2493,6 +4262,7 @@ class RecordController:
                 class_config=config,
                 fast_mode=False,
                 out_size=int(img_size),
+                project_type=project_type,
             )
             dst_dir = self._processed_cache_dir(dataset_root) / sanitize_class_name(class_name)
             dst_dir.mkdir(parents=True, exist_ok=True)
@@ -2500,9 +4270,16 @@ class RecordController:
         except Exception:
             pass
 
-    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96):
+    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96, project_type: str = PROJECT_TYPE_IMAGE):
         class_cfg = class_config if isinstance(class_config, dict) else {}
         src_cfg = sample_config if isinstance(sample_config, dict) else {}
+        # Project dispatch — ONE key, at the ONE place every sample enters the
+        # pipeline (incremental cache writes, full cache rebuilds, class
+        # previews, training).  The OCR branch reuses all of the surrounding
+        # lifecycle (cache dirs, class dirs, naming, previews) and only swaps
+        # the pixel transform.
+        if is_glyph_project(project_type):
+            return self._preprocess_image_png_ocr(png, class_config, sample_config, return_crop, out_size)
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
         mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
         # User-adjustable thresholds from class-level config (shared across samples)
@@ -2553,6 +4330,142 @@ class RecordController:
             return {"png": png_bytes, "crop": list(crop_norm), "processed_png": mp_png, "crop_png": cp_png}
         return png_bytes
 
+    def _preprocess_image_png_ocr(
+        self,
+        png: bytes,
+        class_config: Any,
+        sample_config: Any = None,
+        return_crop: bool = False,
+        out_size: int = GLYPH_SIZE,
+    ):
+        """OCR project sample transform: the glyph pipeline in ocr_preprocess.
+
+        Deliberately a *branch* of _preprocess_image_png, not a parallel
+        lifecycle: the caller has already done the file I/O, the class-name
+        sanitising, the cache-directory choice and the preview plumbing.  All
+        this swaps is the pixel transform — exactly what `project_type` is
+        for.
+
+        Every step below is integer-only so the device's C port can be
+        bit-identical (see ocr_preprocess for the derivations): Otsu by
+        cross-multiplied integer variance, vertical projection by int64
+        column sums, nearest-neighbour by an exact rational index map.
+        """
+        config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
+        polarity = int(config.get("ink_polarity", INK_DARK))
+        # NORM_CANON, not NORM_STRETCH: the OCR project mixes EMNIST into
+        # every training set, EMNIST ships as 28x28, and CANON is the
+        # aspect-preserving convention that keeps a stretched camera
+        # capture comparable to it.  STRETCH squashes a tall thin glyph
+        # ('1', 'I', 'l') onto the square grid — measured, a 26x48 crop of
+        # a '1' became an unreadable blob while the EMNIST half of the SAME
+        # class stayed a clean glyph.  See ocr_preprocess.normalise_glyph.
+        convention = str(config.get("glyph_convention", NORM_CANON))
+        apply_segmentation = bool(config.get("glyph_segment", True))
+
+        src_img = Image.open(_bytes_io(png)).convert("L")
+        gray = np.asarray(src_img, dtype=np.uint8)
+        full_h, full_w = gray.shape[:2]
+
+        # Manual ROI: crop BEFORE Otsu picks a threshold and BEFORE the
+        # vertical projection looks for runs — the same contract the image
+        # branch below implements via preprocess_blue_diff_array(roi=...).
+        # In manual_roi mode the user's box IS the model input, so pixels
+        # outside it must not influence anything that measures ink.  Omitting
+        # this made Manual ROI a no-op end to end: the rectangle moved in the
+        # UI while the model, the processed cache and training all still saw
+        # every pixel of the original frame.
+        mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
+        roi_px = (
+            manual_roi_to_pixels(full_h, full_w, config.get("manual_roi"))
+            if mode == PREPROCESS_MODE_MANUAL_ROI
+            else None
+        )
+        roi_origin = (0, 0)
+        if roi_px is not None:
+            rx1, ry1, rx2, ry2 = roi_px
+            sub = gray[ry1:ry2, rx1:rx2]
+            if sub.size:
+                gray = np.ascontiguousarray(sub)
+                roi_origin = (rx1, ry1)
+
+        # The editor's Dark Thr / Lum Thr sliders.  Until now the OCR branch
+        # read neither, so moving them changed nothing on screen: the preview
+        # re-binarised with exact Otsu every time.  They form the sign's
+        # luminance window — ink is what falls inside it.
+        #
+        # The window is the one the image branch already defines
+        # (image_preprocess.preprocess_blue_diff_array), and these two lines
+        # reproduce it exactly:
+        #
+        #     is_sign = (gray > bg_dark_thresh) & (gray < bg_lum_thresh)
+        #
+        # so BOTH bounds are strict.  binarize_ink's own comparison is
+        # inclusive (ink = gray <= t), so the slider values are nudged one
+        # LSB inward: ink = (gray <= lum-1) & (gray >= dark+1) is bit-for-bit
+        # the same set as the mask the sign previews have always drawn.  The
+        # same sliders therefore mean the same thing in both project types,
+        # and normalize_class_preprocess has already clamped lum to 50..255
+        # and dark to 0..100, so neither nudge leaves binarize_ink's range.
+        #
+        # Gated on "adjusted away from the defaults", because 0/100 is what
+        # the UI ships and what every existing OCR model was trained through:
+        # pinning the threshold at an untouched 100 would silently re-cut the
+        # training cache of every project in the field.  Defaults therefore
+        # still mean exact Otsu.  This is the same test the image branch uses
+        # to decide the sliders have been tuned (see the crop branches there).
+        bg_dark = int(config.get("bg_dark_thresh", 0) or 0)
+        bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
+        thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
+        pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
+        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+
+        result = preprocess_glyph(
+            gray,
+            out_size=int(out_size),
+            polarity=polarity,
+            apply_segmentation=apply_segmentation,
+            convention=convention,
+            thresh=pinned,
+            dark_thr=floor,
+        )
+        glyph = np.asarray(result["glyph"], dtype=np.uint8)
+        png_bytes = _to_png_bytes(Image.fromarray(glyph, mode="L"))
+
+        if not return_crop:
+            return png_bytes
+
+        # Previews mirror the image branch's contract so the same UI code
+        # renders both projects:
+        #   processed_png -> the decision mask (what the threshold chose)
+        #   crop_png      -> the pre-decision region (what the camera saw)
+        ink = result.get("ink")
+        if ink is not None:
+            mp_png = _to_png_bytes(Image.fromarray((np.asarray(ink).astype(np.uint8) * 255), mode="L"))
+        else:
+            mp_png = png_bytes
+        # result["box"] is in the coordinates of the frame preprocess_glyph
+        # was given, which is the ROI crop in manual mode.  Report it in
+        # FULL-frame coordinates so the UI's rectangle lands on the pixels it
+        # actually describes.
+        ox, oy = roi_origin
+        box = result.get("box")
+        crop_norm = [0.0, 0.0, 1.0, 1.0]
+        cp_png = png_bytes
+        if box is not None:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            crop = np.ascontiguousarray(gray[y1:y2, x1:x2])
+            if crop.size:
+                cp_png = _to_png_bytes(Image.fromarray(crop, mode="L"))
+            if full_w and full_h:
+                crop_norm = [
+                    (x1 + ox) / full_w,
+                    (y1 + oy) / full_h,
+                    (x2 + ox) / full_w,
+                    (y2 + oy) / full_h,
+                ]
+        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png}
+
     def _rebuild_processed_cache(
         self,
         dataset_root: Path,
@@ -2561,6 +4474,7 @@ class RecordController:
         global_preprocess_mode: str = PREPROCESS_MODE_AUTO_BY_LABEL,
         out_size: int = 96,
         fast_mode: bool = True,
+        project_type: str = PROJECT_TYPE_IMAGE,
     ) -> None:
         classes = self._classes_load(dataset_root)
         cache_root = self._processed_cache_dir(dataset_root)
@@ -2590,6 +4504,7 @@ class RecordController:
                         fast_mode=fast_mode,
                         sample_config=sample_cfg,
                         out_size=int(out_size),
+                        project_type=project_type,
                     )
                     (dst_dir / f"{src.stem}.png").write_bytes(out_png)
                     processed_count += 1
@@ -2638,6 +4553,7 @@ class RecordController:
             sample_config=sample_config,
             return_crop=True,
             out_size=int(cfg.img_size),
+            project_type=str(cfg.project_type),
         )
         return {
             "image_b64": base64.b64encode(result["png"]).decode("ascii"),
@@ -2699,6 +4615,25 @@ class RecordController:
                 payload["bg_dark_thresh"] = int(project_state["bg_dark_thresh"])
             if "bg_lum_thresh" in project_state:
                 payload["bg_lum_thresh"] = int(project_state["bg_lum_thresh"])
+            project_type = str(project_state.get("project_type") or "").strip().lower()
+            if project_type in KNOWN_PROJECT_TYPES:
+                payload["project_type"] = project_type
+            # The Preview pane's gates.  They are not training parameters, but
+            # they ARE deployment parameters: buildExportRuntimeConfig() stamps
+            # them into model_settings.h as the device's OOD thresholds.  A
+            # project that reopened them at 0.3/70/0.60/0.70 after the user
+            # tuned them would re-export a device with different gates than
+            # the one that is running.  Echoed verbatim — it is a flat block of
+            # UI state that no normaliser owns.
+            preview = project_state.get("preview")
+            if isinstance(preview, dict):
+                payload["preview"] = dict(preview)
+        # What the archive said about itself, when the caller resolved one
+        # (the open path).  Absent on a fresh payload, which is how the SPA
+        # tells "just started" from "opened an old file".
+        project_format = project_state.get("project_format") if isinstance(project_state, dict) else None
+        if isinstance(project_format, dict):
+            payload["project_format"] = dict(project_format)
         return payload
 
     def _preview_model_lock(self, session_id: str) -> threading.Lock:
@@ -2708,6 +4643,18 @@ class RecordController:
                 lock = threading.Lock()
                 self._preview_locks[session_id] = lock
             return lock
+
+    def _is_sign_ocr_session(self, session_id: str) -> bool:
+        """Is this session a road-sign sequence project?
+
+        Read from the LIVE session config rather than from anything the
+        client sent: which pipeline a prediction runs through is a property
+        of the project, and a request that could choose its own would be a
+        request that could run the wrong front-end over a model.
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        return str(getattr(cfg, "project_type", "") or "").strip().lower() == PROJECT_TYPE_SIGN_OCR
 
     def _preview_load_model(self, session_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -3102,6 +5049,531 @@ class RecordController:
             "entropy_ratio": float(entropy_ratio),
         }
 
+    # ── Road-sign sequences ─────────────────────────────────────────────
+    # Everything below is the sign_ocr preview.  It reuses the single-glyph
+    # model — the training set is the same per-character glyphs either way,
+    # and ocr_trainer's head is built from whatever classes the project
+    # holds — so what differs is only how ONE frame becomes N model inputs.
+    # That split lives in ocr_preprocess.preprocess_sign_sequence; this is
+    # the plumbing that turns its N glyphs into N inferences and combines
+    # them into the one answer a sign reader cares about.
+
+    def _invoke_glyph_tensor(
+        self, model: Dict[str, Any], session_id: str, arr: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Run one already-prepared glyph array through the model.
+
+        Returns (softmax scores, raw device-mirror output).  A near-copy of
+        the quantise-invoke-block inside `_preview_predict`, kept separate
+        on purpose: that function's copy is interleaved with the multi-
+        variant handling (default / crop / masked / full previews) and its
+        behaviour is covered by the image-project tests, so factoring the
+        two together would edit a verified path to serve a new one.  Both
+        follow the device's contract — TFLite.ino feeds `gray - 128`, which
+        is exactly `round(gray/255 / (1/255) - 128)`.
+        """
+        input_details = model["input_details"]
+        output_details = model["output_details"]
+        interpreter = model["interpreter"]
+        q = input_details.get("quantization")
+        qscale = 0.0
+        qzp = 0
+        if isinstance(q, (tuple, list)) and len(q) == 2:
+            qscale = float(q[0] or 0.0)
+            qzp = int(q[1] or 0)
+        dtype = input_details.get("dtype")
+        batch = np.expand_dims(arr, axis=0)
+        if dtype is not None and dtype != np.float32 and qscale > 0:
+            qarr = np.round(batch / qscale + qzp)
+            if dtype == np.int8:
+                x = np.clip(qarr, -128, 127).astype(np.int8)
+            elif dtype == np.uint8:
+                x = np.clip(qarr, 0, 255).astype(np.uint8)
+            else:
+                x = qarr.astype(dtype)
+        else:
+            x = batch.astype(np.float32)
+        with self._preview_model_lock(session_id):
+            interpreter.set_tensor(int(input_details.get("index")), x)
+            interpreter.invoke()
+            out = interpreter.get_tensor(int(output_details.get("index")))
+        out = np.asarray(out).reshape((-1,))
+        oq = output_details.get("quantization")
+        oscale = 0.0
+        ozp = 0
+        if isinstance(oq, (tuple, list)) and len(oq) == 2:
+            oscale = float(oq[0] or 0.0)
+            ozp = int(oq[1] or 0)
+        odtype = output_details.get("dtype")
+        if odtype == np.int8:
+            raw_out = np.clip(out.astype(np.int32) + 128, 0, 255).astype(np.int32)
+        elif odtype == np.uint8:
+            raw_out = out.astype(np.int32)
+        else:
+            raw_out = np.clip((out.astype(np.float32) * 255.0).astype(np.int32), 0, 255)
+        if odtype is not None and odtype != np.float32 and oscale > 0:
+            scores = (out.astype(np.float32) - float(ozp)) * float(oscale)
+        else:
+            scores = out.astype(np.float32)
+        if abs(float(np.sum(scores)) - 1.0) > 0.1:
+            scores = scores - float(np.max(scores))
+            expv = np.exp(scores)
+            scores = expv / float(np.sum(expv) + 1e-12)
+        return np.clip(scores, 0.0, 1.0), raw_out
+
+    def _sign_ocr_preprocess_config(self, model: Dict[str, Any], sequence: List[str]) -> Dict[str, Any]:
+        """The luminance window / ink polarity the sign is read through.
+
+        A sign's characters are printed in one ink on one background, so
+        the sign has ONE preprocessing record — but the editor stores them
+        per CLASS, one per character.  They are therefore consulted in
+        sequence order and the first one that exists wins, which makes the
+        choice deterministic and, when the user has only ever edited one of
+        them (the common case, and the only one the UI encourages), the
+        obvious one.  No record at all falls back to
+        normalize_class_preprocess's own defaults, which is exact Otsu.
+        """
+        records = model.get("class_preprocess") if isinstance(model, dict) else None
+        records = records if isinstance(records, dict) else {}
+        for char in sequence:
+            rec = records.get(str(char))
+            if isinstance(rec, dict) and rec:
+                return normalize_class_preprocess(rec)
+        return normalize_class_preprocess(None)
+
+    # The three things a Preview synthesis button can draw.  "match" must
+    # produce a YES, "mismatch" must produce a NO, and "reversed" is the
+    # direction probe: the same plate read left-to-right disagrees, read
+    # right-to-left agrees.
+    SIGN_SYNTH_VARIANTS = ("match", "reversed", "mismatch")
+
+    def _sign_preview_sequence(
+        self,
+        session_id: str,
+        chars: Any = None,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+    ) -> Tuple[List[str], str]:
+        """Resolve the target sequence and direction for a synth request.
+
+        The SPA's editor state is the authority when it sends one; a
+        background caller (auto-fill, post-training) has no request payload,
+        so the project's persisted train config is the fallback.  A '?' pad
+        is rejected rather than drawn: it means the user has not set a
+        target, and a plate of placeholder glyphs would answer a different
+        question than the one the red NO implies.
+        """
+        from ocr_dataset import TEMPLATE_SIGN_CHARS
+
+        def _has_target(value: Any) -> bool:
+            return any(c != SIGN_SEQUENCE_PAD for c in normalize_sign_sequence(value))
+
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        saved = self._project_train_cfg(Path(cfg.dataset_root))
+        if chars is not None and _has_target(chars):
+            seq = normalize_sign_sequence(chars)
+        elif sign_sequence is not None and _has_target(sign_sequence):
+            seq = normalize_sign_sequence(sign_sequence)
+        else:
+            seq = normalize_sign_sequence(saved.get("sign_sequence"))
+        bad = [c for c in seq if len(str(c)) != 1 or str(c).upper() not in TEMPLATE_SIGN_CHARS]
+        if bad:
+            raise ValueError(
+                "set the project's 3-character target sign before synthesizing a preview"
+            )
+        seq = [str(c).upper() for c in seq]
+        order = str(reading_order or saved.get("reading_order") or "ltr").strip().lower()
+        if order not in ("ltr", "rtl"):
+            order = "ltr"
+        return seq, order
+
+    def _synthesize_sign_preview_png(
+        self,
+        session_id: str,
+        variant: str = "match",
+        chars: Any = None,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+        seed: Optional[int] = None,
+        alt_char: Any = None,
+    ) -> Dict[str, Any]:
+        """Draw a composite 3-character sign and make it the active preview.
+
+        The ORDER is the whole test matrix:
+          match     the target, laid out the way the project reads it
+          reversed  the target, laid out the opposite way (pixels are
+                    reordered, never mirrored — the same rule the live
+                    pipeline follows)
+          mismatch  the target with its LAST character replaced by one the
+                    target does not contain
+
+        Storing the bytes in `_preview_uploads` is deliberate: the Preview
+        card's upload source, its Dark/Lum re-predict (`reuse=1`) and the
+        drawn slots all then read the same stored frame, with no second
+        "current synth image" concept to keep in step.
+        """
+        from ocr_dataset import (
+            emnist_cache_dir,
+            load_emnist_template_bank,
+            synthesize_sign_preview_png,
+        )
+
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        if not self._is_sign_ocr_session(session_id):
+            raise ValueError("sign synthesis is only available in a sign_ocr project")
+        seq, order = self._sign_preview_sequence(
+            session_id,
+            chars=chars,
+            sign_sequence=sign_sequence,
+            reading_order=reading_order,
+        )
+        kind = str(variant or "match").strip().lower()
+        if kind not in self.SIGN_SYNTH_VARIANTS:
+            raise ValueError(f"unknown synth variant '{variant}'")
+        if kind == "match":
+            physical = list(seq) if order == "ltr" else list(reversed(seq))
+        elif kind == "reversed":
+            physical = list(reversed(seq))
+        else:
+            # A character the target does not use.  The caller may force one
+            # (the endpoint retries until the model actually reads it as
+            # wrong — an unseen glyph can be misread as the target, which
+            # would make a "mismatch" plate show a false YES).  The default
+            # starts at 5, clear of the 0/O and 1/I confusions.
+            forced = str(alt_char or "").strip().upper()[:1]
+            if forced and forced in seq:
+                forced = ""
+            alt = forced or next(
+                (c for c in "56789ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in seq), None
+            )
+            if alt is None:
+                raise ValueError("no replacement character available")
+            replaced = list(seq)
+            replaced[-1] = alt
+            physical = replaced if order == "ltr" else list(reversed(replaced))
+
+        bank = load_emnist_template_bank(cache_root=emnist_cache_dir(app_data_dir()))
+        png = synthesize_sign_preview_png(
+            physical,
+            dataset_root=Path(cfg.dataset_root),
+            bank=bank,
+            seed=seed,
+        )
+        label = "".join(seq)
+        filename = f"synth_{label}_{kind}.png"
+        with self._lock:
+            self._preview_uploads[session_id] = {
+                "bytes": png,
+                "filename": filename,
+                "synthetic": True,
+            }
+        return {
+            "png": png,
+            "filename": filename,
+            "variant": kind,
+            "chars": physical,
+            "sign_sequence": list(seq),
+            "reading_order": order,
+        }
+
+    def _maybe_autostore_synth_preview(
+        self,
+        session_id: str,
+        *,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+        replace_synthetic: bool = False,
+    ) -> bool:
+        """Prepare a ready-to-preview sign image for a sign_ocr project.
+
+        Called after auto-fill seeds a sign project and after training
+        finishes.  A REAL upload is never replaced — the user put it there
+        on purpose — but a previous synthetic frame is, because the target
+        or the model may have changed since it was drawn.  Failures are
+        swallowed: this is a convenience, and a missing preview must never
+        turn seeding or training into an error.
+        """
+        try:
+            with self._lock:
+                stored = dict(self._preview_uploads.get(session_id) or {})
+            if stored.get("bytes") and not (
+                replace_synthetic and bool(stored.get("synthetic"))
+            ):
+                return False
+            self._synthesize_sign_preview_png(
+                session_id,
+                variant="match",
+                sign_sequence=sign_sequence,
+                reading_order=reading_order,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _preview_predict_sign_ocr(
+        self,
+        session_id: str,
+        png: bytes,
+        sign_sequence: Any = None,
+        reading_order: Any = None,
+        bg_dark_thresh: Optional[int] = None,
+        bg_lum_thresh: Optional[int] = None,
+        match_min_prob: Optional[float] = None,
+        source: str = "",
+    ) -> Dict[str, Any]:
+        """Read a whole road sign: locate, split, one inference per glyph.
+
+        Answers the only question a 3-character sign project has — is this
+        the sign I trained? — as a single boolean, alongside the three
+        per-slot readings it was derived from, so a NO is explainable
+        rather than just red.
+
+        The rule is deliberately unforgiving: ALL THREE slots must name
+        their own character, none may come back as the reject class, and
+        each must clear `match_min_prob`.  A sign reader that says YES when
+        two of three characters matched is worse than one that says no.
+        """
+        seq = normalize_sign_sequence(sign_sequence)
+        order = str(reading_order or "").strip().lower()
+        if order not in ("ltr", "rtl"):
+            order = "ltr"
+        # Same lazy import, same reason as _classes_add_named: ocr_dataset
+        # pulls in the OCR training stack, and this module must stay usable
+        # without it.
+        from ocr_dataset import BACKGROUND_CLASS_NAME
+
+        model = self._preview_load_model(session_id=session_id)
+        labels: List[str] = list(model.get("labels") or [])
+        shape_raw = model["input_details"].get("shape")
+        shape = tuple(int(x) for x in (shape_raw if shape_raw is not None else []))
+        if len(shape) != 4:
+            raise RuntimeError("unsupported input shape")
+        _, h, w, c = shape
+        channels = int(c) if int(c) > 0 else 1
+
+        # The luminance window.  A caller-supplied value (the live preview's
+        # Dark/Lum sliders) wins; otherwise the sign's own stored record;
+        # otherwise the untouched defaults, which mean exact Otsu.  Same
+        # one-LSB-inward nudge as _preprocess_image_png_ocr, for the same
+        # reason: the sliders are strict bounds and binarize_ink is not.
+        config = self._sign_ocr_preprocess_config(model, seq)
+        if bg_dark_thresh is not None:
+            config["bg_dark_thresh"] = int(bg_dark_thresh)
+        if bg_lum_thresh is not None:
+            config["bg_lum_thresh"] = int(bg_lum_thresh)
+        config = normalize_class_preprocess(config)
+        polarity = int(config.get("ink_polarity", INK_DARK))
+        convention = str(config.get("glyph_convention", NORM_CANON))
+        bg_dark = int(config.get("bg_dark_thresh", 0) or 0)
+        bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
+        thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
+        pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
+        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+
+        src_img = Image.open(_bytes_io(png)).convert("L")
+        gray = np.asarray(src_img, dtype=np.uint8)
+        full_h, full_w = gray.shape[:2]
+        roi_px = (
+            manual_roi_to_pixels(full_h, full_w, model.get("manual_roi"))
+            if str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI
+            else None
+        )
+        origin_x, origin_y = 0, 0
+        if roi_px is not None:
+            rx1, ry1, rx2, ry2 = roi_px
+            sub = gray[ry1:ry2, rx1:rx2]
+            if sub.size:
+                gray = np.ascontiguousarray(sub)
+                origin_x, origin_y = rx1, ry1
+
+        reading = preprocess_sign_sequence(
+            gray,
+            sign_sequence=seq,
+            reading_order=order,
+            out_size=int(w),
+            polarity=polarity,
+            apply_segmentation=True,
+            convention=convention,
+            thresh=pinned,
+            dark_thr=floor,
+        )
+
+        def _to_full_box(box: Any) -> Any:
+            """Slot/sign box from the ROI-local frame back to frame pixels."""
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                return None
+            return [
+                int(box[0]) + origin_x,
+                int(box[1]) + origin_y,
+                int(box[2]) + origin_x,
+                int(box[3]) + origin_y,
+            ]
+
+        SLOT_MIN = max(0.0, min(1.0, float(match_min_prob if match_min_prob is not None else 0.60)))
+        slots: List[Dict[str, Any]] = []
+        slot_pngs: List[bytes] = []
+        all_match = bool(labels)
+        for i, slot in enumerate(reading.get("slots") or []):
+            glyph = np.asarray(slot.get("glyph"), dtype=np.uint8)
+            target = str(slot.get("char") or "")
+            label = ""
+            prob = 0.0
+            raw_out = None
+            if labels and glyph.size:
+                arr = (glyph.astype(np.float32) / 255.0).reshape((int(h), int(w), channels))
+                try:
+                    _scores, raw_out = self._invoke_glyph_tensor(model, session_id, arr)
+                except Exception:
+                    raw_out = None
+            if raw_out is not None and raw_out.size:
+                total = int(np.sum(raw_out))
+                if total <= 0:
+                    total = 1
+                top_i = int(np.argmax(raw_out))
+                # Device-exact confidence (raw_best / sum(raw)) — the same
+                # number TFLite.ino's OOD gate and _preview_predict use, so
+                # a threshold means one thing across the whole app.
+                prob = float(np.float32(np.max(raw_out)) / np.float32(total))
+                if 0 <= top_i < len(labels):
+                    label = str(labels[top_i])
+            is_background = label.startswith("_") or label == BACKGROUND_CLASS_NAME
+            matched = bool(
+                labels
+                and not is_background
+                and label
+                and label.upper() == target.upper()
+                and prob >= SLOT_MIN
+                and bool(slot.get("ok"))
+            )
+            all_match = all_match and matched
+            slots.append(
+                {
+                    "index": int(i),
+                    "char": target,
+                    "label": label,
+                    "prob": float(prob),
+                    "match": bool(matched),
+                    "background": bool(is_background),
+                    "empty": bool(slot.get("empty", True)),
+                    "box": _to_full_box(slot.get("box")),
+                    "box_norm": slot.get("box_norm"),
+                }
+            )
+            slot_pngs.append(_to_png_bytes(Image.fromarray(glyph, mode="L")))
+
+        if not labels:
+            # No trained model yet: the reading is still worth showing (the
+            # split is useful on its own), but nothing can match.
+            all_match = False
+
+        match_text = SIGN_MATCH_TEXT if all_match else SIGN_NOMATCH_TEXT
+        # Per-slot readings doubled as the bar labels: the preview's output
+        # pane renders a distribution for every other source, and for a sign
+        # the interesting distribution IS the three slots.
+        slot_labels = [f"{s['char']} → {s['label'] or '—'}" for s in slots]
+        slot_probs = [float(s["prob"]) for s in slots]
+
+        # The composite the preview pane shows: the sign crop, with each
+        # slot's own glyph laid out beneath it.  Built here rather than in
+        # the SPA so both the live preview and an uploaded test image get
+        # the same picture with no second implementation.
+        sign_box = _to_full_box(reading.get("sign_box"))
+        # The ROI overlay and the class-edit preview both read `crop` as
+        # FULL-frame fractions, and the reading's own box_norm is relative
+        # to the Manual ROI crop when one is active — so it is re-derived
+        # from the translated pixel box rather than passed through.
+        sign_box_norm = None
+        if sign_box is not None and full_w > 0 and full_h > 0:
+            sign_box_norm = [
+                float(sign_box[0]) / float(full_w),
+                float(sign_box[1]) / float(full_h),
+                float(sign_box[2]) / float(full_w),
+                float(sign_box[3]) / float(full_h),
+            ]
+        composite_png = self._sign_ocr_composite(gray, reading, origin_x, origin_y)
+
+        return {
+            "labels": slot_labels,
+            "probs": slot_probs,
+            "top_label": match_text,
+            "top_prob": float(min((s["prob"] for s in slots), default=0.0)),
+            "crop": sign_box_norm,
+            "model_source": str(model.get("model_source") or "latest"),
+            "processed_image_b64": base64.b64encode(composite_png).decode("ascii"),
+            "crop_image_b64": "",
+            "full_image_b64": "",
+            "processed_variant": "sign-sequence",
+            "ood": False,
+            "ood_reason": "",
+            "sign_pct": 0.0,
+            "max_prob": float(min((s["prob"] for s in slots), default=0.0)),
+            "entropy_ratio": 0.0,
+            # ── the sign_ocr payload ────────────────────────────────────
+            "sign_ocr": True,
+            "sign_sequence": list(seq),
+            "reading_order": order,
+            "slots": slots,
+            "slot_images_b64": [base64.b64encode(p).decode("ascii") for p in slot_pngs],
+            "match": bool(all_match),
+            "match_text": match_text,
+            "match_min_prob": float(SLOT_MIN),
+            "sign_box": sign_box,
+        }
+
+    def _sign_ocr_composite(
+        self, gray_local: np.ndarray, reading: Dict[str, Any], origin_x: int, origin_y: int
+    ) -> bytes:
+        """One image that shows the split: the located sign over its slots.
+
+        Purely a rendering aid — nothing downstream reads it — but it is the
+        difference between "NO MATCH" and "NO MATCH, and here is the second
+        crop it was looking at", which is the whole diagnostic value of
+        segmenting a sign in the first place.
+        """
+        rows: List[np.ndarray] = []
+        try:
+            sign_box = reading.get("sign_box")
+            if isinstance(sign_box, (list, tuple)) and len(sign_box) == 4:
+                x1, y1, x2, y2 = (int(v) for v in sign_box)
+                crop = gray_local[y1:y2, x1:x2]
+                if crop.size:
+                    # Scale to a readable strip: the source may be a 28 px
+                    # crop or a 640 px frame, and the pane is a fixed width.
+                    scale = max(1, int(round(160.0 / max(1, crop.shape[1]))))
+                    crop = np.repeat(np.repeat(crop, scale, axis=0), scale, axis=1)
+                    rows.append(np.ascontiguousarray(crop))
+            glyph_row = []
+            for slot in reading.get("slots") or []:
+                g = np.asarray(slot.get("glyph"), dtype=np.uint8)
+                if g.size:
+                    # 4x with a 1 px separator, so the three slots read as
+                    # three crops rather than one blurred strip.
+                    glyph_row.append(np.repeat(np.repeat(g, 4, axis=0), 4, axis=1))
+                    glyph_row.append(np.full((g.shape[0] * 4, 3), 200, dtype=np.uint8))
+            if glyph_row:
+                body = np.hstack(glyph_row[:-1])
+                width = max(x.shape[1] for x in rows + [body])
+                rows.append(np.full((6, width), 160, dtype=np.uint8))
+                rows.append(body)
+            if not rows:
+                rows = [np.zeros((28, 28), dtype=np.uint8)]
+            height = sum(r.shape[0] for r in rows)
+            width = max(r.shape[1] for r in rows)
+            canvas = np.full((height, width), 255, dtype=np.uint8)
+            y = 0
+            for r in rows:
+                canvas[y : y + r.shape[0], : r.shape[1]] = r
+                y += r.shape[0]
+            return _to_png_bytes(Image.fromarray(canvas, mode="L"))
+        except Exception:
+            return _to_png_bytes(Image.fromarray(np.asarray(gray_local, dtype=np.uint8), mode="L"))
+
     def _start_train(self, session_id: str, cfg: Any) -> None:
         with self._lock:
             sess_cfg = self._configs.get(session_id)
@@ -3262,6 +5734,18 @@ class RecordController:
             if raw_sample_preprocess is None or (isinstance(raw_sample_preprocess, dict) and not raw_sample_preprocess):
                 raw_sample_preprocess = project_sample_preprocess
 
+            # The auto-fill flag is project state, not a hyperparameter, but
+            # it rides in TrainConfig and the trainer writes that config into
+            # the run.  An older client (or a page whose train_cfg was
+            # restored without it) must not silently flip it off in the run
+            # it produces: an explicit payload value wins, otherwise the
+            # project's persisted choice does.
+            auto_seed_samples = (
+                _is_truthy(cfg_dict.get("auto_seed_emnist_samples"))
+                if cfg_dict.get("auto_seed_emnist_samples") is not None
+                else self._auto_seed_emnist_enabled(sess_cfg.dataset_root)
+            )
+
             cfg = TrainConfig(
                 img_size=int(cfg_dict.get("img_size") or 96),
                 color_mode="grayscale",
@@ -3284,6 +5768,36 @@ class RecordController:
                 class_names_order=list(project_classes) if project_classes else None,
                 min_steps_per_epoch=int(cfg_dict.get("min_steps_per_epoch") or 4),
                 auto_adjust_batch_and_epochs=bool(cfg_dict.get("auto_adjust_batch_and_epochs", True)),
+                # The session owns the project type; a stray cfg_dict must not
+                # be able to train an OCR workspace with the sign transform.
+                project_type=str(getattr(sess_cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                # OCR: dataset mixing + transfer learning.  Read only by the
+                # OCR strategy, so an image project is unaffected by their
+                # presence (and by their absence).
+                ocr_emnist_enabled=bool(cfg_dict.get("ocr_emnist_enabled", True)),
+                ocr_emnist_split=str(cfg_dict.get("ocr_emnist_split") or "balanced"),
+                ocr_emnist_per_class=int(cfg_dict.get("ocr_emnist_per_class") or 200),
+                ocr_background_enabled=bool(cfg_dict.get("ocr_background_enabled", True)),
+                ocr_background_samples=int(cfg_dict.get("ocr_background_samples") or 0),
+                ocr_transfer_learning=bool(cfg_dict.get("ocr_transfer_learning", True)),
+                ocr_pretrain_per_class=int(cfg_dict.get("ocr_pretrain_per_class") or 1200),
+                ocr_pretrain_epochs=int(cfg_dict.get("ocr_pretrain_epochs") or 4),
+                ocr_head_epochs=int(cfg_dict.get("ocr_head_epochs") or 12),
+                ocr_finetune_epochs=int(cfg_dict.get("ocr_finetune_epochs") or 25),
+                ocr_head_lr=float(cfg_dict.get("ocr_head_lr") or 0.0015),
+                ocr_finetune_lr=float(cfg_dict.get("ocr_finetune_lr") or 0.0002),
+                ocr_unfreeze_blocks=int(cfg_dict.get("ocr_unfreeze_blocks") or 1),
+                # sign_ocr: the target label the exported device sketch will
+                # verify each slot against.  Recorded in train_config.json so
+                # an export (or a reopened project) can recover what THIS
+                # model was trained to read instead of guessing from the
+                # current editor state.
+                sign_sequence=(
+                    normalize_sign_sequence(cfg_dict.get("sign_sequence"))
+                    if cfg_dict.get("sign_sequence") is not None else None
+                ),
+                reading_order=str(cfg_dict.get("reading_order") or "ltr"),
+                auto_seed_emnist_samples=bool(auto_seed_samples),
             )
 
             workspace_root = sess_cfg.dataset_root.parent
@@ -3298,6 +5812,7 @@ class RecordController:
                 global_preprocess_mode=cfg.preprocess_mode,
                 out_size=int(cfg.img_size),
                 fast_mode=(str(cfg.crop_mode or CROP_MODE_CENTER) != CROP_MODE_AUTO_SEARCH),
+                project_type=str(cfg.project_type),
             )
 
             def on_progress(p: float, msg: str) -> None:
@@ -3345,6 +5860,7 @@ class RecordController:
                 "class_accuracies": dict(result.class_accuracies) if result.class_accuracies else {},
                 "warnings": list(result.warnings) if result.warnings else [],
                 "img_size": int(cfg.img_size),
+                "project_type": str(cfg.project_type),
                 "color_mode": str(cfg.color_mode),
                 "preprocess_mode": str(cfg.preprocess_mode),
                 "crop_mode": str(cfg.crop_mode or CROP_MODE_AUTO_SEARCH),
@@ -3352,6 +5868,15 @@ class RecordController:
                 "class_preprocess": normalize_class_preprocess_map(cfg.class_preprocess),
                 "sample_preprocess": normalize_sample_preprocess_map(cfg.sample_preprocess),
                 "trained_dataset_dir": str(processed_dataset_dir),
+                # Strategy-supplied manifest.  For OCR this is the EMNIST /
+                # background mix actually used, so a run can be explained
+                # after the fact without re-deriving it from the filenames.
+                # "ocr_mix", not "sign_ocr_mix": the sign project runs the same OCR
+                # strategy, so the manifest it supplies is the same EMNIST /
+                # background mix.  Keyed on the STRATEGY family, because that is
+                # what produced it — a name that varied by project type would
+                # make every reader of this field branch on it too.
+                "ocr_mix": dict(result.meta) if is_glyph_project(cfg.project_type) else {},
             }
             # Atomic write: a torn meta read by a concurrent /preview/predict
             # used to 400 every prediction until the next training.
@@ -3368,6 +5893,31 @@ class RecordController:
                 (cfg.dataset_root.parent / "deployed.json").unlink(missing_ok=True)
             except Exception:
                 pass
+            # The target the model was just trained against is project
+            # state now: persist it so a later auto-fill (which carries no
+            # request payload) can still draw a matching preview sign.
+            if str(cfg.project_type) == PROJECT_TYPE_SIGN_OCR:
+                try:
+                    self._save_train_cfg(
+                        session_id,
+                        {
+                            "sign_sequence": cfg.sign_sequence,
+                            "reading_order": cfg.reading_order,
+                            "auto_seed_emnist_samples": bool(cfg.auto_seed_emnist_samples),
+                        },
+                    )
+                except Exception:
+                    pass
+                # A freshly trained sign project should be testable with one
+                # click and no photo: replace any PREVIOUS synthetic frame
+                # (the model and maybe the target changed), never a real
+                # upload.
+                self._maybe_autostore_synth_preview(
+                    session_id,
+                    sign_sequence=cfg.sign_sequence,
+                    reading_order=cfg.reading_order,
+                    replace_synthetic=True,
+                )
             done_msg = "Done."
             if result.warnings:
                 done_msg = "Done — WARNINGS: " + " | ".join(result.warnings)
@@ -3864,7 +6414,15 @@ class RecordController:
                     if cfg.crop_box is not None:
                         x1, y1, x2, y2 = cfg.crop_box
                         img = img.crop((x1, y1, x2, y2))
-                    img = img.resize((int(cfg.img_size), int(cfg.img_size)))
+                    # capture_png is what /live/capture and _record_from_live
+                    # write to disk, and what the Manual ROI editor shows as
+                    # "Original Sample".  Keep it at camera resolution — the
+                    # old `resize((img_size, img_size))` here saved 28x28
+                    # thumbnails for an OCR project, so the user was dragging
+                    # a ROI on a blown-up thumbnail and the crop had nothing
+                    # left to select.  _cache_one_sample still stores the
+                    # training tensor at img_size, after the crop.
+                    img = _cap_capture_resolution(img)
                     self._live_set(key, preview_png=preview_png, capture_png=_to_png_bytes(img), error="")
                     time.sleep(0.06)
                 except Exception as e:
@@ -3958,7 +6516,7 @@ class RecordController:
                 raw = reader.read_frame()  # auto-scaled timeout (frame_size × 12 bits/byte / baud)
                 png = _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=int(cfg.serial_frame_side), out_side=int(cfg.serial_frame_side))
                 p = _save_png(cfg.dataset_root, class_name, png)
-                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
                 with self._lock:
                     cur = self._active.get(session_id)
                     if cur is not None and cur.get("recording") == "1":
@@ -4010,10 +6568,12 @@ class RecordController:
                 if cfg.crop_box is not None:
                     x1, y1, x2, y2 = cfg.crop_box
                     img = img.crop((x1, y1, x2, y2))
-                img = img.resize((int(cfg.img_size), int(cfg.img_size)))
+                # Same rule as the live worker above: save at camera
+                # resolution, let the pipeline downsample after the crop.
+                img = _cap_capture_resolution(img)
                 png = _to_png_bytes(img)
                 p = _save_png(cfg.dataset_root, class_name, png)
-                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+                self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
                 with self._lock:
                     cur = self._active.get(session_id)
                     if cur is not None and cur.get("recording") == "1":
@@ -4070,7 +6630,8 @@ class RecordController:
         last_saved_seen_ts: float = 0.0
         last_frame_at = time.time()
         while self._is_recording(session_id):
-            now = time.time()
+            iter_started = time.time()
+            now = iter_started
             capture_png: Optional[bytes] = None
             with self._lock:
                 state = self._live.get(key)
@@ -4093,7 +6654,7 @@ class RecordController:
                 time.sleep(max(0.015, float(interval) * 0.35))
                 continue
             p = _save_png(cfg.dataset_root, class_name, capture_png)
-            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size))
+            self._cache_one_sample(cfg.dataset_root, class_name, p, img_size=int(cfg.img_size), project_type=str(cfg.project_type))
             with self._lock:
                 cur = self._active.get(session_id)
                 if cur is not None and cur.get("recording") == "1":
@@ -4108,8 +6669,12 @@ class RecordController:
             if cond is not None:
                 with cond:
                     cond.notify_all()
-            next_deadline = time.time() + float(interval)
-            sleep_s = next_deadline - time.time()
+            # Pace to a fixed PERIOD measured from the start of this iteration,
+            # so the sleep absorbs the save+preprocess time instead of being
+            # added to it.  Anchoring the deadline at "now" (after the work)
+            # made the real period work+interval -- a requested 8 fps delivered
+            # ~7.1, and the gap grew with the sample cost.
+            sleep_s = (iter_started + float(interval)) - time.time()
             if sleep_s > 0:
                 time.sleep(sleep_s)
 
@@ -4517,6 +7082,32 @@ def _raw96_preview_png(raw: bytes, frame_side: int = 96) -> bytes:
         arr = np.frombuffer(raw, dtype=np.uint8).reshape((side, side))
         img = Image.fromarray(arr, mode="L").resize((side * 3, side * 3), Image.NEAREST)
     return _to_png_bytes(img)
+
+
+def _cap_capture_resolution(img: Image.Image, max_side: int = CAPTURE_MAX_SIDE) -> Image.Image:
+    """Bound a captured sample's long side, preserving its aspect ratio.
+
+    The webcam is the only source that can hand us more than the model input
+    size, so it is the only one that needs a ceiling: a 4K frame written at
+    capture rate is a lot of disk and PNG-encode time for no extra detail.
+    1024 keeps a single character comfortably draggable in the Manual ROI
+    editor while staying cheap enough for hold capture.
+
+    Aspect is PRESERVED on purpose — the sample is the user's view of the
+    scene, and squashing it square is what made the ROI unusable.
+    """
+    try:
+        w, h = (int(v) for v in img.size)
+        long_side = max(w, h)
+        if long_side <= 0 or long_side <= int(max_side):
+            return img
+        scale = float(max_side) / float(long_side)
+        return img.resize(
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            Image.LANCZOS,
+        )
+    except Exception:
+        return img
 
 
 def _to_png_bytes(img: Image.Image) -> bytes:

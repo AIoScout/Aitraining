@@ -1,438 +1,370 @@
-# Usage & Packaging (macOS .dmg / Windows .exe)
+# AItraining — TFLite Training desktop app
 
-Goal: students should not need to install Python. Double-click to launch.
+A Streamlit desktop app that trains int8 TFLite models for ESP32-P4, with a
+hand-written workspace SPA for capture, preprocessing, training and live
+Preview.  Three project types share one UI but train and export different
+model shapes.
 
-## How to Use (Students / Teachers)
-
-- Typical workflow:
-  - Home → `Open Image Project` → choose a start mode:
-    - `Start from empty`: create classes and collect samples from scratch
-    - `Start from classified class`: import a dataset that is already grouped by label
-  - Home → `Open Project` → `Open .tmproj`: restore a previously saved project archive
-- Workspace navigation:
-  - Open the top-left **AIoScout** menu (`☰`) for `Open project`, `Save project`, `Export dataset`, `Return`, and `Reset project`
-  - `Return` stops live capture/record and goes back to the page you came from:
-    - empty project workspace → home
-    - classified import workspace → classified import page
-    - opened `.tmproj` workspace → home
-  - `Reset project` deletes the current workspace session (samples, classes, and trained model) after a confirmation prompt
-- Classes and samples:
-  - `＋ Add a class`: add a new class card
-  - Click the class name to rename it
-  - Each class card supports `Webcam`, `Upload`, and `Device`
-  - `Webcam` and `Upload` samples are shown in color in the UI when available
-  - `Device` samples are grayscale frames from a serial/UART source
-  - Training input is normalized to grayscale for all sample sources, so webcam/upload/device are trained consistently
-- Device source:
-      - Open the `Device` card and use the `⚙` settings panel to configure `Image Size`, `Color Mode`, `Baud Rate`, and `Sync Header`
-      - `Image Size` selects the frame resolution sent by the firmware: 96×96, 160×160, or 384×384 — must match the firmware output exactly.  On the firmware side this is the `g_frame_side` value in the USER CONFIG block at the top of `TFLite/TFLite.ino` (the camera libraries follow it at runtime via the unified `set_frame_side()` API).  `g_flip_180` right below it controls the 180° rotation for the upside-down camera mount — keep it `true` for the standard board.
-      - `Color Mode` selects Grayscale (1 channel) or RGB (3 channels) depending on the firmware sketch
-      - `Sync Header` is the hex frame marker used to detect the start of each image packet, for example `AA 55 AA`
-      - Change the sync value if your firmware uses a different frame prefix
-      - The selected device port and camera index persist across page reruns, training, and exports (they are stored in the live-config controller and merged back on every render); they reset only via `Return` / `Reset project`
-- Classified import:
-  - `Browse...` opens the system folder picker
-  - `Load folder` stays disabled until a folder path is present
-  - Supported input layouts are documented below in `Dataset Folder Structure`
-  - Imported class names come from folder / label names
-- Training:
-  - The middle `Training` panel trains an int8 TFLite model from the current workspace
-  - The `Advanced` section exposes all model hyperparameters: `Image Size` (model input resolution), batch size, epochs, learning rate, conv/dense layer sizes
-  - `Image Size` controls the resolution images are resized to before training — all samples are preprocessed to this size regardless of their original dimensions
-  - Image preprocessing is configured per class from the preprocess button shown next to each class name
-  - The class preprocess `Processed Preview` shows the thresholded mask — white = filtered out (background), dark = candidate sign pixels.  Tune the `Dark Thresh` and `Lum Thresh` sliders in the edit page to adjust what the detector keeps
-  - Each class preprocess page supports:
-    - `Manual ROI`: draw a custom ROI directly on a sample image for that class
-    - `Full Frame`: disable extra ROI cropping for that class
-- Preview / Export:
-      - The right `Preview` panel runs preview inference after training
-      - Toggle `Input` to start/stop live predictions; toggle `ROI` to overlay the auto search box on the original frame (green = auto shadow-search, same as the class-edit page; blue = manual ROI); toggle `Orig` for the thresholded full-frame view
-      - The slider bar under the preview image provides live `Dark Thresh` and `Lum Thresh` controls — adjust them to tune sign detection while watching the ROI view
-      - Live predictions use the same center-60 % crop the model was trained on (matches the device firmware); the ROI view is visual feedback only
-      - `Export Model` writes model files and MCU helper files to the selected export folder
-- Default output directories:
-  - macOS: `~/Library/Application Support/TFLiteTraining/`
-  - Windows: `%APPDATA%\\TFLiteTraining\\`
-  - Structure:
-    - `workspace/`: current project workspace
-    - `datasets/`: training datasets (images grouped by class)
-    - `runs/`: training runs and artifacts from each Train (e.g. .keras/.tflite/labels)
-    - `logs/streamlit.log`: app logs (for debugging)
-- Export to MCU:
-  - `model.h / model.cpp`: drop into Arduino/ESP-IDF projects (array name can be set in Export)
-  - `labels.txt`: class order (inference index mapping)
-
-## Quick Start Demo (10 minutes)
-
-A step-by-step walkthrough that showcases every major feature.  Ideal for presentations and first-time users.
+Packaging instructions (macOS `.dmg` / Windows `.exe`) are at the bottom.
 
 ---
 
-### Step 1 — Create a Project (30 sec)
+## 1. Project types
 
-1. Launch the app → you see the **Home** screen.
-2. Click **Open Image Project** → **Start from empty**.
-3. You are now in the workspace with three columns: **Classes**, **Training**, **Preview**.
+The Start Page (`✨ Choose a project type`) has three cards:
 
----
+| Card | Subtitle | Buttons | Model | Export folder |
+|---|---|---|---|---|
+| **Image Project** (`image`) | *Build an image classification model from images, webcam, or ESP32-P4 device stream. Great for classroom demos and local training for tinyML MCU deployment.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 96×96 default | `TFLite/` |
+| **🔠 OCR / Character Project** (`ocr`) | *Train a highly optimized INT8 character recognition model for ESP32. Features EMNIST dataset mixing, bit-exact Vertical Projection, and OOD rejection.* | `Get Started`, `Open Project (.tmproj)` | 28×28 glyph, `0–9 A–Z` + `_background` | `TFLite_OCR/` |
+| **🛑 Road Sign (3-Char)** (`sign_ocr`) | *Train a 3-character road-sign reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the sign in view.* | `Get Started`, `Open Project (.tmproj)`, `Import classified class` | 3 slots × 28×28 glyphs | `TFLite_Sign/` |
 
-### Step 2 — Add Classes (30 sec)
+`Open Project (.tmproj)` opens a native file picker.  The archive manifest's
+`project_type` is authoritative: a file opened from any card is restored into
+the workspace it actually belongs to, and a cross-card switch is announced.
+Cancel is a silent no-op; a foreign ZIP is refused at the picker, while older
+v1 archives are still readable (missing settings fall back to this build's
+defaults and the app reports which ones).
 
-1. In the left column, click **＋ Add a class** to create a second class.
-2. Click a class name to rename it (e.g. `SIGN`, `BACKGROUND`).
-3. Each class card has three capture buttons: **Webcam**, **Device**, **Upload**.
-
-> **Demo tip**: Create 2 classes — one for the sign, one for background/nothing.
-
----
-
-### Step 3 — Configure Device Source (1 min)
-
-1. On a class card, click **Device** to open the device panel.
-2. Click the **⚙ gear icon** on the device panel to open settings:
-
-   | Setting | Value | What it does |
-   |---|---|---|
-   | **Image Size** | 96 / 160 / 384 | Must match your firmware output |
-   | **Color Mode** | Grayscale / RGB | Grayscale for inference, RGB for data collection |
-   | **Baud Rate** | 921600 | Match your serial port speed |
-   | **Sync Header** | AA 55 AA | Frame start marker |
-
-3. Click **Apply** — the device preview should show live frames.
-
-> **Showcase**: Change Image Size and see the preview adapt.  This proves the app handles any resolution.
+`Get Started` creates a fresh project.  A fresh sign project starts with the
+three-slot target `A ▸ B ▸ C` and three matching class cards.
 
 ---
 
-### Step 4 — Capture Samples (2 min)
+## 2. Workspace
 
-1. Click and **hold** the device/webcam capture button → samples are saved to that class.
-2. Repeat for each class.  Aim for 10-20 samples per class.
-3. The sample count updates on each class card.
+Top toolbar:
 
-> **Showcase**: The device works with **any frame size** (96/160/384) and **Grayscale or RGB** — configured entirely from the gear icon, no code changes.
+- **File ▾** — `New project` (⌘N), `Open project` (⌘O), `Save` (⌘S),
+  `Save as` (⇧⌘S), `Export dataset`.
+- **Edit ▾** — `Edit characters` / `Glyph settings…` (OCR only), `Reset
+  project`.
+- **Settings** — global webcam/serial input settings, Preview source and OOD
+  gates, and the Advanced EMNIST auto-fill controls.
+- **Preferences** — display limits and caching.
+- **📖 Tutorial** — state-aware walkthrough.  Image, OCR and sign projects
+  each have their own curriculum; the sign tour has 10 steps covering target,
+  samples, worktable, reading direction, OOD, verdict and export.
+- **← Return Home**.
+- **Export Model** in the Preview card head.
 
----
+The workspace is three columns: class cards (`#classes`), `Training`, and
+`Preview`.  System dark mode follows `prefers-color-scheme: dark`.
 
-### Step 5 — Tune Detection Thresholds (2 min) ⭐ KEY FEATURE
+Global shortcuts:
 
-1. Click the **preprocess button** (🔍 icon) next to a class name.
-2. The class edit page opens showing your samples on the left and a **Processed Preview** on the right.
-3. The preview shows the **thresholded mask** — white = filtered out, dark = what the detector keeps.
-4. Adjust the **Dark Thr** and **Lum Thr** sliders:
-
-   | Slider | Default | Effect |
-   |---|---|---|
-   | **Dark Thr** | 0 | Pixels darker than this → ignored as shadow |
-   | **Lum Thr** | 100 | Pixels brighter than this → ignored as background |
-
-5. Watch the processed preview update in real-time as you drag the sliders.
-6. The ROI bounding box (green outline) shows where the detector found the sign.
-
-> **Showcase**: This is the core tuning workflow.  The processed preview gives instant visual feedback — no guesswork.
-
----
-
-### Step 6 — Train the Model (1 min)
-
-1. In the middle **Training** column, click **Train Model**.
-2. To change model parameters, expand **Advanced**:
-
-   | Parameter | Default | What it does |
-   |---|---|---|
-   | **Image Size** | 96 | All images resized to this before training |
-   | **Batch Size** | 32 | Samples per training step |
-   | **Epochs** | 20 | Training iterations |
-   | **Learning Rate** | 0.0016 | Optimization step size |
-
-   Click **💡 Use recommended** in **Advanced** — the app computes
-   dataset-aware suggestions for Batch Size / Epochs / Learning Rate /
-   Validation Split from your current sample count and shows a one-line
-   reason next to each field (small datasets → lower learning rate and a
-   batch sized so each epoch keeps ≥ 4 steps, ~800 total updates).
-   Recommendations are advisory only — you can override any value.
-
-3. Training takes 10-60 seconds.  A progress bar shows status.
-
-> **Showcase**: The **Image Size** parameter is independent of capture resolution.  You can capture at 160×160 but train at 96×96 (or vice versa).
+| Key | Action |
+|---|---|
+| `Esc` | Close the topmost layer (dropdown → worktable → settings → preferences → character/glyph modal → source drawer).  In a text field outside a modal it only blurs. |
+| `Space` | With a Webcam/Device drawer open: tap = one capture; hold ≥220 ms = hold capture until release. |
+| `⌘/Ctrl+S` | Save; in the worktable, save the current sample |
+| `⇧⌘/Ctrl+S` | Save As |
+| `⌘/Ctrl+O`, `⌘/Ctrl+N`, `⌘/Ctrl+E` | Open, New, Export |
+| `⌘/Ctrl+Enter` | Train (when enabled) |
+| `⌘/Ctrl+,` | Settings |
 
 ---
 
-### Step 7 — Preview & Tune Live (2 min) ⭐ KEY FEATURE
+## 3. Data collection
 
-1. After training, the right **Preview** panel becomes active.
-2. Toggle **Input ON** → live camera feed with predictions.
-3. Toggle **ROI ON** → switches to the **thresholded mask view**.
-4. Use the **slider bar** under the preview image:
+Each class card shows its name, sample count (`N Image Sample(s)`), an
+**Edit** chip, a clear-samples icon, and three source tiles: **Webcam**,
+**Upload**, **Device**.  Clicking a tile opens that source's drawer below the
+card; clicking it again (or the `Close` pill) folds it away.
 
-   ```
-   Dark [===○========] 3    Lum [========○===] 76
-   ```
+- **Device (ESP32-P4 serial)**: port chip + `Settings` chip, live preview,
+  `Capture`, `Hold to Capture`.  Configure baud/frame side/channels in
+  Settings → MCU Device Settings.  The firmware must be in a capture mode
+  (`mode gray` for grayscale samples, `mode rgb` for RGB).
+- **Webcam**: camera chip + `Settings` chip, live preview, `Capture`,
+  `Hold to Capture`.  `Space` does the same hands-free.
+- **Upload**: `Choose images from your files`; drag-and-drop onto the class
+  card also works.
+- **⚙ Settings → Advanced Settings → Developer: EMNIST template samples**:
+  - `Auto-fill empty classes with EMNIST template samples (24 / class)`
+  - `Fill Empty Classes with EMNIST Samples Now`
+  - Fills only classes whose on-disk image count is 0, with 24
+    dark-ink-on-light 96×96 captures; real captures are never touched.
+    The toggle is project state, and changing a sign slot backfills the new
+    character in the same request.
 
-5. Adjust sliders while watching the ROI view — the detection updates in real-time.
+In a **sign_ocr** project the class list is owned by `#signSeqBar`: there is
+no add/delete/rename/drag on the cards.  Editing a slot updates the cards,
+deduplicates repeated characters (the badge reads `Slots 1 & 3`), marks a
+previously trained model `⚠ Stale`, and syncs `/classes/sync_ocr`.
 
-> **Showcase**: The slider bar + ROI toggle is the fastest way to find good thresholds.  No need to re-train — just slide and see.
-
----
-
-### Step 8 — Save & Export (30 sec)
-
-1. Click the **top-left menu** → **Save project** → saves a `.tmproj` file.
-2. All settings are preserved: class names, samples, thresholds, training config.
-3. Click **Export Model** → choose a folder → gets `.tflite`, `model.cpp`, `model.h`, `labels.txt`.
-
-> **Showcase**: `.tmproj` is a complete snapshot.  Share it with teammates or reopen it later — everything is restored.
-
----
-
-### Key Features Checklist
-
-| # | Feature | Where |
-|---|---|---|
-| 1 | Configurable device resolution (96/160/384) | Device gear ⚙ |
-| 2 | Grayscale / RGB color mode | Device gear ⚙ |
-| 3 | Per-class dark/lum threshold tuning | Class edit page (🔍) |
-| 4 | Real-time processed preview with mask overlay | Class edit page |
-| 5 | Live ROI toggle + slider bar | Preview panel |
-| 6 | Image Size as training hyperparameter | Training → Advanced |
-| 7 | Full project save/restore (.tmproj) | Top-left menu |
-| 8 | MCU-ready export (.tflite + C sources) | Export button |
-| 9 | Training hyperparameter recommendations (💡 Use recommended) | Training → Advanced |
+**What a sign class sample is:** one 28×28 glyph of that character — the
+same single-glyph model an OCR project trains.  Training does not split a
+whole road-sign photo into slots; the three-way split runs at Preview/device
+inference time.  Use **EMNIST Auto-Fill** for a zero-camera workflow, or
+capture/upload a frame where that character is the glyph to learn
+(Manual ROI/crop in the worktable isolates it).  A whole 3-character sign
+filed under `A` trains `A` on the whole sign, not on `A`.
 
 ---
 
-## ROI Detection (preview) vs Model Input
+## 4. Sample Worktable (`Edit`)
 
-Two different crops exist — know which one the model actually receives:
+Click **Edit** on a class card to open the modal:
 
-**Model input (training = live predict = device firmware)** — the canonical
-transform, applied by `preprocess_blue_diff_array`:
+- **Original Sample** (left) with the green/blue ROI box, and **Processed
+  Preview** (right) — for glyph projects this is the `28×28` Otsu canvas the
+  model receives.
+- `Preprocess Mode`: **Auto (find sign)** or **Manual ROI**.
+- `Dark Thr` (0–100, default 0) and `Lum Thr` (50–255, default 100).
+- Manual ROI fields `ROI X1/Y1/X2/Y2` (0–1); drag on the original image.
+- `Current Sample`, `Delete Sample`, sample thumbnails, `Save Sample` /
+  `Saved`, and `Close`.
+- Shortcuts: `F1` Auto, `F2` Manual ROI, `S` Save, `D` Delete sample, `Esc`
+  Close, arrows navigate samples, `Shift`+arrows nudge the ROI.
 
-1. Crop: **auto shadow-search box** by default (`crop_mode="auto_search"` —
-   the training default, device `BG_ENABLE_FOCUS_SEARCH=1`) removes the
-   background outside the detected sign; legacy `crop_mode="center"` keeps
-   the deterministic center **60 % square crop** (`_center_bbox(frac=0.60)`,
-   old deployed models).  Retrain after switching.
-2. Bilinear resize of the cropped RGB to the training image size (default
-   96×96) — float32, PIL-style center mapping, a bit-for-bit mirror of the
-   firmware's `crop_resize_bilinear()`
-3. BT.601 luminance (30/59/11, round half up) of the resampled pixels (no
-   WB, no masking)
-4. Contrast stretch (only if pixel span ≥ 24)
-5. int8 = gray − 128
+Defaults 0/100 mean "untouched": exact integer Otsu on the device, no
+luminance floor.
 
-The dark/lum mask never touches these pixels; it only drives the previews and
-the sign_pct OOD statistic, and it IS the search-box input (non-sign pixels
-→ white before the shadow search, same on host and device). This transform is
-identical to the device firmware — verified bit-identical on random frames
-against a C transliteration of the firmware (65/65 search boxes, 20/20
-end-to-end model inputs), and 86/86 training frames → 0 label flips
-(2026-08-26, center-crop era).
+---
 
-**Shadow-search preview** (`_focus_bbox`, used by the ROI overlay, the class
-edit page's auto mode, and the masked previews) — a G-channel dark-object +
-edge detector:
+## 5. Training card & hyperparameters
 
-1. **G-channel extraction**: green channel has best SNR in typical lighting
-2. **Dark/Lum thresholding**: pixels with G between `Dark Thresh` (default 0) and `Lum Thresh` (default 100) are sign candidates; everything else → white
-3. **Search window**: looks for the sign within x:10-90%, y:10-90% of the frame
-4. **Edge detection**: within the search window, dark pixels near edges score higher
-5. **Blob scoring**: best blob by weighted-sum × aspect-ratio × area × center-prior
-6. **Crop**: from the original RGB using the detected bbox → BT.601 luminance → resize → contrast stretch
+**Train Embedded Model** is enabled when at least two classes exist and every
+class has samples.  The status line shows `Model Trained · tap for accuracy`
+(per-class accuracy modal) and adds `⚠ Stale` when the dataset fingerprint no
+longer matches the last training.
 
-If no sign is found: center crop fallback (50%, 50% position, 40% side).
+### Training → Advanced
 
-The **processed preview** (ROI toggle / class edit page) shows step 2: white = filtered out, dark = candidate pixels.  Tune Dark/Lum thresholds in the slider bar to adjust what the detector considers a sign.  Note this search tends to crop ~13 px right of the sign centroid and is for *visual* ROI feedback only — live predictions use the center-60 % model-input path above.
+| Field | Default (image / glyph) | UI range | Notes |
+|---|---|---|---|
+| Image Size | 96 / **28** | 8–512, step 4 | Model input side; follows the project type |
+| Batch Size | 32 | ≥1 | Auto-adjust may lower it for small datasets |
+| Epochs | 20 | ≥1 (UI clamp 1–1000) | OCR replaces this total with Head + Fine-tune epochs |
+| Validation Split | 0.25 | 0–0.5, step 0.05 | Held-out fraction |
+| Learning Rate | 0.0016 | ≥0 | Base head/finetune schedule |
+| Conv1 Filters | 32 | ≥1 | Hidden under transfer learning |
+| Conv2 Filters | 64 | ≥1 | Hidden under transfer learning |
+| Dense Units | 128 | ≥1 | Hidden under transfer learning |
+| Ink Polarity | 0 — `Dark ink on bright bg` | `0` / `1` | Glyph projects; global override for every class |
+| Sign Reading Direction | `ltr` — `Left to Right (L ➔ R)` | `ltr` / `rtl` | sign_ocr only; RTL reverses boxes, never pixels |
 
-**Device gray direct-feed** — when the live source is the device and the serial
-stream is 1-channel grayscale (`channels=1`), Preview feeds the streamed frame
-straight into the interpreter instead of re-running the host transform.  The
-stream already IS the device model input (the firmware applied center-60 % crop
-→ BT.601 → bilinear → contrast stretch → int8 gray−128 — TFLite.ino
-`kCaptureGray` / `kInferGray` modes), so double-processing would hide what the
-device really fed the model.  In this mode the OOD sign_pct gate is computed on
-the streamed (already-cropped) frame, so the host and device gates are close
-but not identical.
+### OCR/sign extras (shown in the same Advanced panel)
 
-## Export Behavior
+| Field | Default | UI range | Notes |
+|---|---|---|---|
+| Mix EMNIST into every class | on | on/off | Adds synthetic glyphs to every real class |
+| EMNIST split | `balanced` | `balanced`, `letters`, `digits` | Which EMNIST subset |
+| Synthetic per class | 200 | 0–5000, step 10 | EMNIST glyphs added per class |
+| Background / noise class | on | on/off | Appends `_background` rejector |
+| Background crops | 0 | 0–5000, step 10 | 0 mirrors Synthetic per class |
+| Fine-tune pre-trained backbone | on | on/off | Two-stage transfer learning |
+| Pre-train samples / class | 1200 | 100–6000, step 100 | Backbone warm-up corpus |
+| Pre-train epochs | 4 | 1–100 | Backbone warm-up |
+| Head epochs | 12 | 1–200 | Phase 1: head only, backbone frozen |
+| Head learning rate | 0.0015 | ≥0 | Phase 1 LR |
+| Fine-tune epochs | 25 | 0–200 | Phase 2: unfreeze last blocks |
+| Fine-tune learning rate | 0.0002 | ≥0 | Phase 2 LR |
+| Conv blocks to unfreeze | 1 | 0–16 | How many last conv blocks thaw |
 
-- Export directory selection:
-  - The app asks for an export folder from the workspace export entry points
-  - The selected folder is reused as the last export location
-- Overwrite behavior:
-  - If export targets already exist, the app shows a confirmation dialog before overwriting
-  - Cancel keeps the existing files unchanged
-  - Confirm overwrites the existing export files in place
-- Exported files:
-  - Named model files:
-    - `<export name>.tflite`
-    - `<export name>_model_data.h`
-    - `<export name>_model_data.cpp`
-    - `model_settings.h`
-    - `model_settings.cpp`
-    - `model_resolver.h` (generated from the actual ops in the .tflite)
-  - Compatibility files:
-    - `model.h`
-    - `model.cpp`
-    - `labels.txt`
-- Export naming:
-  - `Export name` controls the `.tflite` base name and the generated `*_model_data.*` file names
-  - `Array name` controls the C/C++ tensor array symbol used inside generated source files
-- Deployed-model pin:
-  - Every export also copies the train meta to `<workspace>/deployed.json`
-  - Preview then keeps validating that exact exported model — later training
-    runs do NOT advance the Preview model until the next export, so Preview
-    always matches the model actually flashed to the device
-  - Workspaces that never exported keep using the latest trained model
+**💡 Use recommended** applies dataset-aware `Batch Size`, `Epochs`,
+`Learning Rate` and `Validation Split` only.  It targets ≈800 total updates
+and ≥4 steps/epoch: `batch = min(current, max(2, train_count // 4))`,
+`epochs = clamp(ceil(800 / steps_per_epoch), 30, 300)`,
+`lr = 0.0008` below 100 samples else `0.001`, `val = 0.15` below 60 samples
+else `0.2`.  Image Size and the architecture are unchanged.  **Reset** returns
+the panel to the dataclass defaults (Image Size stays the project's own).
 
-## Dataset Folder Structure
+Under the hood:
 
-- The app reads classified datasets where each label maps to one class folder.
-- Supported layouts:
-  - `label/image`
-  - `train/label/image` together with optional `val/label/image` and `test/label/image`
-- Typical examples:
+- **EMNIST mixing** rebuilds a mixed dataset at `img_size`: per-class EMNIST
+  glyphs are polarity-aligned to the capture convention, isolated and
+  centered (no segmentation), shuffled with the real captures; the optional
+  `_background` class receives random non-glyph crops.
+- **Transfer learning** caches one EMNIST-pretrained backbone keyed by
+  architecture, split, convention and polarity.  Phase 1 trains a fresh
+  `N+1` classification head with the backbone frozen; phase 2 unfreezes the
+  last `conv blocks` and fine-tunes at the lower LR.  If transfer learning is
+  off, Conv1/Conv2/Dense are trained from scratch.
 
-```text
-dataset/
-├── cat/
-│   ├── 0001.jpg
-│   ├── 0002.png
-│   └── ...
-├── dog/
-│   ├── 0001.jpg
-│   ├── 0002.png
-│   └── ...
-├── labels.txt
-└── labels.json
+---
+
+## 6. Preview
+
+`⚙ Settings → Preview → Preview Image Input Source`:
+
+- **Webcam**
+- **Device (MCU)**
+- **Local Image File**
+
+The Preview card's `#previewContextBar` shows only the active source's
+control (camera select, serial port + `Refresh`, or `📁 Upload Image...` with
+a file name).  `Input` starts/stops the prediction loop.
+
+The `ROI` and `Orig` checkboxes are view toggles:
+
+| ROI | Orig | Scene | ROI rectangle |
+|---|---|---|---|
+| off | off | raw frame | hidden |
+| on | off | raw frame | drawn (green = auto, blue = manual) |
+| off | on | full masked frame | hidden |
+| on | on | processed crop / sign split | hidden |
+
+The card's `Dark` / `Lum` sliders retune the Preview mask live without
+retraining.
+
+### Sign projects
+
+In the **Local Image File** source a sign project also shows:
+
+- `🧪 Synth Match` — compose the current target and assert `YES`.
+- `🔀 Synth Reversed` — compose in reversed order, for LTR/RTL probes.
+- `❌ Synth Mismatch` — substitute a wrong character and assert `NO`.
+
+They are disabled until a target is set and a model is trained.  Auto-fill
+and a finished training run also store a synthetic plate, so Preview has a
+ready frame with zero files on disk.
+
+The output pane is the `.signmatch` banner:
+
+- `🟢 YES — MATCH` or `🔴 NO — NOT MATCH`.
+- Three `.signmatch-slot` cells, each showing `WANT <char>`, the read glyph,
+  the slot's 28×28 glyph image, and its confidence percentage; green = match,
+  red = fail.
+- A red banner names the failing slot(s) and the reason (wrong glyph,
+  `_background`, no glyph, or below the 0.60 floor).
+- Idle states: `◻ SET THE TARGET SIGN` and `◻ NO MODEL YET`.
+
+`Preview Image Input Source`, the four OOD gates (`sign_pct` min/max, max
+prob, entropy ratio) and the per-source settings are in Settings → Preview.
+
+---
+
+## 7. Export
+
+`Export Model` asks for a folder (typically the matching sketch folder) and
+writes, with default export name `tm`:
+
+```
+tm.tflite
+tm_model_data.h
+tm_model_data.cpp
+model_resolver.h
+model_settings.h
+model_settings.cpp
+labels.txt
 ```
 
-```text
-dataset/
-├── train/
-│   ├── cat/
-│   │   ├── a.jpg
-│   │   └── ...
-│   └── dog/
-│       ├── b.jpg
-│       └── ...
-├── val/
-│   ├── cat/
-│   └── dog/
-└── test/
-    ├── cat/
-    └── dog/
+For firmware, copy the **5 compile files** next to the sketch:
+`tm_model_data.cpp`, `tm_model_data.h`, `model_resolver.h`,
+`model_settings.cpp`, `model_settings.h`.  The default C array symbol is
+`g_tm_model_data`.
+
+Sign exports add `TM_SIGN_OCR_MODEL 1`, `TM_OCR_GLYPH_MODEL 0`,
+`kTargetSignSequence`, `kTargetSignClassIndices[3]`, `kSignReadingOrder`
+(0 LTR / 1 RTL) and `kSignMatchMinProb` (0.60) to `model_settings.h`.
+Exporting also stamps `<workspace>/deployed.json`, pinning Preview to the
+model that was just exported.
+
+Legacy `model.h`/`model.cpp` duplicates are no longer written and are removed
+if present (they caused duplicate-symbol link errors).
+
+---
+
+## 8. Saving projects (`.tmproj`)
+
+**File → Save** (⌘S) saves to the current path; **Save as** (⇧⌘S) picks a new
+one.  `.tmproj` is a ZIP:
+
 ```
-
-- Notes:
-  - `label` becomes the class name in the workspace.
-  - Supported image extensions are `jpg`, `jpeg`, `png`, `bmp`, `webp`, and `gif`.
-  - Imported webcam/upload samples may be stored as color images for display, but training is loaded as grayscale.
-  - Device samples are grayscale.
-  - Serial device frames use a sync header before the payload (96×96, 160×160, or 384×384, Grayscale or RGB, configurable in device settings). The default sync header is `AA 55 AA`, and it can be changed from the device settings gear if your firmware uses a different frame prefix.
-  - If the selected folder does not contain a supported classified dataset layout, the import page reports that no dataset was detected.
-
-## `.tmproj` File Structure
-
-- `.tmproj` is a zip-based project archive used by `Save project` / `Open project`.
-- It stores project state, samples, labels, and optional training artifacts.
-- Typical structure:
-
-```text
 project.tmproj
-├── manifest.json
+├── manifest.json            # magic, version 2.0, project_type, img_size
+├── tm_project_state.json    # classes, counts, train_cfg, preprocess
 ├── tm_classes.json
-├── tm_train_latest.json
+├── tm_train_latest.json     # when a model exists
 ├── dataset/
-│   ├── labels.txt
-│   ├── labels.json
-│   ├── Class 1/
-│   │   ├── 8d3c....png
-│   │   └── ...
-│   ├── Class 2/
-│   │   ├── 2a71....jpg
-│   │   └── ...
-│   └── ...
-└── runs/
-    └── latest/
-        ├── model.keras
-        ├── model.tflite
-        ├── labels.txt
-        └── ...
+│   ├── labels.txt / labels.json
+│   └── <class>/<samples>
+└── runs/latest/             # when a trained run exists
+    ├── model.keras / model.tflite
+    ├── model_settings.* / model_resolver.h
+    ├── train_config.json
+    └── labels.*
 ```
 
-- Main files:
-  - `manifest.json`: archive format/version and internal paths such as `dataset/` and `runs/latest/`
-  - `tm_classes.json`: current class order plus per-class preprocess settings used by the workspace UI
-  - `tm_train_latest.json`: latest trained model metadata and export references
-  - `dataset/`: samples saved in dataset format, grouped by class
-  - `processed_cache/`: cached processed previews regenerated from the current preprocess settings when available
-  - `dataset/labels.txt` and `dataset/labels.json`: label list stored with the samples
-  - `runs/latest/`: latest training outputs, included only when a trained run exists
+The archive header is authoritative on reopen.  `train_cfg` is a complete
+`TrainConfig` snapshot, including `sign_sequence`, `reading_order`,
+`auto_seed_emnist_samples`, OCR mixing/transfer-learning fields and the
+preprocessing geometry.  Legacy v1 archives are readable; missing fields fall
+back to this build's defaults and the app says which ones.
 
-- Compatibility notes:
-  - `Open project` restores from the packaged `dataset/` directory.
-  - If `tm_classes.json` is missing, the app can fall back to `dataset/labels.json` or `dataset/labels.txt`.
-  - `.tmproj` should be treated as an app project archive, not as a generic dataset export.
-  - `Save project` preserves the dataset-style sample layout so the archive can reopen with the same classes and samples.
+---
 
-## Project Layout (Developers)
+## 9. App data directories
 
-- Desktop entry: `desktop_launcher.py` (starts local Streamlit server + WebView window)
-- Streamlit UI + embedded SPA template: `app.py` (the capture/preview UI is an HTML/JS SPA served from `_render_tm_old_frontend_html`)
-- Headless HTTP server: `record_controller.py` (live preview/predict, recording, capture, train sessions — the SPA talks to it over localhost; per-session config lives here)
-- Serial frame reader: `serial_device.py` (`SerialFrameReader`, `list_serial_ports`)
-- Preprocessing (crop / mask / previews): `image_preprocess.py`
-- Dataset import/export: `dataset_io.py`
-- Training/quant/export: `trainer.py`
-- UI styles: `ui_styles.py`
-- Camera permission (macOS auto request): `camera_permission.py`
-- DMG build settings: `dmg_settings.py`
+- macOS: `~/Library/Application Support/TFLiteTraining/`
+- Windows: `%APPDATA%\TFLiteTraining\`
 
-## macOS (.app + .dmg)
+```
+workspace/   current project workspace
+datasets/    imported datasets
+runs/        training run artifacts
+logs/        streamlit.log
+ocr_backbone/ cached EMNIST backbones
+```
+
+Dataset import accepts `label/image` and `train|val|test/label/image` layouts;
+extensions `jpg/jpeg/png/bmp/webp/gif`.  Training always reads grayscale.
+
+---
+
+## 10. Project layout (developers)
+
+- `desktop_launcher.py` — Streamlit server + WebView window
+- `app.py` — Streamlit UI + embedded SPA (`_render_tm_old_frontend_html`)
+- `record_controller.py` — localhost HTTP controller: live, predict, classes,
+  train, export, project save/open
+- `image_preprocess.py` — image-project crop/mask/preview transform
+- `ocr_preprocess.py` — integer-exact glyph and sign front-end (host mirror)
+- `ocr_dataset.py` — EMNIST ingestion, template seeder, sign synthesizer
+- `ocr_trainer.py` — EMNIST mixing, backbone pretraining, two-phase fine-tune
+- `trainer.py` — image-project trainer, quantization, export sources
+- `dataset_io.py` — project types, defaults, import/export
+- `serial_device.py` — serial frame reader
+- `ui_styles.py`, `camera_permission.py`, `dmg_settings.py`
+
+## 11. macOS (.app + .dmg)
 
 ```bash
 cd AItraining
 python3.11 -m venv .venv
 source .venv/bin/activate
-python3 -V
-
 python3 -m pip install -r requirements.txt
 python3 -m pip install -r requirements-dev.txt
 python3 -m pip install pyinstaller dmgbuild
-
 python3 -m PyInstaller --clean --noconfirm TFLiteTraining.spec
-
 dmgbuild -s dmg_settings.py "TFLiteTraining" "dist/TFLiteTraining.dmg"
 ```
 
-Artifacts:
-- `dist/TFLiteTraining.app`
-- `dist/TFLiteTraining.dmg`
+Artifacts: `dist/TFLiteTraining.app`, `dist/TFLiteTraining.dmg`.
 
-## Windows (.exe)
-
-Run on Windows:
+## 12. Windows (.exe)
 
 ```powershell
 cd AItraining
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python --version
-
 py -m pip install -r requirements.txt
 py -m pip install -r requirements-dev.txt
 py -m pip install pyinstaller
-
 python -m PyInstaller --clean --noconfirm TFLiteTraining.spec
 ```
 
-Artifacts:
-- `dist\\TFLiteTraining\\TFLiteTraining.exe`
+Artifact: `dist\TFLiteTraining\TFLiteTraining.exe`.
 
 ## FAQ
 
-- macOS “App can’t be opened / unidentified developer”: right-click `TFLiteTraining.app` → Open → Confirm, or allow it in System Settings.
-- macOS first-time webcam access: the app will trigger the system camera permission prompt. If you previously denied, re-enable it in “System Settings → Privacy & Security → Camera” for `TFLiteTraining.app`.
-- macOS packaged app does not prompt: ensure you are running `dist/TFLiteTraining.app` (permissions are recorded per app bundle, not per terminal).
-- Windows missing DLL: install Microsoft Visual C++ Redistributable 2015–2022 (x64).
+- macOS “unidentified developer”: right-click the app → Open → Confirm.
+- macOS webcam permission: allow the app under System Settings → Privacy &
+  Security → Camera.
+- macOS packaged app does not prompt: run `dist/TFLiteTraining.app`, not the
+  terminal entry point.
+- Windows missing DLL: install the Microsoft Visual C++ Redistributable
+  2015–2022 (x64).
+- Python 3.13 + PyInstaller crashes: use Python ≤ 3.12.
