@@ -2,7 +2,7 @@
 import sys
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app.py', '.'), ('camera_permission.py', '.'), ('dataset_io.py', '.'), ('trainer.py', '.'), ('ui_styles.py', '.'), ('serial_device.py', '.'), ('record_controller.py', '.'), ('image_preprocess.py', '.'), ('mac_camera.py', '.'), ('templates', 'templates')]
+datas = [('app.py', '.'), ('camera_permission.py', '.'), ('dataset_io.py', '.'), ('trainer.py', '.'), ('ui_styles.py', '.'), ('serial_device.py', '.'), ('record_controller.py', '.'), ('image_preprocess.py', '.'), ('mac_camera.py', '.'), ('ocr_dataset.py', '.'), ('ocr_preprocess.py', '.'), ('ocr_trainer.py', '.'), ('models', 'models'), ('templates', 'templates')]
 binaries = []
 hiddenimports = []
 
