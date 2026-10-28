@@ -9,7 +9,7 @@
 ---
 
 **Software:** TFLiteTraining desktop training tool (including bundled firmware, together "the Software")
-**Licensor:** AIoScout
+**Licensor:** AIoScout — <https://aioscout.io>
 **Acceptance:** By downloading, installing or using the Software, you agree to be bound by all terms of this Agreement. If you do not agree, stop using and uninstall the Software immediately.
 
 ## 1. License Grant
@@ -64,7 +64,7 @@ This Agreement constitutes the entire agreement between the parties regarding th
 
 ---
 
-**Licensor contact:** [email/website]
+**Licensor contact:** <https://aioscout.io>
 
 **Version:** 1.0 (2026-10-28)
 
