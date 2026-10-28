@@ -1087,6 +1087,42 @@ def _render_licenses_expander() -> None:
         pass
 
 
+def _render_legal_footer() -> None:
+    """Compact page footer: copyright claim + one small legal entry.
+
+    The license declarations stay one click away (that reachability is
+    what keeps a commercial distribution compliant) without dominating
+    the page.  All content is English, matching the rest of the UI.
+    """
+    try:
+        with st.expander("⚖️ EULA · Open Source Licenses"):
+            _eula_path = os.path.join(os.path.dirname(__file__) or ".", "EULA.md")
+            if os.path.exists(_eula_path):
+                with open(_eula_path, encoding="utf-8") as _efh:
+                    st.markdown(_efh.read())
+            _notices_path = os.path.join(
+                os.path.dirname(__file__) or ".", "THIRD_PARTY_NOTICES.md"
+            )
+            if os.path.exists(_notices_path):
+                with open(_notices_path, encoding="utf-8") as _nfh:
+                    st.markdown(_nfh.read())
+            _license_path = os.path.join(os.path.dirname(__file__) or ".", "LICENSE")
+            if os.path.exists(_license_path):
+                with open(_license_path, encoding="utf-8") as _lfh:
+                    st.markdown("### This software's license (Apache License 2.0)\n")
+                    st.code(_lfh.read(), language=None)
+    except Exception:
+        pass
+    st.markdown(
+        '<div style="margin-top:2.5rem;padding-top:1rem;border-top:1px solid #E2E8F0;'
+        'color:#94A3B8;font-size:12px;text-align:center;">'
+        '© 2026 AIoScout — All rights reserved · '
+        '<a href="https://aioscout.io" style="color:#64748B;text-decoration:none;">'
+        'aioscout.io</a></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_tm_workspace_header() -> None:
     class_count, sample_count = _tm_dataset_stats()
     meta = _tm_load_train_latest()
@@ -1605,8 +1641,8 @@ def _render_new_project() -> None:
             _tm_set_query_params(tm_project=PROJECT_TYPE_CLASSIFIED_IMPORT, tm_session=st.session_state.session_id)
             st.rerun()
 
-    # ── Open Source Licenses ────────────────────────────────────────────
-    _render_licenses_expander()
+    # ── Legal footer: copyright claim + one small licenses entry ────────
+    _render_legal_footer()
 
     # All three cards are on screen before any of them acts.  Cancelling the
     # picker comes back as (None, "") — a silent no-op, not a warning box in
