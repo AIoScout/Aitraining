@@ -3,6 +3,13 @@ import sys
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('app.py', '.'), ('camera_permission.py', '.'), ('dataset_io.py', '.'), ('trainer.py', '.'), ('ui_styles.py', '.'), ('serial_device.py', '.'), ('record_controller.py', '.'), ('image_preprocess.py', '.'), ('mac_camera.py', '.')]
+# App resources that must ship INSIDE the bundle: the hero icon, the
+# licensing artifacts (first-launch EULA, third-party notices, Apache text)
+# and the optional EMNIST template bank.  Without these the packaged app
+# silently falls back or loses its license declarations — a commercial
+# distribution must carry them.
+datas += [('AIoScouts.png', '.'), ('THIRD_PARTY_NOTICES.md', '.'),
+          ('LICENSE', '.'), ('EULA.md', '.'), ('models', 'models')]
 binaries = []
 hiddenimports = []
 

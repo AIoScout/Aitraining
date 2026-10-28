@@ -1,15 +1,8 @@
 # End User License Agreement (EULA)
 
-> ⚠️ Template note: this is an end-user license agreement template for
-> commercial distribution. Replace the `[bracketed]` placeholders with your
-> actual details, ship it inside the installer and show it on first launch
-> (user must click "Agree" before using). Have a lawyer review it once
-> before any high-value commercial release.
-
----
-
 **Software:** TFLiteTraining desktop training tool (including bundled firmware, together "the Software")
 **Licensor:** AIoScout — <https://aioscout.io>
+**Version:** 1.0 (2026-10-28)
 **Acceptance:** By downloading, installing or using the Software, you agree to be bound by all terms of this Agreement. If you do not agree, stop using and uninstall the Software immediately.
 
 ## 1. License Grant
@@ -65,13 +58,3 @@ This Agreement constitutes the entire agreement between the parties regarding th
 ---
 
 **Licensor contact:** <https://aioscout.io>
-
-**Version:** 1.0 (2026-10-28)
-
----
-
-## Packaging checklist
-
-- Show this Agreement on first launch; the user must click "Agree & Continue" before use.
-- Ship this file together with the *Third-Party Notices* (AItraining/THIRD_PARTY_NOTICES.md) inside the installer.
-- Provide an in-app "About / Open Source Licenses" entry so the Agreement and the notices can always be reviewed.

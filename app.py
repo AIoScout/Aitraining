@@ -1060,6 +1060,33 @@ def _status_style(status: str) -> str:
     return "tm-status tm-status-idle"
 
 
+def _render_licenses_expander() -> None:
+    """In-product third-party license declaration.
+
+    The commercial distribution obligation: every bundled open-source
+    component's license declaration must ship WITH the app and stay
+    reachable from the UI.  The notices file is generated from the venv
+    (tools/gen_third_party_notices.py).  Called from the Start Page and
+    from every workspace header so the declaration is always findable.
+    """
+    try:
+        _notices_path = os.path.join(
+            os.path.dirname(__file__) or ".", "THIRD_PARTY_NOTICES.md"
+        )
+        if os.path.exists(_notices_path):
+            with open(_notices_path, encoding="utf-8") as _nfh:
+                _notices_text = _nfh.read()
+            with st.expander("📄 Open Source Licenses"):
+                st.markdown(_notices_text)
+                _license_path = os.path.join(os.path.dirname(__file__) or ".", "LICENSE")
+                if os.path.exists(_license_path):
+                    with open(_license_path, encoding="utf-8") as _lfh:
+                        st.markdown("### This software's license (Apache License 2.0)\n")
+                        st.code(_lfh.read(), language=None)
+    except Exception:
+        pass
+
+
 def _render_tm_workspace_header() -> None:
     class_count, sample_count = _tm_dataset_stats()
     meta = _tm_load_train_latest()
@@ -1102,6 +1129,7 @@ def _render_tm_workspace_header() -> None:
         ''',
         unsafe_allow_html=True,
     )
+    _render_licenses_expander()
 
 
 def _render_tm_flow_lane() -> None:
@@ -1578,25 +1606,7 @@ def _render_new_project() -> None:
             st.rerun()
 
     # ── Open Source Licenses ────────────────────────────────────────────
-    # The commercial distribution obligation: every bundled open-source
-    # component's license declaration must ship WITH the app.  The notices
-    # file is generated from the venv (tools/gen_third_party_notices.py)
-    # and rendered here so the user can always find it in-product.
-    try:
-        _notices_path = os.path.join(
-            os.path.dirname(__file__) or ".", "THIRD_PARTY_NOTICES.md"
-        )
-        if os.path.exists(_notices_path):
-            with open(_notices_path, encoding="utf-8") as _nfh:
-                _notices_text = _nfh.read()
-            with st.expander("📄 Open Source Licenses"):
-                st.markdown(_notices_text)
-                if os.path.exists(os.path.join(os.path.dirname(__file__) or ".", "LICENSE")):
-                    with open(os.path.join(os.path.dirname(__file__) or ".", "LICENSE"), encoding="utf-8") as _lfh:
-                        st.markdown("### This software's license (Apache License 2.0)\n")
-                        st.code(_lfh.read(), language=None)
-    except Exception:
-        pass
+    _render_licenses_expander()
 
     # All three cards are on screen before any of them acts.  Cancelling the
     # picker comes back as (None, "") — a silent no-op, not a warning box in
@@ -18607,10 +18617,79 @@ def _render_tm_preview_export_panel() -> None:
         st.success(f"Exported to: {export_dir}")
 
 
+def _tm_eula_flag_path() -> Path:
+    """Persistent first-launch acceptance flag (app-data, not the repo)."""
+    try:
+        from dataset_io import app_data_dir
+
+        return Path(app_data_dir()) / "eula_accepted.flag"
+    except Exception:
+        return Path(tempfile.gettempdir()) / "TFLiteTraining_eula_accepted.flag"
+
+
+def _tm_eula_accepted() -> bool:
+    if bool(st.session_state.get("tm_eula_accepted")):
+        return True
+    try:
+        if _tm_eula_flag_path().exists():
+            st.session_state.tm_eula_accepted = True
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _render_eula_gate() -> None:
+    """First-launch license gate: the EULA must be accepted before the app
+    runs.  Acceptance is persisted so it is asked exactly once per machine."""
+    inject_teachable_style()
+    st.markdown("## End User License Agreement")
+    st.markdown(
+        "Please read the license agreement below. You must accept it to use this software."
+    )
+    try:
+        _eula_path = os.path.join(os.path.dirname(__file__) or ".", "EULA.md")
+        if os.path.exists(_eula_path):
+            with open(_eula_path, encoding="utf-8") as _efh:
+                st.markdown(_efh.read())
+        else:
+            st.warning("EULA.md not found in this build.")
+    except Exception:
+        pass
+    _col_ok, _col_no = st.columns(2)
+    with _col_ok:
+        if st.button("I Agree", key="tm_eula_agree", type="primary", use_container_width=True):
+            try:
+                _tm_eula_flag_path().parent.mkdir(parents=True, exist_ok=True)
+                _tm_eula_flag_path().write_text("1", encoding="utf-8")
+            except Exception:
+                pass
+            st.session_state.tm_eula_accepted = True
+            st.rerun()
+    with _col_no:
+        if st.button("I Disagree", key="tm_eula_disagree", type="secondary", use_container_width=True):
+            st.session_state.tm_eula_declined = True
+            st.rerun()
+
+
 def main() -> None:
     _persist_session_id()
     st.set_page_config(page_title="TF Lite Training", layout="wide", page_icon="AIoScouts.png")
     _init_session()
+
+    # ── First-launch license gate ────────────────────────────────────────
+    # The EULA is part of the commercial distribution contract: without a
+    # recorded acceptance the app must not run (and must not let a user
+    # drift into the workspace through a stale URL either).
+    if st.session_state.get("tm_eula_declined"):
+        st.warning(
+            "You declined the license agreement, so the application cannot "
+            "run. Restart the application to review the agreement again."
+        )
+        st.stop()
+    if not _tm_eula_accepted():
+        _render_eula_gate()
+        st.stop()
 
     if st.session_state.project_type is None:
         _render_new_project()
