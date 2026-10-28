@@ -49,7 +49,7 @@ The Licensor may release updates to the Software at any time. Maintenance and te
 
 ## 8. Governing Law and Dispute Resolution
 
-This Agreement is governed by the laws of the **People's Republic of China**. The parties shall first attempt to resolve any dispute through friendly negotiation; failing that, either party may bring suit in a competent court where the Licensor is located.
+This Agreement is governed by, and construed in accordance with, the laws of the **Hong Kong Special Administrative Region of the People's Republic of China**. The parties shall first attempt to resolve any dispute through friendly negotiation; failing that, the parties submit to the exclusive jurisdiction of the courts of the Hong Kong Special Administrative Region.
 
 ## 9. General
 
