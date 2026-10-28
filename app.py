@@ -1577,6 +1577,27 @@ def _render_new_project() -> None:
             _tm_set_query_params(tm_project=PROJECT_TYPE_CLASSIFIED_IMPORT, tm_session=st.session_state.session_id)
             st.rerun()
 
+    # ── Open Source Licenses ────────────────────────────────────────────
+    # The commercial distribution obligation: every bundled open-source
+    # component's license declaration must ship WITH the app.  The notices
+    # file is generated from the venv (tools/gen_third_party_notices.py)
+    # and rendered here so the user can always find it in-product.
+    try:
+        _notices_path = os.path.join(
+            os.path.dirname(__file__) or ".", "THIRD_PARTY_NOTICES.md"
+        )
+        if os.path.exists(_notices_path):
+            with open(_notices_path, encoding="utf-8") as _nfh:
+                _notices_text = _nfh.read()
+            with st.expander("📄 Open Source Licenses"):
+                st.markdown(_notices_text)
+                if os.path.exists(os.path.join(os.path.dirname(__file__) or ".", "LICENSE")):
+                    with open(os.path.join(os.path.dirname(__file__) or ".", "LICENSE"), encoding="utf-8") as _lfh:
+                        st.markdown("### This software's license (Apache License 2.0)\n")
+                        st.code(_lfh.read(), language=None)
+    except Exception:
+        pass
+
     # All three cards are on screen before any of them acts.  Cancelling the
     # picker comes back as (None, "") — a silent no-op, not a warning box in
     # one narrow column.  A file that really cannot be opened comes back as a
@@ -8257,6 +8278,65 @@ async function saveGlobalSettings() {{
     toast(`Settings save failed: ${{String(err && err.message ? err.message : err)}}`);
   }}
 }}
+// ── Settings modal keyboard shortcuts: Escape = Cancel, Enter = Save ──
+// The modal is rebuilt by every render(), so the listener lives on `window`
+// rather than on any node inside it: a rebuild can neither detach it nor
+// stack a second copy.  The flag makes installation idempotent even if this
+// script is evaluated again in the same window.
+function settingsModalIsOpen() {{
+  const modal = document.getElementById('globalSettingsModal');
+  if (!modal || modal.hidden || !modal.classList.contains('open')) return false;
+  const style = window.getComputedStyle(modal);
+  return style.display !== 'none' && style.visibility !== 'hidden';
+}}
+function installSettingsKeyboardShortcuts() {{
+  if (window.__tmSettingsShortcutBound) return;
+  window.__tmSettingsShortcutBound = true;
+  window.addEventListener('keydown', (e) => {{
+    const key = String(e.key || '');
+    const isEscape = key === 'Escape' || key === 'Esc';
+    const isEnter = key === 'Enter';
+    if (!isEscape && !isEnter) return;
+    if (!settingsModalIsOpen()) return;
+    if (e.defaultPrevented) return;
+
+    if (isEscape) {{
+      // Cancel, never Save.  Owning the key outright also keeps the
+      // workspace Escape stack and window.tmTour from acting on a press
+      // that has already dismissed the modal — the tour hands Escape back
+      // while a layer is open, but this listener is registered first.
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      closeGlobalSettings();
+      return;
+    }}
+
+    // Enter saves, except where Enter means something else.
+    if (e.isComposing || e.keyCode === 229) return;   // IME candidate window
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    const active = document.activeElement;
+    const tag = String((active && active.tagName) || '').toUpperCase();
+    if (tag === 'TEXTAREA') return;                    // newline, not Save
+    if (active && active.isContentEditable) return;
+    if (tag === 'BUTTON') {{
+      const id = String((active && active.id) || '');
+      // Enter on Cancel / Close / Reset must never commit the form.
+      const dismiss = id === 'settingsCancel' || id === 'settingsClose' ||
+        id === 'settingsReset' ||
+        /(?:^|[-_])(cancel|close|reset)(?:$|[-_])/i.test(id);
+      if (dismiss) return;
+    }}
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    const saveBtn = document.getElementById('settingsSave');
+    if (saveBtn) saveBtn.click();
+    else saveGlobalSettings();
+  }}, true);
+}}
+installSettingsKeyboardShortcuts();
 function applyProjectState(state) {{
   const s = state && typeof state === 'object' ? state : {{}};
   // #region debug-point C:apply-project-state
