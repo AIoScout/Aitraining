@@ -449,6 +449,12 @@ def _run_headless(port: int, proc: multiprocessing.Process) -> None:
 
 
 def main() -> None:
+    # Must run before argparse: in a frozen build, multiprocessing re-executes
+    # this binary for its children (the spawn worker with --multiprocessing-fork
+    # argv, the resource tracker with -c argv) and PyInstaller's runtime hook
+    # replaces freeze_support() to intercept them — argparse would otherwise
+    # reject those arguments and the children would die instantly.
+    multiprocessing.freeze_support()
     _configure_multiprocessing_executable()
     try:
         multiprocessing.set_start_method("spawn", force=True)
@@ -472,7 +478,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    multiprocessing.freeze_support()
     port = args.port if args.port > 0 else _find_free_port()
     url = f"http://127.0.0.1:{port}"
     log_path = _prepare_log_file()
