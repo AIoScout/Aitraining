@@ -1,0 +1,222 @@
+"""Gatekeeper whitelist: multi-plate classes, preview and export.
+
+A Car License project may hold one or more allowed 3-character plates.  The
+class list is the union of their characters (first appearance), Preview says
+YES when the reading matches ANY plate, and the export carries the full table
+for the MCU.  These tests pin all three contracts, plus the EMNIST backfill
+of newly introduced characters.
+
+Requires the AItraining venv (TensorFlow):
+    .venv/bin/python -m pytest tests/test_multi_plate.py -q
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+for p in (ROOT, Path(__file__).resolve().parent):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+import record_controller as rc
+from test_emnist_seeder import _open_template, _workspace
+
+PLATES = ["A12", "B18"]
+
+
+def _predict(ctrl, png: bytes) -> dict:
+    return ctrl._preview_predict_sign_ocr(
+        "s", png, sign_sequence=PLATES[0], sign_sequences=PLATES,
+        reading_order="ltr", bg_dark_thresh=0, bg_lum_thresh=60,
+    )
+
+
+def _synth_until_match(ctrl, plate_index: int):
+    """Draw the requested plate until the model reads it (the UI retries too)."""
+    last = None
+    for attempt in range(14):
+        syn = ctrl._synthesize_sign_preview_png(
+            "s", variant="match", sign_sequences=PLATES,
+            plate_index=plate_index, seed=attempt,
+        )
+        pred = _predict(ctrl, syn["png"])
+        last = (syn, pred)
+        if pred.get("match") is True and pred.get("matched_sequence") == PLATES[plate_index]:
+            return syn, pred
+    return last
+
+
+def test_multi_plate_union_autofill_preview_and_export():
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        state = _open_template(ctrl)
+        ctrl._save_train_cfg("s", {"auto_seed_emnist_samples": True})
+
+        # The class list is the union of the whitelist, first-appearance order.
+        ctrl._classes_sync_ocr("s", ["A", "1", "2", "B", "8"])
+        assert ctrl._classes_load(dataset) == ["A", "1", "2", "B", "8"]
+
+        # Newly introduced classes start empty; the auto-fill pass (the same
+        # one /classes/sync_ocr calls) draws 24 EMNIST captures for each.
+        seeded = ctrl._seed_empty_char_classes("s", sign_sequence="A12", strict=True)
+        assert set(seeded) == {"B", "8"}, seeded
+        for ch in ("A", "1", "2", "B", "8"):
+            count = len(list((dataset / ch).glob("*.png")))
+            assert count >= 24, (ch, count)
+
+        cfg = dict(state["train_cfg"])
+        cfg.update(
+            {
+                "sign_sequence": PLATES[0],
+                "sign_sequences": PLATES,
+                "ocr_background_enabled": False,
+                "sign_background_replace_ood": False,
+                "ocr_emnist_enabled": True,
+                "ocr_emnist_per_class": 200,
+            }
+        )
+        ctrl._train_worker("s", cfg)
+        status = ctrl._train.get("s") or {}
+        assert not status.get("error"), status
+        meta = json.loads(ctrl._train_result_path(dataset).read_text())
+        assert set(meta["labels"]) == {"A", "1", "2", "B", "8"}, meta["labels"]
+        assert meta.get("sign_sequences") == PLATES, meta.get("sign_sequences")
+        assert not any(str(x).startswith("Class ") for x in meta["labels"])
+
+        # Both whitelisted plates read YES; the matched plate is identified.
+        for idx, plate in enumerate(PLATES):
+            syn, pred = _synth_until_match(ctrl, idx)
+            assert pred.get("match") is True, pred
+            assert pred.get("matched_sequence") == plate, pred
+            assert pred.get("matched_index") == idx, pred
+            assert f"Plate #{idx + 1} ({plate})" in str(pred.get("match_text")), pred
+            assert [s.get("label") for s in pred["slots"]] == list(plate), pred["slots"]
+
+        # A18 is not whitelisted even though A,1 and 8 are all classes.
+        bad = ctrl._synthesize_sign_preview_png(
+            "s", variant="mismatch", sign_sequences=PLATES,
+            plate_index=0, alt_char="8", seed=0,
+        )
+        pred = _predict(ctrl, bad["png"])
+        assert pred.get("match") is False, pred
+        assert pred.get("closest_sequence") == "A12", pred
+        assert [s.get("match") for s in pred["slots"]] == [True, True, False], pred["slots"]
+
+        # C99: characters the model knows but no allowed plate contains.
+        other = ctrl._synthesize_sign_preview_png(
+            "s", variant="match", chars=["C", "9", "9"], reading_order="ltr", seed=0,
+        )
+        pred = _predict(ctrl, other["png"])
+        assert pred.get("match") is False, pred
+        assert pred.get("matched_sequence") == "", pred
+
+        export_dir = dataset.parent / "export_multi"
+        # The SPA forwards the configured camera capture side; the server
+        # derives the preprocessing side (96 for glyph projects).
+        ctrl._export_run(
+            "s", export_dir, "tm_sign", "g_model", overwrite=True,
+            runtime_config={"capture_frame_side": 160},
+        )
+        header = (export_dir / "model_settings.h").read_text(encoding="utf-8")
+        assert "#define TM_SIGN_MULTI_TARGET_EXPORTED 1" in header, header
+        assert "constexpr int kTargetSignCount = 2;" in header, header
+        assert (
+            'constexpr char kTargetSignSequences[kTargetSignCount][4] = { "A12", "B18" };'
+            in header
+        ), header
+        assert "constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {" in header, header
+        assert "    { 0, 1, 2 }," in header, header
+        assert "    { 3, 1, 4 }," in header, header
+        # Backward-compatible primary target.
+        assert 'constexpr char kTargetSignSequence[] = "A12";' in header, header
+        assert "constexpr int kTargetSignClassIndices[3] = {0, 1, 2};" in header, header
+        # Resolution layers: the MCU captures at 160, preprocesses at 96 and
+        # feeds the 28x28 glyph canvas.
+        assert "#define TM_MODEL_INPUT_SIDE 28" in header, header
+        assert "#define TM_PREPROCESS_FRAME_SIDE 96" in header, header
+        assert "#define TM_CAPTURE_FRAME_SIDE 160" in header, header
+        assert "constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;" in header, header
+        assert "constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;" in header, header
+        assert "constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;" in header, header
+        # Boot floor for the runtime per-slot match threshold (== OOD max).
+        assert "constexpr float kSignMatchMinProb = 0.400000f;" in header, header
+
+        # OOD MAX PROB is the SINGLE probability threshold: exporting 0.25
+        # must stamp BOTH constants, ignoring any separate legacy match floor.
+        export_dir2 = dataset.parent / "export_ood_floor"
+        ctrl._export_run(
+            "s", export_dir2, "tm_sign", "g_model", overwrite=True,
+            runtime_config={
+                "capture_frame_side": 160,
+                "ood_max_prob": 0.25,
+                "ood_entropy_max": 0.85,
+                "match_min_prob": 0.40,
+            },
+        )
+        header2 = (export_dir2 / "model_settings.h").read_text(encoding="utf-8")
+        assert "constexpr float kOodMaxProbMin = 0.250000f;" in header2, header2
+        assert "constexpr float kSignMatchMinProb = 0.250000f;" in header2, header2
+        assert "constexpr float kOodEntropyRatioMax = 0.850000f;" in header2, header2
+
+
+def test_exported_firmware_model_is_compact_and_resolver_is_complete():
+    """The checked-in TFLite_Sign export must be small and fully resolvable.
+
+    This is the artifact the ESP32-P4 sketch builds from; a missing Add*()
+    entry is an AllocateTensors() failure on hardware, not a warning.
+    """
+    import tensorflow as tf
+    from record_controller import _TFLITE_OP_RESOLVER_MAP
+
+    root = ROOT.parent / "TFLite_Sign"
+    tflite = root / "tm.tflite"
+    assert tflite.exists(), tflite
+    assert tflite.stat().st_size < 200 * 1024, tflite.stat().st_size
+    try:
+        interp = tf.lite.Interpreter(
+            model_content=tflite.read_bytes(),
+            experimental_op_resolver_type=(
+                tf.lite.experimental.OpResolverType
+                .BUILTIN_WITHOUT_DEFAULT_DELEGATES),
+        )
+    except Exception:
+        interp = tf.lite.Interpreter(model_content=tflite.read_bytes())
+    interp.allocate_tensors()
+    ops = []
+    for detail in interp._get_ops_details():
+        op = str(detail.get("op_name") or "")
+        if op and op != "DELEGATE" and op not in ops:
+            ops.append(op)
+    assert ops, "export has no ops?"
+    resolver = (root / "model_resolver.h").read_text(encoding="utf-8")
+    for op in ops:
+        add_fn = _TFLITE_OP_RESOLVER_MAP.get(op)
+        assert add_fn is not None, f"no resolver mapping for {op}"
+        assert f"Add{add_fn}()" in resolver, f"{op} missing from model_resolver.h"
+    settings = (root / "model_settings.h").read_text(encoding="utf-8")
+    assert "TM_SIGN_OCR_MODEL 1" in settings
+    assert "#define TM_SIGN_USE_BACKGROUND_OOD" in settings
+    assert "kBackgroundClassIndex" in settings
+    assert "#define TM_SIGN_MULTI_TARGET_EXPORTED 1" in settings
+
+
+def test_normalize_sign_sequences_matches_the_plates_contract():
+    from ocr_preprocess import normalize_sign_sequences
+
+    assert normalize_sign_sequences(["A12", "B18", "A12"]) == ["A12", "B18"]
+    assert normalize_sign_sequences("A12") == ["A12"]
+    assert normalize_sign_sequences(["A", "1", "2"]) == ["A12"]
+    assert normalize_sign_sequences(["A1", "???"]) == []
+    assert normalize_sign_sequences([["a", "1", "2"], ["b", "1", "8"]]) == ["A12", "B18"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(__import__("pytest").main([__file__, "-q"]))

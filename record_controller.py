@@ -104,12 +104,18 @@ from image_preprocess import (
 from ocr_preprocess import (
     GLYPH_SIZE,
     INK_DARK,
+    INK_BRIGHT,
     NORM_CANON,
     NORM_STRETCH,
     SIGN_SEQUENCE_PAD,
+    find_interior_ink_roi,
     preprocess_glyph,
     preprocess_sign_sequence,
     normalize_sign_sequence,
+    normalize_sign_sequences,
+    segment_glyph_boxes,
+    normalise_glyph,
+    _narrow_stroke_radius,
 )
 
 # The sign-OCR preview's two answers, in one place: the SPA renders
@@ -317,6 +323,7 @@ _TRAIN_CFG_COMPLEX_FIELDS = (
     "sample_preprocess",
     "class_names_order",
     "sign_sequence",
+    "sign_sequences",
 )
 
 # Enumerated string fields: a value outside the set is forwarded to code that
@@ -386,6 +393,12 @@ def _coerce_train_cfg_value(name: str, value: Any) -> Tuple[bool, Any]:
             # is dropped so the field falls back to the dataclass default.
             seq = normalize_sign_sequence(value)
             return (True, seq) if any(c != SIGN_SEQUENCE_PAD for c in seq) else (False, None)
+        if name == "sign_sequences":
+            # The whitelist: complete, deduplicated 3-character plates in
+            # first-appearance order.  An empty list is dropped so the
+            # primary `sign_sequence` remains the legacy fallback.
+            seqs = normalize_sign_sequences(value)
+            return (True, seqs) if seqs else (False, None)
         if name == "class_preprocess":
             cfg = normalize_class_preprocess_map(value)
             return (True, cfg) if cfg else (False, None)
@@ -458,21 +471,33 @@ def missing_train_cfg_fields(saved: Any) -> List[str]:
 _TFLITE_OP_RESOLVER_MAP = {
     "ADD": "Add",
     "AVERAGE_POOL_2D": "AveragePool2D",
+    "CONCATENATION": "Concatenation",
     "CONV_2D": "Conv2D",
     "DEPTHWISE_CONV_2D": "DepthwiseConv2D",
+    "DEQUANTIZE": "Dequantize",
     "FULLY_CONNECTED": "FullyConnected",
+    "LEAKY_RELU": "LeakyRelu",
+    "LOGISTIC": "Logistic",
+    "MAXIMUM": "Maximum",
     "MAX_POOL_2D": "MaxPool2D",
+    "MEAN": "Mean",
+    "MINIMUM": "Minimum",
     "MUL": "Mul",
     "PACK": "Pack",
     "PAD": "Pad",
     "QUANTIZE": "Quantize",
-    "DEQUANTIZE": "Dequantize",
     "REDUCE_MAX": "ReduceMax",
+    "RELU": "Relu",
+    "RELU6": "Relu6",
     "RESHAPE": "Reshape",
+    "RESIZE_BILINEAR": "ResizeBilinear",
     "RSQRT": "Rsqrt",
     "SHAPE": "Shape",
     "SOFTMAX": "Softmax",
     "STRIDED_SLICE": "StridedSlice",
+    "SUB": "Sub",
+    "TANH": "Tanh",
+    "TRANSPOSE": "Transpose",
 }
 
 
@@ -511,7 +536,10 @@ def _generate_model_resolver_h(tflite_bytes: bytes) -> str:
     except Exception:
         pass
     if not ops:
-        ops = ["CONV_2D", "MAX_POOL_2D", "SHAPE", "STRIDED_SLICE", "PACK", "RESHAPE", "FULLY_CONNECTED", "SOFTMAX"]
+        # Conservative superset of the ops the glyph/image heads can emit.
+        # The generated resolver is capacity-exact, so an unused entry costs
+        # one resolver slot, never a missing kernel at AllocateTensors().
+        ops = list(_TFLITE_OP_RESOLVER_MAP.keys())
     # An op with no Add*() mapping is NOT a cosmetic loss: the generated
     # resolver would be missing that kernel, MicroInterpreter::AllocateTensors()
     # would fail on the device, and the only symptom is a sketch that flashes
@@ -698,6 +726,7 @@ class RecordController:
             cfg = self._configs.get(session_id)
             if cfg is None:
                 raise RuntimeError("missing config")
+            previous_type = str(getattr(cfg, "project_type", "") or "").strip().lower()
             updated = replace(
                 cfg,
                 project_type=str(cfg.project_type if project_type is None else project_type),
@@ -713,7 +742,25 @@ class RecordController:
             )
             self._configs[session_id] = updated
             _persist_webcam_choice(updated)
-            return updated
+        # Switching INTO a Car License project locks the class list to its
+        # target.  Done outside the lock because enforcement reads the
+        # config and writes tm_classes.json.  A project OPEN also lands here
+        # before the archive is copied, which is harmless: the reset that
+        # follows wipes the workspace anyway, and the real enforcement runs
+        # again after the archive's sequence is known.
+        if (
+            str(getattr(updated, "project_type", "") or "").strip().lower()
+            == PROJECT_TYPE_SIGN_OCR
+            and previous_type != PROJECT_TYPE_SIGN_OCR
+        ):
+            try:
+                saved = self._project_train_cfg(updated.dataset_root)
+                seq = saved.get("sign_sequences") or saved.get("sign_sequence")
+                if seq:
+                    self._enforce_sign_classes(session_id, seq)
+            except Exception:
+                pass
+        return updated
 
     def get_config(self, session_id: str) -> Optional["SessionConfig"]:
         with self._lock:
@@ -752,6 +799,10 @@ class RecordController:
             return None
         import cv2
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        cfg = self.get_config(session_id) if session_id else None
+        frame = _center_crop_webcam_square(
+            frame, getattr(cfg, "project_type", "") if cfg is not None else ""
+        )
         img = Image.fromarray(frame)
         return _to_png_bytes(img)
 
@@ -1132,6 +1183,11 @@ class RecordController:
             ood_max_prob_raw = (qs.get("ood_max_prob") or [""])[0]
             ood_entropy_max_raw = (qs.get("ood_entropy_max") or [""])[0]
             sign_seq_raw = (qs.get("sign_seq") or [""])[0]
+            sign_seqs_raw = (qs.get("sign_seqs") or qs.get("sign_sequences") or [""])[0]
+            sign_seqs_list = (
+                [part.strip() for part in str(sign_seqs_raw).split(",") if part.strip()]
+                if str(sign_seqs_raw).strip() else None
+            )
             reading_raw = (qs.get("reading") or [""])[0]
             match_min_raw = (qs.get("match_min") or [""])[0]
             bg_dark_thresh = int(bg_dark_raw) if str(bg_dark_raw).strip() != "" else None
@@ -1151,21 +1207,32 @@ class RecordController:
                     err = self._get_live_error(session_id=session_id, source=source) or "preview unavailable"
                     _send_json(req, {"ok": "0", "error": err}, status=404, cors=True)
                     return
-                # Predict using the 96x96 capture_png when possible — this is
-                # byte-for-byte the same file the /start (hold capture) worker
-                # saves on disk, so the user sees a distribution exactly equal
-                # to what their downstream MCU classifier will ingest.
-                capture_png = self._get_live_capture(session_id=session_id, source=source)
-                predict_png = capture_png if capture_png else preview_png
+                # The DEVICE preview is already box-averaged to the
+                # preprocessing side (160 -> 96), exactly like the MCU, and
+                # that is what inference must see — the native capture PNG
+                # (160) is kept for SAVING samples, not for prediction.  A
+                # webcam has no device preprocessing side, so its native
+                # capture is the right prediction source.
+                if source == "device":
+                    predict_png = preview_png
+                else:
+                    capture_png = self._get_live_capture(session_id=session_id, source=source)
+                    predict_png = capture_png if capture_png else preview_png
                 if self._is_sign_ocr_session(session_id):
                     pred = self._preview_predict_sign_ocr(
                         session_id=session_id,
                         png=predict_png,
                         sign_sequence=sign_seq_raw,
+                        sign_sequences=sign_seqs_list,
                         reading_order=reading_raw,
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
                         match_min_prob=sign_match_min,
+                        ood_sign_pct_min=ood_sign_pct_min,
+                        ood_sign_pct_max=ood_sign_pct_max,
+                        ood_max_prob_min=ood_max_prob_min,
+                        ood_entropy_ratio_max=ood_entropy_ratio_max,
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                         source=source,
                     )
                 else:
@@ -1464,6 +1531,7 @@ class RecordController:
             "/samples/seed_emnist",
             "/classes/seed_emnist",
             "/preprocess/preview",
+            "/preview/ood",
             "/preview/predict_upload",
             "/preview/upload",
             "/preview/synthesize_sign",
@@ -1651,6 +1719,10 @@ class RecordController:
             filename = str(payload.get("filename") or "").strip()
             class_config = payload.get("class_config")
             sample_config = payload.get("sample_config")
+            sign_sequences = payload.get("sign_sequences")
+            if sign_sequences is None and payload.get("sign_sequence") is not None:
+                sign_sequences = payload.get("sign_sequence")
+            reading_order = payload.get("reading_order") or payload.get("reading")
             if not session_id or not class_name or not filename:
                 _send_json(req, {"ok": "0", "error": "missing params"}, status=400, cors=True)
                 return
@@ -1661,6 +1733,8 @@ class RecordController:
                     filename=filename,
                     class_config=class_config,
                     sample_config=sample_config,
+                    sign_sequences=sign_sequences,
+                    reading_order=reading_order,
                 )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -1730,6 +1804,72 @@ class RecordController:
                 return
             _send_json(req, {"ok": "1"}, cors=True)
             return
+        if path == "/preview/ood":
+            # The Input Settings preview group pushes its four OOD values
+            # here as soon as the user saves them.  OOD MAX PROB is the
+            # SINGLE probability threshold: persist it as both the OOD gate
+            # and the per-slot sign_match_min_prob so an export cannot
+            # resurrect a separate hidden floor.
+            session_id = str(payload.get("session") or "").strip()
+            if not session_id:
+                _send_json(req, {"ok": "0", "error": "missing session"}, status=400, cors=True)
+                return
+            with self._lock:
+                sess_cfg = self._configs.get(session_id)
+            if sess_cfg is None:
+                _send_json(req, {"ok": "0", "error": "missing config"}, status=400, cors=True)
+                return
+
+            def _ood_num(default: float, *keys: str) -> float:
+                for key in keys:
+                    raw = payload.get(key)
+                    if raw is None or str(raw).strip() == "":
+                        continue
+                    try:
+                        return float(raw)
+                    except (TypeError, ValueError):
+                        continue
+                return default
+
+            def _clamp(v: float, lo: float, hi: float) -> float:
+                return max(lo, min(hi, float(v)))
+
+            spmin = _clamp(_ood_num(0.3, "ood_sign_pct_min", "ood_sign_min"), 0.0, 100.0)
+            spmax = _clamp(_ood_num(70.0, "ood_sign_pct_max", "ood_sign_max"), 0.0, 100.0)
+            if spmin > spmax:
+                spmin, spmax = spmax, spmin
+            max_prob = _clamp(
+                _ood_num(0.40, "ood_max_prob_min", "ood_max_prob",
+                         "sign_match_min_prob", "match_min_prob"),
+                0.0, 1.0,
+            )
+            entropy_max = _clamp(
+                _ood_num(0.85, "ood_entropy_ratio_max", "ood_entropy_max"),
+                0.0, 1.0,
+            )
+            try:
+                self._save_train_cfg(session_id, {
+                    "ood_sign_pct_min": spmin,
+                    "ood_sign_pct_max": spmax,
+                    "ood_max_prob_min": max_prob,
+                    "ood_entropy_ratio_max": entropy_max,
+                    # One threshold, stored under both names for old readers.
+                    "sign_match_min_prob": max_prob,
+                    "match_min_prob": max_prob,
+                })
+            except Exception as e:
+                _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
+                return
+            _send_json(req, {
+                "ok": "1",
+                "ood_sign_pct_min": spmin,
+                "ood_sign_pct_max": spmax,
+                "ood_max_prob_min": max_prob,
+                "ood_entropy_ratio_max": entropy_max,
+                "sign_match_min_prob": max_prob,
+                "match_min_prob": max_prob,
+            }, cors=True)
+            return
         if path == "/preview/predict_upload":
             session_id = str(payload.get("session") or "").strip()
             image_b64 = str(payload.get("image_b64") or "").strip()
@@ -1756,14 +1896,22 @@ class RecordController:
                         session_id=session_id,
                         png=png,
                         sign_sequence=payload.get("sign_sequence"),
+                        sign_sequences=payload.get("sign_sequences"),
                         reading_order=payload.get("reading_order"),
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
+                        # OOD MAX PROB is the single per-slot probability
+                        # threshold; match_min stays as a legacy fallback.
+                        ood_max_prob_min=ood_max_prob_min,
+                        ood_entropy_ratio_max=ood_entropy_ratio_max,
+                        ood_sign_pct_min=ood_sign_pct_min,
+                        ood_sign_pct_max=ood_sign_pct_max,
                         match_min_prob=(
                             float(payload.get("match_min"))
                             if payload.get("match_min") is not None and str(payload.get("match_min")).strip() != ""
                             else None
                         ),
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                     )
                 else:
                     pred = self._preview_predict(
@@ -1881,10 +2029,23 @@ class RecordController:
                         session_id=session_id,
                         png=orig_png,
                         sign_sequence=payload.get("sign_sequence"),
+                        sign_sequences=payload.get("sign_sequences"),
                         reading_order=payload.get("reading_order"),
                         bg_dark_thresh=bg_dark_thresh,
                         bg_lum_thresh=bg_lum_thresh,
+                        # One threshold: the OOD MAX PROB field also sets the
+                        # per-slot match floor.
+                        ood_max_prob_min=_opt_float(
+                            "ood_max_prob", "ood_max_prob_min",
+                            "sign_match_min_prob", "match_min_prob",
+                        ),
+                        ood_entropy_ratio_max=_opt_float(
+                            "ood_entropy_max", "ood_entropy_ratio_max"
+                        ),
+                        ood_sign_pct_min=_opt_float("ood_sign_min", "ood_sign_pct_min"),
+                        ood_sign_pct_max=_opt_float("ood_sign_max", "ood_sign_pct_max"),
                         match_min_prob=_opt_float("match_min", "match_min_prob"),
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                     )
                 else:
                     pred = self._preview_predict(
@@ -1968,11 +2129,13 @@ class RecordController:
                     # YES on a plate that is genuinely a different sign.
                     # Retry replacement characters until the reading is
                     # actually wrong.
-                    seq_for_alt, _order = self._sign_preview_sequence(
+                    seq_for_alt, _order, _seqs, _idx = self._sign_preview_sequence(
                         session_id,
                         chars=payload.get("chars"),
                         sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
                         reading_order=payload.get("reading_order") or payload.get("reading"),
+                        sign_sequences=payload.get("sign_sequences"),
+                        plate_index=payload.get("plate_index"),
                     )
                     candidates = [
                         c for c in "56789ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in seq_for_alt
@@ -1997,15 +2160,29 @@ class RecordController:
                         sign_sequence=payload.get("sign_sequence") or payload.get("sign_seq"),
                         reading_order=payload.get("reading_order") or payload.get("reading"),
                         alt_char=alt_char,
+                        sign_sequences=payload.get("sign_sequences"),
+                        plate_index=payload.get("plate_index"),
                     )
                     pred = self._preview_predict_sign_ocr(
                         session_id=session_id,
                         png=synth["png"],
                         sign_sequence=synth["sign_sequence"],
+                        sign_sequences=synth.get("sign_sequences"),
                         reading_order=synth["reading_order"],
                         bg_dark_thresh=_synth_int("bg_dark", "dark"),
                         bg_lum_thresh=_synth_int("bg_lum", "lum"),
+                        # One threshold: OOD MAX PROB also sets the slot floor.
+                        ood_max_prob_min=_synth_float(
+                            "ood_max_prob", "ood_max_prob_min",
+                            "sign_match_min_prob", "match_min_prob",
+                        ),
+                        ood_entropy_ratio_max=_synth_float(
+                            "ood_entropy_max", "ood_entropy_ratio_max"
+                        ),
+                        ood_sign_pct_min=_synth_float("ood_sign_min", "ood_sign_pct_min"),
+                        ood_sign_pct_max=_synth_float("ood_sign_max", "ood_sign_pct_max"),
                         match_min_prob=_synth_float("match_min", "match_min_prob"),
+                        preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                     )
                     if variant == "match":
                         intended = True
@@ -2061,19 +2238,25 @@ class RecordController:
                     return cast(raw)
                 except (TypeError, ValueError):
                     return default
+            # OOD MAX PROB is the single probability threshold: the exported
+            # kSignMatchMinProb must equal kOodMaxProbMin.
+            ood_max_prob = _num("ood_max_prob", 0.40)
             runtime_config = {
                 "ood_sign_min": _num("ood_sign_min", 0.3),
                 "ood_sign_max": _num("ood_sign_max", 70.0),
-                "ood_max_prob": _num("ood_max_prob", 0.60),
-                "ood_entropy_max": _num("ood_entropy_max", 0.70),
+                "ood_max_prob": ood_max_prob,
+                "ood_entropy_max": _num("ood_entropy_max", 0.85),
                 "bg_dark_thresh": _num("bg_dark_thresh", 0, cast=int),
                 "bg_lum_thresh": _num("bg_lum_thresh", 100, cast=int),
                 # sign_ocr only.  String/None pass through; _export_run
                 # normalises them and falls back to the TrainConfig when the
                 # SPA did not send them (older SPA builds).
                 "sign_sequence": payload.get("sign_sequence"),
+                "sign_sequences": payload.get("sign_sequences"),
+                "capture_frame_side": payload.get("capture_frame_side"),
+                "preprocess_frame_side": payload.get("preprocess_frame_side"),
                 "reading_order": payload.get("reading_order"),
-                "match_min_prob": _num("match_min_prob", 0.60),
+                "match_min_prob": ood_max_prob,
             }
             if not session_id or not export_dir:
                 _send_json(req, {"ok": "0", "error": "missing fields"}, status=400, cors=True)
@@ -2222,6 +2405,7 @@ class RecordController:
             session_id = str(payload.get("session") or "").strip()
             names = payload.get("names")
             seq_raw = payload.get("sign_sequence")
+            seqs_raw = payload.get("sign_sequences")
             order_raw = payload.get("reading_order")
             auto_seed_raw = payload.get("auto_seed_emnist_samples")
             if auto_seed_raw is None:
@@ -2234,13 +2418,17 @@ class RecordController:
             # older servers, but taking the sequence here means a client can
             # never sync a class list that disagrees with the target it just
             # committed to the train config.
+            sequences = normalize_sign_sequences(seqs_raw)
+            if not sequences and seq_raw not in (None, ""):
+                sequences = normalize_sign_sequences(seq_raw)
             sequence: Optional[List[str]] = None
-            if seq_raw not in (None, ""):
-                sequence = normalize_sign_sequence(seq_raw)
+            if sequences:
+                sequence = normalize_sign_sequence(sequences[0])
                 derived: List[str] = []
-                for ch in sequence:
-                    if ch != SIGN_SEQUENCE_PAD and ch not in derived:
-                        derived.append(ch)
+                for text in sequences:
+                    for ch in text:
+                        if ch not in derived:
+                            derived.append(ch)
                 if derived:
                     names = derived
             if not isinstance(names, list) or not names:
@@ -2255,10 +2443,9 @@ class RecordController:
                 # synthetic preview drawn by the seeder, a later reopen and
                 # the export all read it from the project's train config.
                 patch: Dict[str, Any] = {}
-                if sequence is not None and any(
-                    ch != SIGN_SEQUENCE_PAD for ch in sequence
-                ):
-                    patch["sign_sequence"] = sequence
+                if sequences:
+                    patch["sign_sequences"] = list(sequences)
+                    patch["sign_sequence"] = normalize_sign_sequence(sequences[0])
                 if order_raw not in (None, ""):
                     order = str(order_raw).strip().lower()
                     if order in ("ltr", "rtl"):
@@ -2307,6 +2494,8 @@ class RecordController:
             }
             if sequence is not None:
                 response["sign_sequence"] = sequence
+            if sequences:
+                response["sign_sequences"] = list(sequences)
             try:
                 # Runtime state is rebuilt AFTER seeding, so counts,
                 # sample_previews and train_enabled describe the files that
@@ -2471,6 +2660,63 @@ class RecordController:
     def _sample_preprocess_load(self, dataset_root: Path) -> Dict[str, Dict[str, Dict[str, Any]]]:
         raw = self._classes_meta_load(dataset_root)
         return normalize_sample_preprocess_map(raw.get("sample_preprocess"))
+
+    @staticmethod
+    def _canonical_sample_key(class_name: str, filename: str) -> str:
+        """The canonical sample_preprocess key: `<class_name>/<filename>`.
+
+        `filename` is reduced to its basename so a stored full path, a
+        foreign separator or a prefix directory can never orphan a
+        sample's Manual ROI on save/load.
+        """
+        return f"{str(class_name or '').strip()}/{Path(str(filename or '')).name}"
+
+    @staticmethod
+    def _sample_preprocess_lookup(
+        sample_preprocess: Dict[str, Any], class_name: str, filename: str
+    ) -> Optional[Dict[str, Any]]:
+        """Find a per-sample preprocess record, whatever key shape wrote it.
+
+        Tries, in order:
+          1. the canonical nested entry  `<class_name> -> <filename>`
+          2. the canonical flat entry     `<class_name>/<filename>`
+          3. a basename-normalised variant of either (case/path drift)
+          4. a bare `<filename>` key (class-less flat maps)
+
+        so a path difference between the save side and the load side can
+        NEVER silently drop a sample's Manual ROI (RC1).
+        """
+        if not isinstance(sample_preprocess, dict):
+            return None
+        cls = str(class_name or "").strip()
+        file = Path(str(filename or "")).name
+        if not cls or not file:
+            return None
+        canonical = f"{cls}/{file}"
+        # 1. canonical nested entry
+        class_map = sample_preprocess.get(cls)
+        if isinstance(class_map, dict):
+            if file in class_map and isinstance(class_map[file], dict):
+                return class_map[file]
+            # 1b. basename-normalised variant inside the class map
+            for key, value in class_map.items():
+                if Path(str(key or "")).name == file and isinstance(value, dict):
+                    return value
+        # 2. canonical flat entry `<class_name>/<filename>`
+        flat = sample_preprocess.get(canonical)
+        if isinstance(flat, dict):
+            return flat
+        # 3. flat entry whose basename matches and whose class prefix matches
+        for key, value in sample_preprocess.items():
+            if not isinstance(value, dict) or not isinstance(key, str):
+                continue
+            if Path(str(key or "")).name == file and key.rstrip("/").endswith(f"/{cls}"):
+                return value
+        # 4. bare `<filename>` key in a class-less flat map (last resort)
+        bare = sample_preprocess.get(file)
+        if isinstance(bare, dict):
+            return bare
+        return None
 
     def _classes_save(
         self,
@@ -2654,6 +2900,102 @@ class RecordController:
         self._classes_save(cfg.dataset_root, classes, class_preprocess=class_preprocess, sample_preprocess=sample_preprocess)
         return classes
 
+    @staticmethod
+    def _sign_sequence_classes(sequence: Any) -> List[str]:
+        """The authoritative sign_ocr class list: unique target characters.
+
+        A Car License project has no class editor: its classes ARE the
+        characters of `sign_sequence`, in sequence order.  The '?' pad and
+        anything that is not one 0-9/A-Z character are not classes.
+        """
+        out: List[str] = []
+        for ch in normalize_sign_sequence(sequence):
+            text = str(ch or "").strip().upper()
+            if (
+                len(text) == 1
+                and text != SIGN_SEQUENCE_PAD
+                and re.fullmatch(r"[0-9A-Z]", text)
+                and text not in out
+            ):
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _sign_sequences_classes(sequences: Any) -> List[str]:
+        """Union of unique characters across every allowed plate.
+
+        First-appearance order: ["A12", "B18"] -> ["A", "1", "2", "B", "8"].
+        Duplicate characters (A12 + A18) contribute one class and keep the
+        order in which they first appeared.
+        """
+        out: List[str] = []
+        for text in normalize_sign_sequences(sequences):
+            for ch in text:
+                if ch not in out:
+                    out.append(ch)
+        return out
+
+    def _purge_sign_artifact_dirs(
+        self, dataset_root: Path, keep: List[str]
+    ) -> None:
+        """Delete every class folder that is not one of `keep`.
+
+        The three roots that can hold a class are the raw dataset, the
+        processed cache and the mixed training set.  A stale "Class 1"/
+        "Class 2" left in ANY of them is dangerous: `map_class_to_char`
+        reads the trailing digit, so EMNIST injection fills the stale
+        folder and it becomes a REAL model label (often the one the target
+        digit should have owned).  Only directories are touched, hidden
+        names are skipped, and the comparison goes through the same
+        sanitiser the folders were created with.
+        """
+        wanted = {sanitize_class_name(str(n)).lower() for n in keep if str(n).strip()}
+        roots = (
+            Path(dataset_root),
+            self._processed_cache_dir(Path(dataset_root)),
+            Path(dataset_root).parent / ".tm_ocr_mixed",
+        )
+        for root in roots:
+            try:
+                if not root.exists():
+                    continue
+                children = list(root.iterdir())
+            except Exception:
+                continue
+            for child in children:
+                try:
+                    if not child.is_dir():
+                        continue
+                    name = child.name
+                    if name.startswith("."):
+                        continue
+                    if sanitize_class_name(name).lower() in wanted:
+                        continue
+                    shutil.rmtree(child, ignore_errors=True)
+                except Exception:
+                    continue
+
+    def _enforce_sign_classes(
+        self, session_id: str, sequence: Any
+    ) -> List[str]:
+        """Lock the class list and every class folder to the sign sequence.
+
+        Called when a sign project is opened, when its classes are synced
+        from the target bar, and at the start of training.  Returns the
+        authoritative class list; with no usable target it leaves the
+        project untouched (the training path refuses that case explicitly).
+        """
+        with self._lock:
+            cfg = self._configs.get(session_id)
+        if cfg is None:
+            raise RuntimeError("missing config")
+        chars = self._sign_sequences_classes(sequence)
+        if not chars:
+            return self._classes_load(cfg.dataset_root)
+        classes = self._classes_sync_ocr(session_id=session_id, names=chars)
+        self._purge_sign_artifact_dirs(cfg.dataset_root, classes)
+        return classes
+
     def _classes_sync_ocr(self, session_id: str, names: List[Any]) -> List[str]:
         """Make the class list exactly the sign's characters, in sequence order.
 
@@ -2756,6 +3098,12 @@ class RecordController:
             class_preprocess=class_preprocess,
             sample_preprocess=sample_preprocess,
         )
+        # The list above is the authority.  Any folder on disk that is not
+        # one of its characters — including a stale "Class 1"/"Class 2" that
+        # was never in tm_classes.json — is a label waiting to be injected
+        # into the next training run, so remove it here as well as in
+        # _enforce_sign_classes().
+        self._purge_sign_artifact_dirs(cfg.dataset_root, keep)
         return list(keep)
 
     def _rename_class_storage(self, dataset_root: Path, old_name: str, new_name: str) -> None:
@@ -3104,8 +3452,8 @@ class RecordController:
         rc = runtime_config if isinstance(runtime_config, dict) else {}
         ood_sign_min = float(rc.get("ood_sign_min", 0.3))
         ood_sign_max = float(rc.get("ood_sign_max", 70.0))
-        ood_max_prob = float(rc.get("ood_max_prob", 0.60))
-        ood_entropy_max = float(rc.get("ood_entropy_max", 0.70))
+        ood_max_prob = max(0.0, min(1.0, float(rc.get("ood_max_prob", 0.40))))
+        ood_entropy_max = max(0.0, min(1.0, float(rc.get("ood_entropy_max", 0.85))))
         bg_dark_thresh = int(rc.get("bg_dark_thresh", 0))
         bg_lum_thresh = int(rc.get("bg_lum_thresh", 100))
         latest = self._train_result_path(cfg.dataset_root)
@@ -3115,6 +3463,21 @@ class RecordController:
         tflite_path = Path(str(meta.get("tflite_path") or "")).expanduser().resolve()
         labels = list(meta.get("labels") or []) if isinstance(meta, dict) else []
         img_size = int(meta.get("img_size") or 96) if isinstance(meta, dict) else 96
+        # Capture / preprocessing / model sides are separate by design: the
+        # camera can stream 160x160 while the model consumes 96x96 (or a
+        # glyph canvas at 28x28).  The sketches resize between them.
+        try:
+            capture_side = int(rc.get("capture_frame_side") or getattr(cfg, "serial_frame_side", 96) or 96)
+        except (TypeError, ValueError):
+            capture_side = 96
+        capture_side = max(8, min(512, capture_side))
+        try:
+            preprocess_side = int(rc.get("preprocess_frame_side") or 0)
+        except (TypeError, ValueError):
+            preprocess_side = 0
+        if preprocess_side <= 0:
+            preprocess_side = 96 if is_glyph_project(getattr(cfg, "project_type", "")) else int(img_size)
+        preprocess_side = max(8, min(512, preprocess_side))
         color_mode = str(meta.get("color_mode") or "rgb") if isinstance(meta, dict) else "rgb"
         channels = 1 if color_mode.strip().lower() in {"l", "gray", "grayscale", "mono"} else 3
         if not tflite_path.exists():
@@ -3200,13 +3563,28 @@ class RecordController:
         # The sequence is a property of the TRAINING RUN, not of the session
         # config: the SPA forwards its live editor state in runtime_config,
         # and the run's train_config.json is the fallback for an older SPA.
+        sign_seqs_src = rc.get("sign_sequences")
         sign_seq_src = rc.get("sign_sequence")
-        if sign_seq_src is None or sign_seq_src == "" or sign_seq_src == []:
+        if (
+            sign_seqs_src in (None, "", [])
+            and (sign_seq_src is None or sign_seq_src == "" or sign_seq_src == [])
+        ):
             train_cfg_saved = self._project_train_cfg(cfg.dataset_root)
+            sign_seqs_src = train_cfg_saved.get("sign_sequences")
             sign_seq_src = train_cfg_saved.get("sign_sequence")
         else:
             train_cfg_saved = None
-        sign_seq = normalize_sign_sequence(sign_seq_src)
+        sign_sequences = normalize_sign_sequences(sign_seqs_src)
+        if not sign_sequences:
+            sign_sequences = normalize_sign_sequences(sign_seq_src)
+        sign_seq = normalize_sign_sequence(
+            sign_sequences[0] if sign_sequences else sign_seq_src
+        )
+        if not sign_sequences:
+            # Legacy/incomplete target: keep the export well-formed (the
+            # device will simply never match a '?' plate) instead of emitting
+            # an empty matrix.
+            sign_sequences = [normalize_sign_sequence(sign_seq)]
         reading_src = rc.get("reading_order")
         if reading_src is None or str(reading_src).strip() == "":
             if train_cfg_saved is None:
@@ -3215,11 +3593,26 @@ class RecordController:
         reading_order = str(reading_src or "ltr").strip().lower()
         if reading_order not in ("ltr", "rtl"):
             reading_order = "ltr"
-        try:
-            sign_match_min_prob = float(rc.get("match_min_prob", 0.60))
-        except (TypeError, ValueError):
-            sign_match_min_prob = 0.60
-        sign_match_min_prob = max(0.0, min(1.0, sign_match_min_prob))
+        # ONE probability threshold: the OOD MAX PROB field is also the
+        # per-slot match floor.  Export both constants from the same value so
+        # the device cannot drift from what Input Settings showed.
+        sign_match_min_prob = ood_max_prob
+        # Which rejector did THIS run train?  A `_background` class can only
+        # replace OOD if it actually exists in the exported label list.  An
+        # old run with no recorded flag used it as the only rejector (the
+        # pre-toggle device behaviour), so preserve that for legacy exports.
+        has_background_class = any(
+            str(x).strip().lower() == "_background" for x in labels
+        )
+        meta_bg_replace = (
+            meta.get("sign_background_replace_ood")
+            if isinstance(meta, dict) else None
+        )
+        sign_background_is_only_rejector = (
+            bool(meta_bg_replace)
+            if meta_bg_replace is not None
+            else bool(has_background_class)
+        ) and has_background_class
         # Map each target character to its class index the same way the
         # device's match rule compares: label.upper() == char.upper().  -1
         # means "no such class" and the device treats that slot as never
@@ -3231,6 +3624,17 @@ class RecordController:
                 sign_class_indices.append(upper_labels.index(str(ch).strip().upper()))
             except ValueError:
                 sign_class_indices.append(-1)
+        # One index row per allowed plate; -1 marks a character that has no
+        # class in this export (the device treats that slot as never matching).
+        sign_class_matrix: List[List[int]] = []
+        for plate in sign_sequences:
+            row: List[int] = []
+            for ch in plate:
+                try:
+                    row.append(upper_labels.index(str(ch).strip().upper()))
+                except ValueError:
+                    row.append(-1)
+            sign_class_matrix.append(row)
         sign_target_lines = []
         if sign_export:
             sign_target_lines = [
@@ -3244,8 +3648,42 @@ class RecordController:
                 "constexpr int kTargetSignClassIndices["
                 + str(int(len(sign_class_indices))) + "] = {"
                 + ", ".join(str(int(i)) for i in sign_class_indices) + "};",
+                "// ── Gatekeeper whitelist (all allowed 3-character plates) ──────",
+                "#define TM_SIGN_MULTI_TARGET_EXPORTED 1",
+                "constexpr int kTargetSignCount = " + str(int(len(sign_sequences))) + ";",
+                "constexpr char kTargetSignSequences[kTargetSignCount][4] = { "
+                + ", ".join(_c_str(str(p)) for p in sign_sequences) + " };",
+                "constexpr int kTargetSignClassMatrix[kTargetSignCount][3] = {",
+                *[
+                    "    { " + ", ".join(str(int(v)) for v in row) + " },"
+                    for row in sign_class_matrix
+                ],
+                "};",
                 "constexpr int kSignReadingOrder = " + ("1" if reading_order == "rtl" else "0") + ";",
                 "constexpr float kSignMatchMinProb = " + f"{sign_match_min_prob:.6f}f;",
+                "// 1 = the model's own _background class is the only rejector",
+                "//     (OOD Layers 1-3 are bypassed on the device).",
+                "// 0 = no _background class; the standard OOD gates + the",
+                "//     per-slot kSignMatchMinProb floor do the rejecting.",
+                "#define TM_SIGN_USE_BACKGROUND_OOD "
+                + ("1" if sign_background_is_only_rejector else "0"),
+                "constexpr bool kSignBackgroundReplacesOod = "
+                + ("true" if sign_background_is_only_rejector else "false")
+                + ";",
+                "// Index of \"_background\" in kCategoryLabels, or -1 when the",
+                "// run trained without the reject class.",
+                "constexpr int kBackgroundClassIndex = "
+                + str(int(next(
+                    (i for i, x in enumerate(labels)
+                     if str(x).strip().lower() == "_background"),
+                    -1,
+                ))) + ";",
+                "// Legacy spellings kept for sketches built before the rename.",
+                "#define TM_SIGN_BACKGROUND_IS_THE_ONLY_REJECTOR "
+                + ("1" if sign_background_is_only_rejector else "0"),
+                "constexpr bool kSignBackgroundIsTheOnlyRejector = "
+                + ("true" if sign_background_is_only_rejector else "false")
+                + ";",
                 "",
             ]
         model_settings_h = "\n".join(
@@ -3262,6 +3700,17 @@ class RecordController:
                 "constexpr int kNumChannels = " + str(int(channels)) + ";",
                 "",
                 "constexpr int kMaxImageSize = kNumCols * kNumRows * kNumChannels;",
+                "",
+                "// ── Resolution layers (capture -> preprocess -> model) ───────────",
+                "// The MCU may capture at a different side than the model input;",
+                "// the sketches box-average the captured square frame down to the",
+                "// preprocessing side before the glyph/ROI transform.",
+                "#define TM_MODEL_INPUT_SIDE " + str(int(img_size)),
+                "#define TM_PREPROCESS_FRAME_SIDE " + str(int(preprocess_side)),
+                "#define TM_CAPTURE_FRAME_SIDE " + str(int(capture_side)),
+                "constexpr int kModelInputSide = TM_MODEL_INPUT_SIDE;",
+                "constexpr int kPreprocessFrameSide = TM_PREPROCESS_FRAME_SIDE;",
+                "constexpr int kCaptureFrameSide = TM_CAPTURE_FRAME_SIDE;",
                 "",
                 # 1 = OCR glyph model (28x28 canvas, "_background" rejector,
                 # ocr_glyph.c front-end) / 0 = legacy 96x96 sign model.
@@ -3506,16 +3955,18 @@ class RecordController:
         # such writer and lives in the SPA until something flushes it.  This
         # is that flush, and it happens before the zip is opened so both
         # halves of the archive carry the same settings.
-        if isinstance(project_state, dict) and (
-            project_state.get("class_preprocess") is not None
-            or project_state.get("sample_preprocess") is not None
-        ):
-            self._classes_save(
-                dataset_root,
-                self._classes_load(dataset_root),
-                class_preprocess=merged_project_state.get("class_preprocess"),
-                sample_preprocess=merged_project_state.get("sample_preprocess"),
-            )
+        #
+        # UNCONDITIONAL (RC1): every save writes the complete merged map —
+        # the per-sample Manual ROI boxes and Dark/Lum thresholds in
+        # sample_preprocess were silently dropped from tm_classes.json
+        # whenever a save payload happened not to carry the key, and the
+        # archive then reopened without them.
+        self._classes_save(
+            dataset_root,
+            self._classes_load(dataset_root),
+            class_preprocess=merged_project_state.get("class_preprocess"),
+            sample_preprocess=merged_project_state.get("sample_preprocess"),
+        )
 
         tmp_path = save_path.with_suffix(".tmproj.tmp")
         if tmp_path.exists():
@@ -3688,12 +4139,74 @@ class RecordController:
                     classes = sorted([str(x) for x in dirs]) if dirs else ["Class 1", "Class 2"]
                 self._classes_save(dataset_root, classes)
 
+            # ── RC1: restore the per-sample preprocessing FIRST ──
+            # The state file (tm_project_state.json) is the snapshot of what
+            # the SPA was actually holding when the user saved — including
+            # every per-sample Manual ROI box and Dark/Lum threshold.  An
+            # archive whose tm_classes.json predates the sample_preprocess
+            # flush (older files, a save raced with the Edit modal's write)
+            # must still come back with its ROIs, so the state file's copy
+            # is merged over the archive's tm_classes.json before anything
+            # re-preprocesses a sample.
+            project_state_in = tmp_dir / str(manifest.get("project_state") or "tm_project_state.json")
+            project_state: Optional[Dict[str, Any]] = None
+            if project_state_in.exists():
+                try:
+                    loaded = json.loads(project_state_in.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        project_state = loaded
+                except Exception:
+                    project_state = None
+            if project_state is None:
+                project_state = {}
+            state_sample = normalize_sample_preprocess_map(project_state.get("sample_preprocess"))
+            state_class = normalize_class_preprocess_map(project_state.get("class_preprocess"))
+            if state_sample or state_class:
+                # Layer the state file's entries over the restored map (the
+                # state file wins where the two disagree — it is the newer,
+                # SPA-authored half) and write the merged result back.
+                merged_pp = self._sample_preprocess_load(dataset_root)
+                for cls_name, class_map in state_sample.items():
+                    merged_pp.setdefault(cls_name, {}).update(class_map)
+                merged_cp = self._class_preprocess_load(dataset_root)
+                for cls_name, cfg in state_class.items():
+                    merged_cp[cls_name] = cfg
+                self._classes_save(
+                    dataset_root,
+                    self._classes_load(dataset_root),
+                    class_preprocess=merged_cp,
+                    sample_preprocess=merged_pp,
+                )
+
+            # ── RC1: rebuild the processed cache FROM the restored settings ──
+            # The archive's own cache can only be trusted when it was rebuilt
+            # with the same per-sample ROIs; restoring it verbatim re-imports
+            # whatever the saver last computed.  Rebuilding with the restored
+            # sample_preprocess guarantees the 28x28 glyphs the Edit modal
+            # and training see ARE the Manual ROI crops the user drew.
             processed_cache_in = tmp_dir / str(manifest.get("processed_cache_dir") or "")
             processed_cache_out = self._processed_cache_dir(dataset_root)
             if processed_cache_out.exists():
                 shutil.rmtree(processed_cache_out)
-            if processed_cache_in.exists():
-                shutil.copytree(processed_cache_in, processed_cache_out)
+            try:
+                self._rebuild_processed_cache(
+                    dataset_root,
+                    class_preprocess=self._class_preprocess_load(dataset_root),
+                    sample_preprocess=self._sample_preprocess_load(dataset_root),
+                    global_preprocess_mode=str(
+                        (project_state.get("train_cfg") or {}).get("preprocess_mode")
+                        or project_state.get("preprocess_mode")
+                        or PREPROCESS_MODE_AUTO_BY_LABEL
+                    ),
+                    out_size=int(resolved_size or cfg.img_size),
+                    fast_mode=True,
+                    project_type=resolved_type or str(getattr(cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                )
+            except Exception:
+                # A rebuild failure must not abort the open: fall back to the
+                # archive's cached glyphs when the project bundled them.
+                if processed_cache_in.exists():
+                    shutil.copytree(processed_cache_in, processed_cache_out)
 
             # A trained model survives this open only when the ARCHIVE ITSELF
             # bundled one.  The record inside names absolute paths from the
@@ -3737,17 +4250,8 @@ class RecordController:
                     if run_dst.exists():
                         shutil.rmtree(run_dst, ignore_errors=True)
                     latest_out.unlink(missing_ok=True)
-            project_state_in = tmp_dir / str(manifest.get("project_state") or "tm_project_state.json")
-            project_state: Optional[Dict[str, Any]] = None
-            if project_state_in.exists():
-                try:
-                    loaded = json.loads(project_state_in.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        project_state = loaded
-                except Exception:
-                    project_state = None
-            if project_state is None:
-                project_state = {}
+            # (project_state was loaded above, before the per-sample
+            # preprocessing restore — see the RC1 block.)
             # Reconcile the two halves of the archive.  The manifest is the
             # header (written by the one save path from the session's own
             # config); the state file is whatever the saver happened to
@@ -3768,6 +4272,25 @@ class RecordController:
                 state_cfg["project_type"] = resolved_type
             if resolved_size:
                 state_cfg["img_size"] = resolved_size
+            # A sign archive's target is its class list.  Prune any class
+            # folder the archive's own target does not name BEFORE the state
+            # payload reports counts/labels — a stale "Class 1" here would
+            # otherwise be injected with EMNIST samples at the next training
+            # and become a real model output.
+            if resolved_type == PROJECT_TYPE_SIGN_OCR:
+                seq_src = state_cfg.get("sign_sequences") or state_cfg.get("sign_sequence")
+                if not seq_src:
+                    saved = self._project_train_cfg(
+                        dataset_root, project_state=project_state
+                    )
+                    seq_src = saved.get("sign_sequences") or saved.get("sign_sequence")
+                try:
+                    self._enforce_sign_classes(session_id, seq_src)
+                    # The enforcement may have normalized/added classes;
+                    # report the post-prune list to the SPA.
+                    project_state["classes"] = self._classes_load(dataset_root)
+                except Exception:
+                    pass
             project_state["project_format"] = {
                 **header,
                 "missing_train_cfg_fields": missing,
@@ -4263,6 +4786,7 @@ class RecordController:
                 fast_mode=False,
                 out_size=int(img_size),
                 project_type=project_type,
+                dataset_root=dataset_root,
             )
             dst_dir = self._processed_cache_dir(dataset_root) / sanitize_class_name(class_name)
             dst_dir.mkdir(parents=True, exist_ok=True)
@@ -4270,7 +4794,7 @@ class RecordController:
         except Exception:
             pass
 
-    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96, project_type: str = PROJECT_TYPE_IMAGE):
+    def _preprocess_image_png(self, png: bytes, label_name: str, class_config: Any, sample_config: Any = None, return_crop: bool = False, fast_mode: bool = False, out_size: int = 96, project_type: str = PROJECT_TYPE_IMAGE, dataset_root: Optional[Path] = None, sign_sequences: Any = None, reading_order: Any = None):
         class_cfg = class_config if isinstance(class_config, dict) else {}
         src_cfg = sample_config if isinstance(sample_config, dict) else {}
         # Project dispatch — ONE key, at the ONE place every sample enters the
@@ -4279,12 +4803,21 @@ class RecordController:
         # lifecycle (cache dirs, class dirs, naming, previews) and only swaps
         # the pixel transform.
         if is_glyph_project(project_type):
-            return self._preprocess_image_png_ocr(png, class_config, sample_config, return_crop, out_size)
+            return self._preprocess_image_png_ocr(
+                png, class_config, sample_config, return_crop, out_size,
+                label_name=label_name,
+                project_type=project_type,
+                dataset_root=dataset_root,
+                sign_sequences=sign_sequences,
+                reading_order=reading_order,
+            )
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
         mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
-        # User-adjustable thresholds from class-level config (shared across samples)
-        bg_dark_thresh = int(class_cfg.get("bg_dark_thresh", 0)) if class_cfg else 0
-        bg_lum_thresh  = int(class_cfg.get("bg_lum_thresh", 100)) if class_cfg else 100
+        # The Edit worktable sends per-sample slider values in `sample_config`;
+        # those MUST win over the class record or the live Dark/Lum drag never
+        # moves the auto crop (it kept redrawing the class-level window).
+        bg_dark_thresh = int(config.get("bg_dark_thresh", 0) or 0)
+        bg_lum_thresh  = int(config.get("bg_lum_thresh", 100) or 100)
         # Always B-G; keep RGB colour information.
         img = Image.open(_bytes_io(png)).convert("RGB")
         roi = None
@@ -4337,6 +4870,11 @@ class RecordController:
         sample_config: Any = None,
         return_crop: bool = False,
         out_size: int = GLYPH_SIZE,
+        label_name: str = "",
+        project_type: str = PROJECT_TYPE_OCR,
+        dataset_root: Optional[Path] = None,
+        sign_sequences: Any = None,
+        reading_order: Any = None,
     ):
         """OCR project sample transform: the glyph pipeline in ocr_preprocess.
 
@@ -4352,6 +4890,7 @@ class RecordController:
         column sums, nearest-neighbour by an exact rational index map.
         """
         config = normalize_class_preprocess(sample_config if sample_config is not None else class_config)
+        mode = str(config.get("mode") or PREPROCESS_MODE_AUTO_BY_LABEL)
         polarity = int(config.get("ink_polarity", INK_DARK))
         # NORM_CANON, not NORM_STRETCH: the OCR project mixes EMNIST into
         # every training set, EMNIST ships as 28x28, and CANON is the
@@ -4418,7 +4957,122 @@ class RecordController:
         bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
         thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
         pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
-        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+        # Dark=0 means "no lower bound": nudging it to 1 would drop pure
+        # black glyph pixels and fragment a thin '1'.  Keep 0 as the
+        # inclusive lower edge of the user's window.
+        floor = (0 if bg_dark <= 0 else min(255, bg_dark + 1)) if thresholds_adjusted else 0
+
+        # ── sign_ocr Auto: extract THIS class's slot from a whole sign ──
+        # A Device capture shows the whole A 1 2 board.  Feeding that frame
+        # to a single-glyph class card would train A, 1 and 2 on the same
+        # multi-character image.  In Auto mode on a sign project, split the
+        # sign and keep the slot whose character is this class card's label.
+        # A sample that is already one glyph has one raw column run, so this
+        # branch deliberately does not fire for it.
+        is_sign = str(project_type).strip().lower() == PROJECT_TYPE_SIGN_OCR
+        if is_sign and mode != PREPROCESS_MODE_MANUAL_ROI and label_name:
+            seqs = normalize_sign_sequences(sign_sequences)
+            order_src = reading_order
+            if not seqs or order_src is None:
+                saved_cfg: Dict[str, Any] = {}
+                if dataset_root is not None:
+                    try:
+                        saved_cfg = self._project_train_cfg(Path(dataset_root))
+                    except Exception:
+                        saved_cfg = {}
+                if not seqs:
+                    seqs = normalize_sign_sequences(
+                        saved_cfg.get("sign_sequences")
+                        or saved_cfg.get("sign_sequence")
+                    )
+                if order_src is None:
+                    order_src = saved_cfg.get("reading_order")
+            order = str(order_src or "ltr").strip().lower()
+            if order not in ("ltr", "rtl"):
+                order = "ltr"
+            target = str(label_name).strip().upper()[:1]
+            if seqs and target:
+                reading = preprocess_sign_sequence(
+                    gray,
+                    sign_sequence=seqs[0],
+                    reading_order=order,
+                    out_size=int(out_size),
+                    polarity=polarity,
+                    apply_segmentation=True,
+                    convention=convention,
+                    thresh=pinned,
+                    dark_thr=floor,
+                    # Isolate the character band first: a whole board
+                    # capture includes the plastic frame / desk clutter,
+                    # which would otherwise turn the projection into one
+                    # wide run and prevent this branch from firing.
+                    find_roi=True,
+                )
+                slots = list(reading.get("slots") or [])
+                raw_runs = (
+                    len(segment_glyph_boxes(reading.get("ink")))
+                    if reading.get("ink") is not None else 0
+                )
+                nonempty = sum(
+                    1 for s in slots if s.get("ok") and not s.get("empty")
+                )
+                if (
+                    reading.get("ok")
+                    and str(reading.get("roi_method") or "") == "interior_ink"
+                    and raw_runs >= 2
+                    and len(slots) == len(normalize_sign_sequence(seqs[0]))
+                    and nonempty >= 2
+                ):
+                    candidates: List[int] = []
+                    for plate in seqs:
+                        for s_idx, ch in enumerate(plate):
+                            if ch == target and s_idx < len(slots) and s_idx not in candidates:
+                                candidates.append(s_idx)
+                    chosen = next(
+                        (
+                            idx for idx in candidates
+                            if slots[idx].get("ok") and not slots[idx].get("empty")
+                        ),
+                        None,
+                    )
+                    if chosen is not None:
+                        slot = slots[chosen]
+                        glyph = np.asarray(slot.get("glyph"), dtype=np.uint8)
+                        glyph_png = _to_png_bytes(Image.fromarray(glyph, mode="L"))
+                        if not return_crop:
+                            return glyph_png
+                        display = np.asarray(slot.get("display", glyph), dtype=np.uint8)
+                        display_png = _to_png_bytes(Image.fromarray(display, mode="L"))
+                        slot_box = slot.get("box")
+                        crop_norm = [0.0, 0.0, 1.0, 1.0]
+                        cp_png = glyph_png
+                        if slot_box is not None:
+                            bx1, by1, bx2, by2 = (int(v) for v in slot_box)
+                            bx1 = max(0, min(full_w - 1, bx1))
+                            by1 = max(0, min(full_h - 1, by1))
+                            bx2 = max(bx1 + 1, min(full_w, bx2))
+                            by2 = max(by1 + 1, min(full_h, by2))
+                            crop = np.ascontiguousarray(gray[by1:by2, bx1:bx2])
+                            if crop.size:
+                                cp_png = _to_png_bytes(Image.fromarray(crop, mode="L"))
+                            if full_w and full_h:
+                                crop_norm = [
+                                    bx1 / full_w, by1 / full_h,
+                                    bx2 / full_w, by2 / full_h,
+                                ]
+                        ink_box = slot.get("ink_box") or slot_box
+                        return {
+                            "png": glyph_png,
+                            "crop": crop_norm,
+                            "processed_png": display_png,
+                            "display_png": display_png,
+                            "crop_png": cp_png,
+                            "auto_roi": (
+                                [int(v) for v in ink_box]
+                                if ink_box is not None else None
+                            ),
+                            "sign_pct": float(reading.get("sign_pct") or 0.0),
+                        }
 
         result = preprocess_glyph(
             gray,
@@ -4428,28 +5082,108 @@ class RecordController:
             convention=convention,
             thresh=pinned,
             dark_thr=floor,
+            strip_specks=True,
         )
         glyph = np.asarray(result["glyph"], dtype=np.uint8)
         png_bytes = _to_png_bytes(Image.fromarray(glyph, mode="L"))
+
+        # Display variant of the SAME canonical glyph: the cleaned ink mask
+        # normalised exactly like the model crop (same convention, same
+        # narrow-stroke widening) and inverted to black-on-white.  This is
+        # what the Edit modal shows, so the user sees the 28x28 shape the
+        # model trains on instead of a larger pre-centring crop.
+        display_png = png_bytes
+        _box = result.get("box")
+        _ink = result.get("ink")
+        if _box is not None and _ink is not None:
+            ix1, iy1, ix2, iy2 = (int(v) for v in _box)
+            ink_bool = np.asarray(_ink, dtype=bool)[iy1:iy2, ix1:ix2]
+            if ink_bool.size:
+                radius = _narrow_stroke_radius(
+                    ink_bool, int(ix2) - int(ix1), int(iy2) - int(iy1),
+                    int(out_size), convention,
+                )
+                mask = (ink_bool.astype(np.uint8) * 255)
+                display_mask = normalise_glyph(
+                    mask, out_size=int(out_size), convention=convention,
+                    narrow_radius=int(radius), polarity=INK_BRIGHT,
+                )
+                display = (255 - display_mask).astype(np.uint8)
+                display_png = _to_png_bytes(Image.fromarray(display, mode="L"))
 
         if not return_crop:
             return png_bytes
 
         # Previews mirror the image branch's contract so the same UI code
         # renders both projects:
-        #   processed_png -> the decision mask (what the threshold chose)
+        #   processed_png -> the decision mask, cropped to the ROI and shown
+        #                    BLACK INK ON PURE WHITE (not the raw 0/255 mask
+        #                    the model consumes)
         #   crop_png      -> the pre-decision region (what the camera saw)
+        box = result.get("box")
+        ox, oy = roi_origin
         ink = result.get("ink")
-        if ink is not None:
-            mp_png = _to_png_bytes(Image.fromarray((np.asarray(ink).astype(np.uint8) * 255), mode="L"))
+        ink_arr = np.asarray(ink, dtype=bool) if ink is not None else None
+        # ── Auto ROI for the Edit worktable ───────────────────────────────
+        # The Preview card runs the device's own interior-band search inside
+        # preprocess_sign_sequence(find_roi=True); the per-sample editor has
+        # only one glyph, so it uses the generic interior-band search:
+        # threshold window -> component/border cleanup -> tight padded box.
+        # This is the box the SPA draws in green, and the processed pane is
+        # re-cut from it so Dark/Lum drags update BOTH live.
+        auto_roi = None
+        if mode != PREPROCESS_MODE_MANUAL_ROI:
+            auto_roi = find_interior_ink_roi(
+                gray, thresh=pinned, dark_thr=floor, polarity=polarity,
+            )
+        if (
+            isinstance(auto_roi, dict)
+            and str(auto_roi.get("method") or "") == "interior_ink"
+            and ink_arr is not None
+        ):
+            ax1, ay1, ax2, ay2 = (int(v) for v in auto_roi["box"])
+            auto_ink = auto_roi.get("ink")
+            if auto_ink is not None and np.asarray(auto_ink).shape == ink_arr.shape:
+                view = np.asarray(auto_ink, dtype=bool)[ay1:ay2, ax1:ax2]
+            else:
+                view = ink_arr[ay1:ay2, ax1:ax2]
+            if view.size:
+                display = np.where(view, 0, 255).astype(np.uint8)
+                mp_png = _to_png_bytes(Image.fromarray(display, mode="L"))
+            else:
+                mp_png = png_bytes
+            cp_crop = np.ascontiguousarray(gray[ay1:ay2, ax1:ax2])
+            if cp_crop.size:
+                cp_png = _to_png_bytes(Image.fromarray(cp_crop, mode="L"))
+            else:
+                cp_png = png_bytes
+            crop_norm = [
+                (ax1 + ox) / full_w if full_w else 0.0,
+                (ay1 + oy) / full_h if full_h else 0.0,
+                (ax2 + ox) / full_w if full_w else 1.0,
+                (ay2 + oy) / full_h if full_h else 1.0,
+            ]
+            return {"png": png_bytes, "crop": crop_norm,
+                    "processed_png": mp_png, "display_png": display_png,
+                    "crop_png": cp_png,
+                    "auto_roi": [ax1, ay1, ax2, ay2],
+                    "sign_pct": float(auto_roi.get("sign_pct") or 0.0)}
+        # Fallback: the segmented glyph box (or the whole manual ROI).
+        if ink_arr is not None:
+            view = ink_arr
+            if mode != PREPROCESS_MODE_MANUAL_ROI and box is not None:
+                ix1, iy1, ix2, iy2 = (int(v) for v in box)
+                cropped = ink_arr[iy1:iy2, ix1:ix2]
+                if cropped.size:
+                    view = cropped
+            display = np.where(view, 0, 255).astype(np.uint8)
+            mp_png = _to_png_bytes(Image.fromarray(display, mode="L"))
         else:
             mp_png = png_bytes
         # result["box"] is in the coordinates of the frame preprocess_glyph
         # was given, which is the ROI crop in manual mode.  Report it in
         # FULL-frame coordinates so the UI's rectangle lands on the pixels it
         # actually describes.
-        ox, oy = roi_origin
-        box = result.get("box")
         crop_norm = [0.0, 0.0, 1.0, 1.0]
         cp_png = png_bytes
         if box is not None:
@@ -4464,7 +5198,9 @@ class RecordController:
                     (x2 + ox) / full_w,
                     (y2 + oy) / full_h,
                 ]
-        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png, "crop_png": cp_png}
+        return {"png": png_bytes, "crop": crop_norm, "processed_png": mp_png,
+                "display_png": display_png, "crop_png": cp_png,
+                "auto_roi": None, "sign_pct": 0.0}
 
     def _rebuild_processed_cache(
         self,
@@ -4491,12 +5227,13 @@ class RecordController:
                 continue
             raw_cfg = class_preprocess.get(class_name, {"mode": global_preprocess_mode})
             config = dict(raw_cfg) if isinstance(raw_cfg, dict) else {"mode": global_preprocess_mode}
-            class_sample_map = sample_preprocess.get(class_name, {})
             processed_count = 0
             for src in _list_class_image_files(src_dir):
                 try:
                     png = src.read_bytes()
-                    sample_cfg = class_sample_map.get(src.name)
+                    sample_cfg = self._sample_preprocess_lookup(
+                        sample_preprocess, class_name, src.name
+                    )
                     out_png = self._preprocess_image_png(
                         png,
                         label_name=class_name,
@@ -4505,6 +5242,7 @@ class RecordController:
                         sample_config=sample_cfg,
                         out_size=int(out_size),
                         project_type=project_type,
+                        dataset_root=dataset_root,
                     )
                     (dst_dir / f"{src.stem}.png").write_bytes(out_png)
                     processed_count += 1
@@ -4537,6 +5275,8 @@ class RecordController:
         filename: str,
         class_config: Any,
         sample_config: Any = None,
+        sign_sequences: Any = None,
+        reading_order: Any = None,
     ) -> Dict[str, Any]:
         with self._lock:
             cfg = self._configs.get(session_id)
@@ -4554,11 +5294,25 @@ class RecordController:
             return_crop=True,
             out_size=int(cfg.img_size),
             project_type=str(cfg.project_type),
+            dataset_root=cfg.dataset_root,
+            sign_sequences=sign_sequences,
+            reading_order=reading_order,
+        )
+        # The Edit modal's Processed Preview must be the EXACT canonical
+        # 28x28 glyph the model trains on (corner specks already stripped),
+        # not a larger pre-centring crop.  Image projects keep their
+        # established processed view.
+        processed_bytes = (
+            result.get("display_png") or result["png"]
+            if is_glyph_project(str(cfg.project_type))
+            else result.get("processed_png", result["png"])
         )
         return {
             "image_b64": base64.b64encode(result["png"]).decode("ascii"),
             "crop": result.get("crop"),
-            "processed_image_b64": base64.b64encode(result.get("processed_png", result["png"])).decode("ascii"),
+            "auto_roi": result.get("auto_roi"),
+            "sign_pct": float(result.get("sign_pct") or 0.0),
+            "processed_image_b64": base64.b64encode(processed_bytes).decode("ascii"),
         }
 
     def _project_state_payload(self, dataset_root: Path, project_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -4621,7 +5375,7 @@ class RecordController:
             # The Preview pane's gates.  They are not training parameters, but
             # they ARE deployment parameters: buildExportRuntimeConfig() stamps
             # them into model_settings.h as the device's OOD thresholds.  A
-            # project that reopened them at 0.3/70/0.60/0.70 after the user
+            # project that reopened them at 0.3/70/0.40/0.85 after the user
             # tuned them would re-export a device with different gates than
             # the one that is running.  Echoed verbatim — it is a flat block of
             # UI state that no normaliser owns.
@@ -4709,11 +5463,34 @@ class RecordController:
         interpreter.allocate_tensors()
         input_details = interpreter.get_input_details()[0]
         output_details = interpreter.get_output_details()[0]
+        has_background_class = any(
+            str(x).strip().lower() == "_background" for x in labels
+        )
+        # The setting lives in the RUN meta, not the live train_cfg: toggling
+        # it after training must not reinterpret the model that was actually
+        # trained.  Legacy runs (no field) that carry a `_background` class
+        # used it as the only rejector — the old hard-coded device behaviour.
+        bg_replace_raw = meta.get("sign_background_replace_ood") if isinstance(meta, dict) else None
+        sign_background_replace_ood = (
+            bool(bg_replace_raw)
+            if bg_replace_raw is not None
+            else bool(has_background_class)
+        )
         cur = {
             "tflite_path": str(tflite_path),
             "tflite_mtime": mtime,
             "model_source": str(model_source),
             "labels": list(labels),
+            "has_background_class": bool(has_background_class),
+            "sign_background_replace_ood": bool(sign_background_replace_ood),
+            "sign_sequence": (
+                normalize_sign_sequence(meta.get("sign_sequence"))
+                if isinstance(meta, dict) and meta.get("sign_sequence") else None
+            ),
+            "sign_sequences": (
+                normalize_sign_sequences(meta.get("sign_sequences"))
+                if isinstance(meta, dict) else []
+            ),
             "preprocess_mode": str(meta.get("preprocess_mode") or PREPROCESS_MODE_AUTO_BY_LABEL) if isinstance(meta, dict) else PREPROCESS_MODE_AUTO_BY_LABEL,
             "crop_mode": str(meta.get("crop_mode") or CROP_MODE_CENTER) if isinstance(meta, dict) else CROP_MODE_CENTER,
             "manual_roi": normalize_manual_roi(meta.get("manual_roi")) if isinstance(meta, dict) else None,
@@ -4966,8 +5743,8 @@ class RecordController:
         # out" the votes are) works reliably on small CNNs.  If the net is
         # confident (high prob) AND the decision is sharp (low entropy) → we
         # trust it; otherwise suppress to "No Sign".
-        MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.60)
-        ENTROPY_RATIO_MAX = float(ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.70)  # 1.0 = uniform / perfectly uncertain
+        MAX_PROB_MIN = float(ood_max_prob_min if ood_max_prob_min is not None else 0.40)
+        ENTROPY_RATIO_MAX = float(ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.85)  # 1.0 = uniform / perfectly uncertain
         SIGN_PCT_MIN = max(0.0, min(100.0, SIGN_PCT_MIN))
         SIGN_PCT_MAX = max(0.0, min(100.0, SIGN_PCT_MAX))
         MAX_PROB_MIN = max(0.0, min(1.0, MAX_PROB_MIN))
@@ -5082,17 +5859,24 @@ class RecordController:
             qscale = float(q[0] or 0.0)
             qzp = int(q[1] or 0)
         dtype = input_details.get("dtype")
-        batch = np.expand_dims(arr, axis=0)
-        if dtype is not None and dtype != np.float32 and qscale > 0:
-            qarr = np.round(batch / qscale + qzp)
-            if dtype == np.int8:
-                x = np.clip(qarr, -128, 127).astype(np.int8)
-            elif dtype == np.uint8:
-                x = np.clip(qarr, 0, 255).astype(np.uint8)
-            else:
-                x = qarr.astype(dtype)
+        if arr.dtype == np.int8:
+            # Caller already produced the exact device tensor: the sign
+            # path feeds `(int)pixel - 128`, byte-for-byte what
+            # TFLite_Sign.ino writes into input->data.int8.  Do not run it
+            # through float32 division/rounding again.
+            x = np.expand_dims(arr, axis=0)
         else:
-            x = batch.astype(np.float32)
+            batch = np.expand_dims(arr, axis=0)
+            if dtype is not None and dtype != np.float32 and qscale > 0:
+                qarr = np.round(batch / qscale + qzp)
+                if dtype == np.int8:
+                    x = np.clip(qarr, -128, 127).astype(np.int8)
+                elif dtype == np.uint8:
+                    x = np.clip(qarr, 0, 255).astype(np.uint8)
+                else:
+                    x = qarr.astype(dtype)
+            else:
+                x = batch.astype(np.float32)
         with self._preview_model_lock(session_id):
             interpreter.set_tensor(int(input_details.get("index")), x)
             interpreter.invoke()
@@ -5153,8 +5937,10 @@ class RecordController:
         chars: Any = None,
         sign_sequence: Any = None,
         reading_order: Any = None,
-    ) -> Tuple[List[str], str]:
-        """Resolve the target sequence and direction for a synth request.
+        sign_sequences: Any = None,
+        plate_index: Any = None,
+    ) -> Tuple[List[str], str, List[str], int]:
+        """Resolve (plate, direction, whitelist, plate index) for a synth request.
 
         The SPA's editor state is the authority when it sends one; a
         background caller (auto-fill, post-training) has no request payload,
@@ -5165,20 +5951,30 @@ class RecordController:
         """
         from ocr_dataset import TEMPLATE_SIGN_CHARS
 
-        def _has_target(value: Any) -> bool:
-            return any(c != SIGN_SEQUENCE_PAD for c in normalize_sign_sequence(value))
-
         with self._lock:
             cfg = self._configs.get(session_id)
         if cfg is None:
             raise RuntimeError("missing config")
         saved = self._project_train_cfg(Path(cfg.dataset_root))
-        if chars is not None and _has_target(chars):
-            seq = normalize_sign_sequence(chars)
-        elif sign_sequence is not None and _has_target(sign_sequence):
-            seq = normalize_sign_sequence(sign_sequence)
-        else:
-            seq = normalize_sign_sequence(saved.get("sign_sequence"))
+        seqs = normalize_sign_sequences(sign_sequences)
+        if not seqs:
+            seqs = normalize_sign_sequences(sign_sequence)
+        if not seqs and chars is not None:
+            seqs = normalize_sign_sequences(chars)
+        if not seqs:
+            seqs = normalize_sign_sequences(saved.get("sign_sequences"))
+        if not seqs:
+            seqs = normalize_sign_sequences(saved.get("sign_sequence"))
+        if not seqs:
+            raise ValueError(
+                "set the project's 3-character target sign before synthesizing a preview"
+            )
+        try:
+            idx = int(plate_index) if plate_index is not None else 0
+        except (TypeError, ValueError):
+            idx = 0
+        idx = max(0, min(len(seqs) - 1, idx))
+        seq = normalize_sign_sequence(seqs[idx])
         bad = [c for c in seq if len(str(c)) != 1 or str(c).upper() not in TEMPLATE_SIGN_CHARS]
         if bad:
             raise ValueError(
@@ -5188,7 +5984,7 @@ class RecordController:
         order = str(reading_order or saved.get("reading_order") or "ltr").strip().lower()
         if order not in ("ltr", "rtl"):
             order = "ltr"
-        return seq, order
+        return seq, order, list(seqs), idx
 
     def _synthesize_sign_preview_png(
         self,
@@ -5199,6 +5995,8 @@ class RecordController:
         reading_order: Any = None,
         seed: Optional[int] = None,
         alt_char: Any = None,
+        sign_sequences: Any = None,
+        plate_index: Any = None,
     ) -> Dict[str, Any]:
         """Draw a composite 3-character sign and make it the active preview.
 
@@ -5227,11 +6025,13 @@ class RecordController:
             raise RuntimeError("missing config")
         if not self._is_sign_ocr_session(session_id):
             raise ValueError("sign synthesis is only available in a sign_ocr project")
-        seq, order = self._sign_preview_sequence(
+        seq, order, seqs, plate_idx = self._sign_preview_sequence(
             session_id,
             chars=chars,
             sign_sequence=sign_sequence,
             reading_order=reading_order,
+            sign_sequences=sign_sequences,
+            plate_index=plate_index,
         )
         kind = str(variant or "match").strip().lower()
         if kind not in self.SIGN_SYNTH_VARIANTS:
@@ -5279,6 +6079,8 @@ class RecordController:
             "variant": kind,
             "chars": physical,
             "sign_sequence": list(seq),
+            "sign_sequences": list(seqs),
+            "plate_index": int(plate_idx),
             "reading_order": order,
         }
 
@@ -5287,6 +6089,7 @@ class RecordController:
         session_id: str,
         *,
         sign_sequence: Any = None,
+        sign_sequences: Any = None,
         reading_order: Any = None,
         replace_synthetic: bool = False,
     ) -> bool:
@@ -5310,6 +6113,7 @@ class RecordController:
                 session_id,
                 variant="match",
                 sign_sequence=sign_sequence,
+                sign_sequences=sign_sequences,
                 reading_order=reading_order,
             )
             return True
@@ -5321,10 +6125,16 @@ class RecordController:
         session_id: str,
         png: bytes,
         sign_sequence: Any = None,
+        sign_sequences: Any = None,
         reading_order: Any = None,
         bg_dark_thresh: Optional[int] = None,
         bg_lum_thresh: Optional[int] = None,
         match_min_prob: Optional[float] = None,
+        ood_sign_pct_min: Optional[float] = None,
+        ood_sign_pct_max: Optional[float] = None,
+        ood_max_prob_min: Optional[float] = None,
+        ood_entropy_ratio_max: Optional[float] = None,
+        preprocess_frame_side: Optional[int] = None,
         source: str = "",
     ) -> Dict[str, Any]:
         """Read a whole road sign: locate, split, one inference per glyph.
@@ -5339,7 +6149,6 @@ class RecordController:
         each must clear `match_min_prob`.  A sign reader that says YES when
         two of three characters matched is worse than one that says no.
         """
-        seq = normalize_sign_sequence(sign_sequence)
         order = str(reading_order or "").strip().lower()
         if order not in ("ltr", "rtl"):
             order = "ltr"
@@ -5350,12 +6159,65 @@ class RecordController:
 
         model = self._preview_load_model(session_id=session_id)
         labels: List[str] = list(model.get("labels") or [])
+        # Allowed plates: the live editor list wins, then the run meta (so a
+        # reopened project uses the whitelist it was trained against), then
+        # the legacy single target.  seq[0] is the primary plate and only
+        # supplies slot COUNT / labels; the actual matching below checks every
+        # plate in `seqs`.
+        seqs = normalize_sign_sequences(sign_sequences)
+        if not seqs:
+            seqs = normalize_sign_sequences(sign_sequence)
+        if not seqs:
+            seqs = normalize_sign_sequences(model.get("sign_sequences"))
+        if not seqs:
+            seqs = normalize_sign_sequences(model.get("sign_sequence"))
+        seq = normalize_sign_sequence(seqs[0]) if seqs else normalize_sign_sequence(sign_sequence)
+        has_background_class = any(
+            str(x).strip().lower() == BACKGROUND_CLASS_NAME.lower()
+            for x in labels
+        )
+        # The run's own rejection policy.  Layer 1 (sign_pct) is ALWAYS
+        # disarmed on this 3-slot path (diagnostic only), matching
+        # TFLite_Sign.ino.  When a `_background` class is the only rejector,
+        # Layers 2/3 are bypassed too (the device does the same); otherwise
+        # they compose with the per-slot match rule and the runtime floor.
+        # A model dict with no explicit flag predates the toggle: having a
+        # background class is what old runs used, so preserve that rather
+        # than silently changing their verdicts.
+        raw_bg_replace = model.get("sign_background_replace_ood")
+        background_is_only_rejector = (
+            bool(raw_bg_replace)
+            if raw_bg_replace is not None
+            else bool(has_background_class)
+        ) and has_background_class
         shape_raw = model["input_details"].get("shape")
         shape = tuple(int(x) for x in (shape_raw if shape_raw is not None else []))
         if len(shape) != 4:
             raise RuntimeError("unsupported input shape")
         _, h, w, c = shape
         channels = int(c) if int(c) > 0 else 1
+
+        # ONE probability threshold.  OOD MAX PROB (the Input Settings field)
+        # is also the per-slot match floor; there is no separate hidden
+        # sign_match_min_prob.  `match_min_prob` survives only as a fallback
+        # for callers that predate the unified input (tests/automations).
+        # No >= 0.40 clamp: a user-set 0.25 really means 25%.
+        raw_min_prob = (
+            ood_max_prob_min if ood_max_prob_min is not None
+            else (match_min_prob if match_min_prob is not None else 0.40)
+        )
+        try:
+            min_prob = float(raw_min_prob)
+        except (TypeError, ValueError):
+            min_prob = 0.40
+        MAX_PROB_MIN = max(0.0, min(1.0, min_prob))
+        SLOT_MIN = MAX_PROB_MIN
+        # ood_sign_pct_min/max stay in the signature for API compatibility
+        # but Layer 1 is DISARMED on the 3-slot path (see the slot loop).
+        ENTROPY_RATIO_MAX = float(
+            ood_entropy_ratio_max if ood_entropy_ratio_max is not None else 0.85
+        )
+        ENTROPY_RATIO_MAX = max(0.0, min(1.0, ENTROPY_RATIO_MAX))
 
         # The luminance window.  A caller-supplied value (the live preview's
         # Dark/Lum sliders) wins; otherwise the sign's own stored record;
@@ -5374,35 +6236,87 @@ class RecordController:
         bg_lum = int(config.get("bg_lum_thresh", 100) or 100)
         thresholds_adjusted = (bg_dark != 0) or (bg_lum != 100)
         pinned = max(1, min(254, bg_lum - 1)) if thresholds_adjusted else None
-        floor = max(0, min(255, bg_dark + 1)) if thresholds_adjusted else 0
+        # Dark=0 means "no lower bound": nudging it to 1 would drop pure
+        # black glyph pixels and fragment a thin '1'.  Keep 0 as the
+        # inclusive lower edge of the user's window.
+        floor = (0 if bg_dark <= 0 else min(255, bg_dark + 1)) if thresholds_adjusted else 0
 
         src_img = Image.open(_bytes_io(png)).convert("L")
         gray = np.asarray(src_img, dtype=np.uint8)
+        # Capture-side independence: a 160x160 (or larger) square device
+        # frame is box-averaged down to the preprocessing side with the
+        # SAME integer function the MCU uses (FrameResizeBoxAverageGray),
+        # before any ROI/threshold stage.  96x96 and non-square uploads are
+        # left alone.
+        if (
+            preprocess_frame_side is not None
+            and gray.ndim == 2
+            and gray.shape[0] == gray.shape[1]
+            and int(gray.shape[0]) > int(preprocess_frame_side)
+        ):
+            gray = _resize_square_box_average_u8(gray, int(preprocess_frame_side))
         full_h, full_w = gray.shape[:2]
-        roi_px = (
-            manual_roi_to_pixels(full_h, full_w, model.get("manual_roi"))
-            if str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI
-            else None
-        )
-        origin_x, origin_y = 0, 0
-        if roi_px is not None:
-            rx1, ry1, rx2, ry2 = roi_px
-            sub = gray[ry1:ry2, rx1:rx2]
-            if sub.size:
-                gray = np.ascontiguousarray(sub)
-                origin_x, origin_y = rx1, ry1
 
-        reading = preprocess_sign_sequence(
-            gray,
-            sign_sequence=seq,
-            reading_order=order,
-            out_size=int(w),
-            polarity=polarity,
-            apply_segmentation=True,
-            convention=convention,
-            thresh=pinned,
-            dark_thr=floor,
-        )
+        # ── Stage 1+2: the SAME call the device makes ─────────────────────
+        # The MCU passes its full preprocessed frame (160→96 box-averaged)
+        # straight into preprocess_sign_sequence_c(), which performs the
+        # interior character-band ROI search and the split.  Do NOT
+        # pre-crop with the host-only find_sign_roi: a different crop
+        # changes the split boxes even when the glyph code is identical.
+        # Manual ROI is a desktop-only override: crop first, then run the
+        # same splitter with find_roi off.
+        manual_roi = None
+        if str(config.get("mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
+            manual_roi = config.get("manual_roi")
+        if manual_roi is None and str(model.get("preprocess_mode") or "") == PREPROCESS_MODE_MANUAL_ROI:
+            manual_roi = model.get("manual_roi")
+
+        def _run_split(src: np.ndarray, find_roi: bool) -> Dict[str, Any]:
+            return preprocess_sign_sequence(
+                src,
+                sign_sequence=seq,
+                reading_order=order,
+                out_size=int(w),
+                polarity=polarity,
+                apply_segmentation=True,
+                convention=convention,
+                thresh=pinned,
+                dark_thr=floor,
+                clean_border=False,
+                find_roi=find_roi,
+            )
+
+        reading: Optional[Dict[str, Any]] = None
+        roi_method = "input"
+        origin_x = origin_y = 0
+        if manual_roi is not None:
+            roi_px = manual_roi_to_pixels(full_h, full_w, manual_roi)
+            if roi_px is not None:
+                mx1, my1, mx2, my2 = (int(v) for v in roi_px)
+                mx1 = max(0, min(full_w - 1, mx1))
+                my1 = max(0, min(full_h - 1, my1))
+                mx2 = max(mx1 + 1, min(full_w, mx2))
+                my2 = max(my1 + 1, min(full_h, my2))
+                manual_gray = np.ascontiguousarray(gray[my1:my2, mx1:mx2])
+                if manual_gray.size:
+                    # The manual box only PRE-crops the scene; the same
+                    # interior-band search and split the device runs then
+                    # operate inside it.
+                    reading = _run_split(manual_gray, find_roi=True)
+                    origin_x, origin_y = mx1, my1
+                    rx1, ry1, rx2, ry2 = mx1, my1, mx2, my2
+                    roi_method = "manual"
+        if reading is None:
+            reading = _run_split(gray, find_roi=True)
+            roi_raw = reading.get("roi_box") or [0, 0, full_w, full_h]
+            rx1, ry1, rx2, ry2 = (int(v) for v in roi_raw)
+            rx1 = max(0, min(full_w - 1, rx1))
+            ry1 = max(0, min(full_h - 1, ry1))
+            rx2 = max(rx1 + 1, min(full_w, rx2))
+            ry2 = max(ry1 + 1, min(full_h, ry2))
+            roi_method = str(reading.get("roi_method") or "input")
+        roi_gray = np.ascontiguousarray(gray[ry1:ry2, rx1:rx2])
+        sign_pct = float(reading.get("sign_pct") or 0.0)
 
         def _to_full_box(box: Any) -> Any:
             """Slot/sign box from the ROI-local frame back to frame pixels."""
@@ -5415,10 +6329,10 @@ class RecordController:
                 int(box[3]) + origin_y,
             ]
 
-        SLOT_MIN = max(0.0, min(1.0, float(match_min_prob if match_min_prob is not None else 0.60)))
         slots: List[Dict[str, Any]] = []
         slot_pngs: List[bytes] = []
         all_match = bool(labels)
+        ood_reasons: List[str] = []
         for i, slot in enumerate(reading.get("slots") or []):
             glyph = np.asarray(slot.get("glyph"), dtype=np.uint8)
             target = str(slot.get("char") or "")
@@ -5426,7 +6340,14 @@ class RecordController:
             prob = 0.0
             raw_out = None
             if labels and glyph.size:
-                arr = (glyph.astype(np.float32) / 255.0).reshape((int(h), int(w), channels))
+                # Device-exact tensor: `(int)pixel - 128`, no float
+                # dequantise/requantise round trip.  (A non-int8 model
+                # falls back to the float path.)
+                if model["input_details"].get("dtype") == np.int8:
+                    arr = (glyph.astype(np.int16) - 128).astype(np.int8)
+                else:
+                    arr = glyph.astype(np.float32) / 255.0
+                arr = arr.reshape((int(h), int(w), channels))
                 try:
                     _scores, raw_out = self._invoke_glyph_tensor(model, session_id, arr)
                 except Exception:
@@ -5443,51 +6364,153 @@ class RecordController:
                 if 0 <= top_i < len(labels):
                     label = str(labels[top_i])
             is_background = label.startswith("_") or label == BACKGROUND_CLASS_NAME
-            matched = bool(
+            slot_max_prob = 0.0
+            slot_entropy_ratio = 1.0
+            slot_ood = False
+            slot_entropy_only = False
+            slot_ood_reason = ""
+            if raw_out is not None and raw_out.size:
+                slot_max_prob, slot_entropy_ratio = _raw_ood_metrics(raw_out)
+                if not background_is_only_rejector:
+                    # Layers 2/3 only: Layer 1 (sign_pct) is disarmed on the
+                    # 3-slot path, exactly like ood_is_in_distribution() in
+                    # TFLite_Sign.ino.  The slot's ink check already rejects
+                    # an empty crop; a frame-level percentage is too coarse
+                    # and previously killed every slot when `set ood` set a
+                    # window.
+                    if slot_max_prob < MAX_PROB_MIN:
+                        slot_ood = True
+                        slot_ood_reason = (
+                            f"max_prob={slot_max_prob:.3f} < {MAX_PROB_MIN:.2f}"
+                        )
+                    elif slot_entropy_ratio > ENTROPY_RATIO_MAX:
+                        slot_ood = True
+                        slot_entropy_only = True
+                        slot_ood_reason = (
+                            f"entropy_ratio={slot_entropy_ratio:.3f} > "
+                            f"{ENTROPY_RATIO_MAX:.2f}"
+                        )
+            # A slot is READABLE independent of which plate we compare it to:
+            # ink, a real (non-background) label, the confidence floor, and
+            # the OOD gates.  The entropy gate alone is NOT decisive: the
+            # plate loop below accepts an entropy-flagged slot when its top
+            # class is that plate's target character and prob >= SLOT_MIN.
+            # A correct 3-way reading used to be reported as NO solely
+            # because the model's class distribution can push entropy above
+            # 0.70 even when every top class is right.
+            accepted = bool(
                 labels
                 and not is_background
                 and label
-                and label.upper() == target.upper()
                 and prob >= SLOT_MIN
                 and bool(slot.get("ok"))
+                and (not slot_ood or slot_entropy_only)
             )
-            all_match = all_match and matched
+            full_box = _to_full_box(slot.get("box"))
+            full_box_norm = None
+            if full_box is not None and full_w > 0 and full_h > 0:
+                full_box_norm = [
+                    float(full_box[0]) / float(full_w),
+                    float(full_box[1]) / float(full_h),
+                    float(full_box[2]) / float(full_w),
+                    float(full_box[3]) / float(full_h),
+                ]
             slots.append(
                 {
                     "index": int(i),
-                    "char": target,
+                    "char": str(target),
                     "label": label,
                     "prob": float(prob),
-                    "match": bool(matched),
+                    "accepted": bool(accepted),
+                    "match": False,
                     "background": bool(is_background),
+                    "ood": bool(slot_ood),
+                    "ood_reason": str(slot_ood_reason),
+                    "_entropy_only": bool(slot_entropy_only),
+                    "max_prob": float(slot_max_prob),
+                    "entropy_ratio": float(slot_entropy_ratio),
                     "empty": bool(slot.get("empty", True)),
-                    "box": _to_full_box(slot.get("box")),
-                    "box_norm": slot.get("box_norm"),
+                    "box": full_box,
+                    "box_norm": full_box_norm,
+                    "roi_box_norm": slot.get("box_norm"),
                 }
             )
-            slot_pngs.append(_to_png_bytes(Image.fromarray(glyph, mode="L")))
+            display = np.asarray(slot.get("display", glyph), dtype=np.uint8)
+            slot_pngs.append(_to_png_bytes(Image.fromarray(display, mode="L")))
 
-        if not labels:
-            # No trained model yet: the reading is still worth showing (the
-            # split is useful on its own), but nothing can match.
-            all_match = False
+        # ── compare the three readings against EVERY allowed plate ───────
+        # An exact 3-for-3 plate wins immediately.  If none is exact, keep the
+        # closest one (most slots hit) for the WANT headers so a NO is still
+        # explainable against the plate the user was testing.
+        all_match = False
+        chosen_index = -1
+        chosen_hits = [False] * len(slots)
+        if labels and seqs and len(slots) >= 3:
+            best_score = -1
+            for pi, plate in enumerate(seqs):
+                hits = [
+                    bool(slots[s].get("accepted"))
+                    and str(slots[s].get("label") or "").upper() == plate[s].upper()
+                    for s in range(3)
+                ]
+                score = sum(1 for h in hits if h)
+                if score == 3:
+                    chosen_index = pi
+                    chosen_hits = hits
+                    all_match = True
+                    break
+                if score > best_score:
+                    best_score = score
+                    chosen_index = pi
+                    chosen_hits = hits
+        if chosen_index >= 0:
+            chosen_plate = list(seqs[chosen_index])
+        else:
+            chosen_plate = list(seq) if len(seq) >= 3 else normalize_sign_sequence(seq)
+        for s_idx, slot_out in enumerate(slots):
+            slot_out["char"] = (
+                str(chosen_plate[s_idx]) if s_idx < len(chosen_plate)
+                else SIGN_SEQUENCE_PAD
+            )
+            slot_out["match"] = bool(
+                all_match or (s_idx < len(chosen_hits) and chosen_hits[s_idx])
+            )
 
-        match_text = SIGN_MATCH_TEXT if all_match else SIGN_NOMATCH_TEXT
+        # Rebuild the OOD failure list from the FINAL per-slot verdict.  An
+        # entropy-only flag that was overridden by a correct target match is
+        # not a failure; reporting it on a YES was the contradictory banner
+        # ("each at 60% or better ... OOD: slot 2: entropy_ratio").
+        ood_reasons = []
+        for s_idx, slot_out in enumerate(slots):
+            if slot_out.get("match") and slot_out.get("_entropy_only"):
+                slot_out["ood"] = False
+                slot_out["ood_reason"] = ""
+            slot_out.pop("_entropy_only", None)
+            if slot_out.get("ood") and not slot_out.get("match"):
+                reason = str(slot_out.get("ood_reason") or "")
+                ood_reasons.append(f"slot {s_idx + 1}: {reason}")
+
+        if all_match:
+            plate_text = "".join(chosen_plate)
+            if len(seqs) > 1:
+                match_text = (
+                    f"{SIGN_MATCH_TEXT} · Plate #{chosen_index + 1} "
+                    f"({plate_text})"
+                )
+            else:
+                match_text = f"{SIGN_MATCH_TEXT} ({plate_text})"
+        else:
+            match_text = SIGN_NOMATCH_TEXT
         # Per-slot readings doubled as the bar labels: the preview's output
         # pane renders a distribution for every other source, and for a sign
         # the interesting distribution IS the three slots.
         slot_labels = [f"{s['char']} → {s['label'] or '—'}" for s in slots]
         slot_probs = [float(s["prob"]) for s in slots]
 
-        # The composite the preview pane shows: the sign crop, with each
-        # slot's own glyph laid out beneath it.  Built here rather than in
-        # the SPA so both the live preview and an uploaded test image get
-        # the same picture with no second implementation.
         sign_box = _to_full_box(reading.get("sign_box"))
         # The ROI overlay and the class-edit preview both read `crop` as
-        # FULL-frame fractions, and the reading's own box_norm is relative
-        # to the Manual ROI crop when one is active — so it is re-derived
-        # from the translated pixel box rather than passed through.
+        # FULL-frame fractions.  The sign board ROI is the meaningful box
+        # here: `sign_box` is only the union of the three glyphs.
         sign_box_norm = None
         if sign_box is not None and full_w > 0 and full_h > 0:
             sign_box_norm = [
@@ -5496,27 +6519,54 @@ class RecordController:
                 float(sign_box[2]) / float(full_w),
                 float(sign_box[3]) / float(full_h),
             ]
-        composite_png = self._sign_ocr_composite(gray, reading, origin_x, origin_y)
+        roi_box = [int(rx1), int(ry1), int(rx2), int(ry2)]
+        roi_box_norm = [
+            float(rx1) / float(full_w) if full_w > 0 else 0.0,
+            float(ry1) / float(full_h) if full_h > 0 else 0.0,
+            float(rx2) / float(full_w) if full_w > 0 else 1.0,
+            float(ry2) / float(full_h) if full_h > 0 else 1.0,
+        ]
+        # User-facing threshold view: inside the Dark..Lum window is BLACK
+        # ink; everything else is PURE WHITE.  This is what Orig / both
+        # toggles show (with the ROI box on top); the model tensor is built
+        # separately and keeps its own polarity.
+        inside_full = (gray >= bg_dark) & (gray <= bg_lum)
+        full_display = np.where(inside_full, 0, 255).astype(np.uint8)
+        # ROI CHECKED must show the EXACT pixels inside the green box drawn
+        # on the full view — not a re-cleaned mask.  Same array, same slice:
+        # whatever is visible inside the box unchecked is visible checked.
+        processed_display = full_display[ry1:ry2, rx1:rx2].copy()
+        full_png = _to_png_bytes(Image.fromarray(full_display, mode="L"))
+        processed_png = _to_png_bytes(Image.fromarray(processed_display, mode="L"))
+        raw_crop_png = _to_png_bytes(Image.fromarray(roi_gray, mode="L"))
 
         return {
             "labels": slot_labels,
             "probs": slot_probs,
             "top_label": match_text,
             "top_prob": float(min((s["prob"] for s in slots), default=0.0)),
-            "crop": sign_box_norm,
+            "crop": roi_box_norm,
+            "roi_box": roi_box,
+            "roi_box_norm": roi_box_norm,
+            "roi_method": str(roi_method),
             "model_source": str(model.get("model_source") or "latest"),
-            "processed_image_b64": base64.b64encode(composite_png).decode("ascii"),
-            "crop_image_b64": "",
-            "full_image_b64": "",
-            "processed_variant": "sign-sequence",
-            "ood": False,
-            "ood_reason": "",
-            "sign_pct": 0.0,
+            "processed_image_b64": base64.b64encode(processed_png).decode("ascii"),
+            "crop_image_b64": base64.b64encode(raw_crop_png).decode("ascii"),
+            "full_image_b64": base64.b64encode(full_png).decode("ascii"),
+            "processed_variant": "sign-threshold",
+            "ood": bool(ood_reasons),
+            "ood_reason": " | ".join(ood_reasons),
+            "sign_pct": float(sign_pct),
             "max_prob": float(min((s["prob"] for s in slots), default=0.0)),
-            "entropy_ratio": 0.0,
+            "entropy_ratio": float(max((s["entropy_ratio"] for s in slots), default=0.0)),
             # ── the sign_ocr payload ────────────────────────────────────
             "sign_ocr": True,
-            "sign_sequence": list(seq),
+            "sign_sequence": list(chosen_plate),
+            "sign_sequences": list(seqs),
+            "matched_sequence": "".join(chosen_plate) if all_match else "",
+            "matched_index": int(chosen_index) if all_match else -1,
+            "closest_sequence": "".join(chosen_plate) if (not all_match and seqs) else "",
+            "plate_count": int(len(seqs)),
             "reading_order": order,
             "slots": slots,
             "slot_images_b64": [base64.b64encode(p).decode("ascii") for p in slot_pngs],
@@ -5723,6 +6773,61 @@ class RecordController:
         try:
             from trainer import TrainConfig, TrainResult, new_run_dir, train_and_export
 
+            project_type = str(
+                getattr(sess_cfg, "project_type", PROJECT_TYPE_IMAGE)
+                or PROJECT_TYPE_IMAGE
+            ).strip().lower()
+
+            # ── sign_ocr: the target sequence IS the class list ───────────
+            # A stale "Class 1"/"Class 2" directory is not inert: the EMNIST
+            # mapper reads its trailing digit and fills it, which turns it
+            # into a real model label (and takes the samples away from the
+            # target class).  Enforce the sequence BEFORE any cache rebuild,
+            # so the mixed set, labels.txt and the model output indices all
+            # come from exactly the characters the sign prints.
+            saved_train_cfg = self._project_train_cfg(sess_cfg.dataset_root)
+            sign_seqs_src = cfg_dict.get("sign_sequences")
+            if sign_seqs_src in (None, "", []):
+                sign_seqs_src = saved_train_cfg.get("sign_sequences")
+            sign_seq_src = cfg_dict.get("sign_sequence")
+            if sign_seq_src in (None, "", []):
+                sign_seq_src = saved_train_cfg.get("sign_sequence")
+            effective_sign_seq: Optional[List[str]] = None
+            effective_sign_sequences: Optional[List[str]] = None
+            if project_type == PROJECT_TYPE_SIGN_OCR:
+                # The whitelist is the authority; the legacy single target is
+                # folded in when an older client sends only sign_sequence.
+                effective_sign_sequences = normalize_sign_sequences(sign_seqs_src)
+                if not effective_sign_sequences:
+                    effective_sign_sequences = normalize_sign_sequences(sign_seq_src)
+                if not effective_sign_sequences:
+                    raise ValueError(
+                        "Add at least one 3-character license plate before "
+                        "training — its characters are the model's classes."
+                    )
+                sign_chars = self._sign_sequences_classes(effective_sign_sequences)
+                self._enforce_sign_classes(session_id, effective_sign_sequences)
+                effective_sign_seq = normalize_sign_sequence(
+                    effective_sign_sequences[0]
+                )
+                # Feature toggle: _background is the ONLY rejector when this
+                # is on; when off the model trains on the target characters
+                # alone and the standard OOD gates do the rejecting.  The
+                # default for a Car License project is OFF.
+                raw_bg_replace = cfg_dict.get("sign_background_replace_ood")
+                sign_background_replace_ood = (
+                    _is_truthy(raw_bg_replace)
+                    if raw_bg_replace is not None
+                    else False
+                )
+            else:
+                sign_background_replace_ood = False
+            background_enabled = (
+                sign_background_replace_ood
+                if project_type == PROJECT_TYPE_SIGN_OCR
+                else _is_truthy(cfg_dict.get("ocr_background_enabled", True))
+            )
+
             project_classes = self._classes_load(sess_cfg.dataset_root)
             project_class_preprocess = self._class_preprocess_load(sess_cfg.dataset_root)
             project_sample_preprocess = self._sample_preprocess_load(sess_cfg.dataset_root)
@@ -5770,15 +6875,19 @@ class RecordController:
                 auto_adjust_batch_and_epochs=bool(cfg_dict.get("auto_adjust_batch_and_epochs", True)),
                 # The session owns the project type; a stray cfg_dict must not
                 # be able to train an OCR workspace with the sign transform.
-                project_type=str(getattr(sess_cfg, "project_type", PROJECT_TYPE_IMAGE) or PROJECT_TYPE_IMAGE),
+                project_type=project_type,
                 # OCR: dataset mixing + transfer learning.  Read only by the
                 # OCR strategy, so an image project is unaffected by their
                 # presence (and by their absence).
                 ocr_emnist_enabled=bool(cfg_dict.get("ocr_emnist_enabled", True)),
                 ocr_emnist_split=str(cfg_dict.get("ocr_emnist_split") or "balanced"),
                 ocr_emnist_per_class=int(cfg_dict.get("ocr_emnist_per_class") or 200),
-                ocr_background_enabled=bool(cfg_dict.get("ocr_background_enabled", True)),
+                # sign_ocr derives this from the explicit "use _background as
+                # the only rejector" toggle (default OFF); OCR keeps its own
+                # background-class checkbox.
+                ocr_background_enabled=background_enabled,
                 ocr_background_samples=int(cfg_dict.get("ocr_background_samples") or 0),
+                sign_background_replace_ood=sign_background_replace_ood,
                 ocr_transfer_learning=bool(cfg_dict.get("ocr_transfer_learning", True)),
                 ocr_pretrain_per_class=int(cfg_dict.get("ocr_pretrain_per_class") or 1200),
                 ocr_pretrain_epochs=int(cfg_dict.get("ocr_pretrain_epochs") or 4),
@@ -5792,10 +6901,8 @@ class RecordController:
                 # an export (or a reopened project) can recover what THIS
                 # model was trained to read instead of guessing from the
                 # current editor state.
-                sign_sequence=(
-                    normalize_sign_sequence(cfg_dict.get("sign_sequence"))
-                    if cfg_dict.get("sign_sequence") is not None else None
-                ),
+                sign_sequence=effective_sign_seq,
+                sign_sequences=effective_sign_sequences,
                 reading_order=str(cfg_dict.get("reading_order") or "ltr"),
                 auto_seed_emnist_samples=bool(auto_seed_samples),
             )
@@ -5862,6 +6969,14 @@ class RecordController:
                 "img_size": int(cfg.img_size),
                 "project_type": str(cfg.project_type),
                 "color_mode": str(cfg.color_mode),
+                # Rejection policy actually used by this run.  The sign
+                # preview and the exporter read these from the run meta so a
+                # later toggle change cannot retroactively reinterpret a
+                # model that was trained differently.
+                "ocr_background_enabled": bool(cfg.ocr_background_enabled),
+                "sign_background_replace_ood": bool(cfg.sign_background_replace_ood),
+                "sign_sequence": list(cfg.sign_sequence) if cfg.sign_sequence else None,
+                "sign_sequences": list(cfg.sign_sequences) if cfg.sign_sequences else [],
                 "preprocess_mode": str(cfg.preprocess_mode),
                 "crop_mode": str(cfg.crop_mode or CROP_MODE_AUTO_SEARCH),
                 "manual_roi": list(cfg.manual_roi) if cfg.manual_roi is not None else None,
@@ -5902,7 +7017,10 @@ class RecordController:
                         session_id,
                         {
                             "sign_sequence": cfg.sign_sequence,
+                            "sign_sequences": cfg.sign_sequences,
                             "reading_order": cfg.reading_order,
+                            "sign_background_replace_ood": bool(cfg.sign_background_replace_ood),
+                            "ocr_background_enabled": bool(cfg.ocr_background_enabled),
                             "auto_seed_emnist_samples": bool(cfg.auto_seed_emnist_samples),
                         },
                     )
@@ -5915,6 +7033,7 @@ class RecordController:
                 self._maybe_autostore_synth_preview(
                     session_id,
                     sign_sequence=cfg.sign_sequence,
+                    sign_sequences=cfg.sign_sequences,
                     reading_order=cfg.reading_order,
                     replace_synthetic=True,
                 )
@@ -6311,8 +7430,22 @@ class RecordController:
                 xfer_s = frame_bytes * 10.0 / float(baud)
                 timeout = max(1.5, xfer_s * 2.5)
                 raw = reader.read_frame(timeout_s=timeout)
-                capture_png = _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=int(cfg.serial_frame_side), out_side=int(cfg.serial_frame_side))
-                self._live_set(key, preview_png=capture_png, capture_png=capture_png, error="")
+                out_side = _preprocess_frame_side(
+                    getattr(cfg, "project_type", ""), getattr(cfg, "img_size", 96)
+                )
+                raw_side = int(cfg.serial_frame_side)
+                # preview_png is what Preview/inference sees: box-averaged to
+                # the preprocessing side (96), exactly like the MCU.  The
+                # capture PNG stays at the NATIVE stream side (160) so a
+                # saved sample keeps the resolution the user collected; the
+                # training cache downsizes it later.
+                preview_png = _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=raw_side, out_side=int(out_side))
+                capture_png = (
+                    preview_png
+                    if int(out_side) == raw_side
+                    else _raw96_to_png(raw, crop_box=cfg.crop_box, frame_side=raw_side, out_side=raw_side)
+                )
+                self._live_set(key, preview_png=preview_png, capture_png=capture_png, error="")
                 last_error = ""
             except Exception as e:
                 msg = str(e) or "Unable to read from serial device."
@@ -6400,6 +7533,11 @@ class RecordController:
                     read_failures = 0
                     ever_framed = True
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # 1:1 on ingest for the glyph projects (see the helper):
+                    # the stage is square and the device frame is square.
+                    frame = _center_crop_webcam_square(
+                        frame, getattr(cfg, "project_type", "")
+                    )
                     preview_frame = frame
                     try:
                         h, w = frame.shape[:2]
@@ -6564,6 +7702,9 @@ class RecordController:
                     time.sleep(interval)
                     continue
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = _center_crop_webcam_square(
+                    frame, getattr(cfg, "project_type", "")
+                )
                 img = Image.fromarray(frame).convert("RGB")
                 if cfg.crop_box is not None:
                     x1, y1, x2, y2 = cfg.crop_box
@@ -6882,6 +8023,36 @@ def _send_png(req: BaseHTTPRequestHandler, data: bytes, cors: bool = False, cach
         pass
 
 
+def _raw_ood_metrics(raw_out: np.ndarray) -> Tuple[float, float]:
+    """(max_prob, entropy_ratio) from the raw device-mirror output.
+
+    The same float32 arithmetic and op order as _preview_predict and
+    TFLite.ino: raw_best / sum(raw) and natural-log entropy over
+    raw_i / sum(raw), normalised by ln(N) and clamped to 1.0.  Module-level
+    so the sign preview and the image preview (and their test fakes) share
+    one implementation.
+    """
+    arr = np.asarray(raw_out)
+    total = int(np.sum(arr))
+    if total <= 0:
+        total = 1
+    max_prob = float(np.float32(np.max(arr)) / np.float32(total))
+    f_total = np.float32(total)
+    entropy = np.float32(0.0)
+    for value in arr:
+        p = np.float32(value) / f_total
+        if float(p) <= 1e-6:
+            continue
+        entropy = entropy - p * np.float32(math.log(float(p)))
+    n_classes = max(1, int(arr.size))
+    max_entropy = float(math.log(n_classes)) if n_classes > 1 else 1.0
+    entropy_ratio = (
+        float(np.float32(entropy) / np.float32(max_entropy))
+        if max_entropy > 0 else 1.0
+    )
+    return max_prob, min(1.0, entropy_ratio)
+
+
 def _bytes_io(data: bytes):
     import io
 
@@ -7047,6 +8218,57 @@ def _open_working_camera(preferred_index: int, unique_id: Optional[str] = None, 
     return None, CameraOpenInfo("failed", idx, uid, "", "No camera opened at any probed index.")
 
 
+# Working resolution the glyph front-end uses on the MCU (captures are
+# trained at 96x96 glyph frames) and the image project's fallback model side.
+GLYPH_PREPROCESS_FRAME_SIDE = 96
+
+
+def _preprocess_frame_side(project_type: Any, img_size: Any) -> int:
+    """Capture-frame side -> preprocessing side for the live serial stream."""
+    try:
+        side = int(img_size or 96)
+    except (TypeError, ValueError):
+        side = 96
+    if is_glyph_project(str(project_type or "")):
+        return GLYPH_PREPROCESS_FRAME_SIDE
+    return max(8, min(512, side))
+
+
+def _resize_square_box_average_u8(arr: np.ndarray, out_side: int) -> np.ndarray:
+    """Exact integer box-average resize used by the host and the MCU sketches.
+
+    The source interval of output pixel o is [o*in//out, (o+1)*in//out)
+    (clamped to at least one source pixel), every pixel in that box is
+    summed and divided with round-half-up.  No floats and no PIL/BILINEAR
+    path, so the same function is reproducible in C on the P4 — it is
+    mirrored bit-for-bit by TFLite/frame_resize.h
+    (FrameResizeBoxAverageGray / FrameResizeBoxAverageRgb) and pinned by
+    tests/test_frame_resize_parity.py.
+    """
+    a = np.asarray(arr)
+    out = max(1, int(out_side))
+    if a.ndim < 2 or a.size == 0:
+        return a
+    h, w = int(a.shape[0]), int(a.shape[1])
+    if h == out and w == out:
+        return a
+    dst = np.empty((out, out) + tuple(a.shape[2:]), dtype=np.uint8)
+    for oy in range(out):
+        sy0 = (oy * h) // out
+        sy1 = max(sy0 + 1, ((oy + 1) * h) // out)
+        for ox in range(out):
+            sx0 = (ox * w) // out
+            sx1 = max(sx0 + 1, ((ox + 1) * w) // out)
+            block = a[sy0:sy1, sx0:sx1].astype(np.int64)
+            count = int(block.shape[0] * block.shape[1])
+            if a.ndim == 2:
+                dst[oy, ox] = np.uint8((int(block.sum()) + count // 2) // count)
+            else:
+                sums = block.reshape((-1, block.shape[-1])).sum(axis=0)
+                dst[oy, ox, :] = np.clip((sums + count // 2) // count, 0, 255).astype(np.uint8)
+    return dst
+
+
 def _raw96_to_png(
     raw: bytes,
     crop_box: Optional[Tuple[int, int, int, int]],
@@ -7068,8 +8290,10 @@ def _raw96_to_png(
     if crop_box is not None:
         x1, y1, x2, y2 = crop_box
         img = img.crop((x1, y1, x2, y2))
-    img = img.resize((out_side, out_side))
-    return _to_png_bytes(img)
+    arr = np.asarray(img)
+    # Exact integer box-average, matching the P4 sketch's resize helper.
+    arr = _resize_square_box_average_u8(arr, int(out_side))
+    return _to_png_bytes(Image.fromarray(arr, mode=("RGB" if arr.ndim == 3 else "L")))
 
 
 def _raw96_preview_png(raw: bytes, frame_side: int = 96) -> bytes:
@@ -7082,6 +8306,35 @@ def _raw96_preview_png(raw: bytes, frame_side: int = 96) -> bytes:
         arr = np.frombuffer(raw, dtype=np.uint8).reshape((side, side))
         img = Image.fromarray(arr, mode="L").resize((side * 3, side * 3), Image.NEAREST)
     return _to_png_bytes(img)
+
+
+def _center_crop_webcam_square(frame: np.ndarray, project_type: Any) -> np.ndarray:
+    """Center-crop a webcam frame to 1:1 for the glyph projects.
+
+    The MCU streams a square frame and the Preview / class-preprocess
+    stages are 1:1.  A 16:9 MacBook camera in the same stage would be
+    letterboxed (black bars top and bottom), and the ROI coordinates would
+    describe a different geometry from the square device frame.  Cropping
+    ON INGEST makes webcam and device share one geometry, and every
+    downstream consumer (live preview, hold capture, Preview inference)
+    sees the same square pixels.
+
+    Image projects keep their native aspect: their pipeline and overlays
+    are built around the full webcam frame, and there is no device square
+    to match.  No-op for already-square frames.
+    """
+    if not is_glyph_project(str(project_type or "")):
+        return frame
+    arr = np.asarray(frame)
+    if arr.ndim < 2:
+        return frame
+    fh, fw = int(arr.shape[0]), int(arr.shape[1])
+    side = min(fh, fw)
+    if side <= 0 or fh == fw:
+        return frame
+    x0 = (fw - side) // 2
+    y0 = (fh - side) // 2
+    return np.ascontiguousarray(arr[y0:y0 + side, x0:x0 + side])
 
 
 def _cap_capture_resolution(img: Image.Image, max_side: int = CAPTURE_MAX_SIDE) -> Image.Image:

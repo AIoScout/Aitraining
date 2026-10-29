@@ -109,31 +109,20 @@ def _set_toggle(page, toggle_id: str, checked: bool):
     page.wait_for_timeout(80)
 
 
-def assert_roi_off_hides_the_box(page):
+def assert_roi_off_shows_full_threshold_and_box(page):
+    """ROI OFF: full threshold view by default, with the box on top."""
     _set_toggle(page, "previewRoiToggle", False)
     _set_toggle(page, "previewRawToggle", False)
     _apply(page)
-    state = _state(page)
-    assert state["display"] == "none", state
-    assert state["src"] == _url(RAW), state
-
-
-def assert_roi_on_draws_the_box_on_the_scene(page):
-    _set_toggle(page, "previewRoiToggle", True)
-    _apply(page)
-    # Wait for the PNG to decode: the overlay geometry comes from the
-    # image's natural size, not the stage size.
     page.wait_for_function(
         "(() => { const i = document.getElementById('previewImage');"
         " return i && i.complete && i.naturalWidth > 0; })()",
         timeout=5000,
     )
-    _apply(page)  # re-run now that naturalWidth is known
+    _apply(page)
     state = _state(page)
     assert state["display"] == "block", state
-    # ROI must NOT swap the pane to the cropped tensor: the box is in
-    # original-frame coordinates and would land in the wrong place.
-    assert state["src"] == _url(RAW), state
+    assert state["src"] == _url(FULL), state
 
     expected = page.evaluate(
         """() => {
@@ -159,44 +148,176 @@ def assert_roi_on_draws_the_box_on_the_scene(page):
         assert abs(state["box"][key] - expected[key]) < 0.75, (key, state["box"], expected)
 
 
-def assert_roi_off_again_hides_the_box(page):
-    _set_toggle(page, "previewRoiToggle", False)
-    _apply(page)
-    state = _state(page)
-    assert state["display"] == "none", state
-    assert state["src"] == _url(RAW), state
-
-
-def assert_orig_shows_the_masked_frame_without_a_box(page):
-    _set_toggle(page, "previewRoiToggle", False)
-    _set_toggle(page, "previewRawToggle", True)
-    _apply(page)
-    state = _state(page)
-    assert state["display"] == "none", state
-    assert state["src"] == _url(FULL), state
-
-
-def assert_both_toggles_show_the_processed_crop(page):
-    # ROI + Orig = cropped AND filtered.  That image is not the original
-    # frame, so the full-frame box must stay hidden even though ROI is on.
+def assert_roi_on_shows_cropped_threshold_without_box(page):
+    """ROI ON: the thresholded crop itself; the box is hidden."""
     _set_toggle(page, "previewRoiToggle", True)
+    _set_toggle(page, "previewRawToggle", False)
     _apply(page)
     state = _state(page)
     assert state["display"] == "none", state
     assert state["src"] == _url(PROCESSED), state
 
 
+def assert_roi_off_again_shows_the_box(page):
+    _set_toggle(page, "previewRoiToggle", False)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "block", state
+    assert state["src"] == _url(FULL), state
+
+
+def assert_orig_on_shows_raw_full_with_box(page):
+    """Orig ON: original grayscale full frame; ROI OFF keeps the box."""
+    _set_toggle(page, "previewRoiToggle", False)
+    _set_toggle(page, "previewRawToggle", True)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "block", state
+    assert state["src"] == _url(RAW), state
+
+
+def assert_both_toggles_show_raw_crop_without_box(page):
+    """ROI ON + Orig ON: raw cropped ROI, and no overlay."""
+    _set_toggle(page, "previewRoiToggle", True)
+    _apply(page)
+    state = _state(page)
+    assert state["display"] == "none", state
+    assert state["src"] == _url(CROP), state
+
+
+def assert_square_stage_keeps_the_frame_sharp(page):
+    """A 160x160 device frame fills a 1:1 stage; the ROI box stays on it."""
+    raw160 = _png_b64((160, 160), (180, 180, 180))
+    full160 = _png_b64((160, 160), (250, 250, 250))
+    crop160 = _png_b64((80, 80), (200, 200, 200))
+    payload = {
+        "ok": "1",
+        "labels": ["A", "1", "2"],
+        "probs": [0.9, 0.05, 0.05],
+        "top_label": "A",
+        "top_prob": 0.9,
+        "image_b64": raw160,
+        "processed_image_b64": PROCESSED,
+        "crop_image_b64": crop160,
+        "full_image_b64": full160,
+        "processed_variant": "sign-threshold",
+        "crop": [0.15625, 0.15625, 0.84375, 0.84375],
+        "sign_ocr": True,
+        "sign_sequence": ["A", "1", "2"],
+        "reading_order": "ltr",
+        "match": True,
+        "match_text": "🟢 YES — MATCH",
+        "match_min_prob": 0.6,
+        "slots": [
+            {"char": "A", "label": "A", "prob": 0.98, "match": True},
+            {"char": "1", "label": "1", "prob": 0.97, "match": True},
+            {"char": "2", "label": "2", "prob": 0.99, "match": True},
+        ],
+        "slot_images_b64": ["", "", ""],
+    }
+    _set_toggle(page, "previewRoiToggle", False)
+    _set_toggle(page, "previewRawToggle", False)
+    _apply(page, payload)
+    page.wait_for_function(
+        "(() => { const i = document.getElementById('previewImage');"
+        " return i && i.complete && i.naturalWidth === 160; })()",
+        timeout=5000,
+    )
+    _apply(page, payload)
+    stage = page.evaluate(
+        """() => {
+          const s = document.querySelector('#previewPane .preview-stage').getBoundingClientRect();
+          const ov = document.getElementById('previewRoiOverlay');
+          return {
+            w: s.width, h: s.height,
+            display: ov.style.display,
+            left: parseFloat(ov.style.left || 'NaN'),
+            top: parseFloat(ov.style.top || 'NaN'),
+            width: parseFloat(ov.style.width || 'NaN'),
+            height: parseFloat(ov.style.height || 'NaN'),
+          };
+        }"""
+    )
+    # 160x160 device frames get a clean square stage, not a wide letterbox;
+    # ROI OFF shows the threshold view with the box on top.
+    assert abs(stage["w"] - stage["h"]) < 1.5, stage
+    assert stage["display"] == "block", stage
+    assert abs(stage["left"] - stage["w"] * 0.15625) < 1.0, stage
+    assert abs(stage["top"] - stage["h"] * 0.15625) < 1.0, stage
+    assert abs(stage["width"] - stage["w"] * 0.6875) < 1.0, stage
+    assert abs(stage["height"] - stage["h"] * 0.6875) < 1.0, stage
+    # The box must hug the image content, never the full wide pane.
+    assert stage["width"] < stage["w"] * 0.80, stage
+    assert _state(page)["src"] == _url(full160), _state(page)
+
+    # ROI ON: the cropped threshold content, no box.
+    _set_toggle(page, "previewRoiToggle", True)
+    _apply(page, payload)
+    state = _state(page)
+    assert state["src"] == _url(PROCESSED), state
+    assert state["display"] == "none", state
+
+    # ROI ON + Orig ON: raw cropped ROI, still no box.
+    _set_toggle(page, "previewRawToggle", True)
+    _apply(page, payload)
+    state = _state(page)
+    assert state["src"] == _url(crop160), state
+    assert state["display"] == "none", state
+
+    # ROI OFF + Orig ON: full raw frame + box.
+    _set_toggle(page, "previewRoiToggle", False)
+    _apply(page, payload)
+    state = _state(page)
+    assert state["src"] == _url(raw160), state
+    assert state["display"] == "block", state
+
+
+def assert_worktable_is_centered_with_square_stages(page):
+    """Edit modal centered; Original / Processed stages are 1:1."""
+    page.evaluate(
+        """(src) => {
+          STATE.sample_previews = Object.assign({}, STATE.sample_previews || {}, {
+            A: [{src, filename: 'sample.png'}],
+          });
+          STATE.counts = Object.assign({}, STATE.counts || {}, {A: 1});
+          openClassPreprocessEditor('A');
+        }""",
+        _url(RAW),
+    )
+    page.wait_for_selector("#classPreprocessStage", timeout=5000)
+    page.wait_for_timeout(250)
+    box = page.evaluate(
+        """() => {
+          const shell = document.querySelector('#classPreprocessModal .class-preprocess-shell').getBoundingClientRect();
+          const stage = document.getElementById('classPreprocessStage').getBoundingClientRect();
+          const result = document.querySelector('#classPreprocessModal .class-preprocess-result').getBoundingClientRect();
+          return {
+            vw: innerWidth, vh: innerHeight,
+            shell: {l: shell.left, t: shell.top, r: shell.right, b: shell.bottom},
+            stage: {w: stage.width, h: stage.height},
+            result: {w: result.width, h: result.height},
+          };
+        }"""
+    )
+    assert abs((box["shell"]["l"] + box["shell"]["r"]) / 2 - box["vw"] / 2) < 2.0, box
+    assert abs((box["shell"]["t"] + box["shell"]["b"]) / 2 - box["vh"] / 2) < 2.0, box
+    assert box["stage"]["w"] > 0 and abs(box["stage"]["w"] - box["stage"]["h"]) < 1.5, box
+    assert box["result"]["w"] > 0 and abs(box["result"]["w"] - box["result"]["h"]) < 1.5, box
+    page.evaluate("closeClassPreprocessEditor(true)")
+
+
 def assert_input_off_keeps_the_box_visible(page):
     # With Input OFF no prediction arrives to redraw the overlay; the
     # deferred render must re-apply the cached one instead of hiding it.
+    # ROI OFF is the state that owns the box now.
     _set_toggle(page, "previewRawToggle", False)
-    _set_toggle(page, "previewRoiToggle", True)
+    _set_toggle(page, "previewRoiToggle", False)
     _apply(page)
     page.evaluate("renderPreviewCard()")
     page.wait_for_timeout(80)
     state = _state(page)
     assert state["display"] == "block", state
-    assert state["src"] == _url(RAW), state
+    assert state["src"] == _url(FULL), state
 
 
 def main() -> int:
@@ -243,11 +364,13 @@ def main() -> int:
             )
             page.evaluate("window.__payload = null")
 
-            run("ROI OFF hides the box", assert_roi_off_hides_the_box, page)
-            run("ROI ON draws the box on the scene", assert_roi_on_draws_the_box_on_the_scene, page)
-            run("ROI OFF hides the box again", assert_roi_off_again_hides_the_box, page)
-            run("Orig shows the masked frame without a box", assert_orig_shows_the_masked_frame_without_a_box, page)
-            run("ROI + Orig shows the processed crop", assert_both_toggles_show_the_processed_crop, page)
+            run("ROI OFF shows full threshold + box", assert_roi_off_shows_full_threshold_and_box, page)
+            run("ROI ON shows cropped threshold, no box", assert_roi_on_shows_cropped_threshold_without_box, page)
+            run("ROI OFF shows the box again", assert_roi_off_again_shows_the_box, page)
+            run("Orig ON shows raw full + box", assert_orig_on_shows_raw_full_with_box, page)
+            run("ROI + Orig shows raw crop, no box", assert_both_toggles_show_raw_crop_without_box, page)
+            run("160x160 frame gets a square stage", assert_square_stage_keeps_the_frame_sharp, page)
+            run("worktable is centered with square stages", assert_worktable_is_centered_with_square_stages, page)
             run("Input OFF keeps the box visible", assert_input_off_keeps_the_box_visible, page)
 
             browser.close()

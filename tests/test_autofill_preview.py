@@ -296,7 +296,7 @@ def test_preview_upload_raw_bytes_and_reuse():
             assert calls[0]["kwargs"].get("bg_dark_thresh") == 3, calls[0]["kwargs"]
             assert calls[0]["kwargs"].get("bg_lum_thresh") == 90, calls[0]["kwargs"]
             assert calls[0]["kwargs"].get("match_min_prob") == 0.6, calls[0]["kwargs"]
-            assert res.get("match_text") == record_controller.SIGN_MATCH_TEXT, res
+            assert str(res.get("match_text") or "").startswith(record_controller.SIGN_MATCH_TEXT), res
             assert res.get("match") is True, res
             assert res.get("orig_b64"), res.keys()
             assert res.get("roi_b64") == "cm9p", res.get("roi_b64")
@@ -337,7 +337,7 @@ def test_preview_upload_json_and_dispatch():
             )
             assert res.get("ok") == "1", res
             assert len(calls) == 1, calls
-            assert res.get("match_text") == record_controller.SIGN_MATCH_TEXT, res
+            assert str(res.get("match_text") or "").startswith(record_controller.SIGN_MATCH_TEXT), res
 
             # An upload with no image and no stored copy is a client error,
             # not a crash and not a silent empty prediction.
@@ -352,6 +352,33 @@ def test_preview_upload_json_and_dispatch():
             ctrl.stop()
 
 
+def test_preview_ood_endpoint_unifies_the_probability_threshold():
+    """OOD MAX PROB=0.25 is persisted as the one and only match floor."""
+    with tempfile.TemporaryDirectory() as td:
+        ctrl, dataset = _workspace(Path(td))
+        try:
+            res = _post_json(ctrl, "/preview/ood", {
+                "session": "s",
+                "ood_sign_pct_min": 0.2,
+                "ood_sign_pct_max": 60,
+                "ood_max_prob_min": 0.25,
+                "ood_entropy_ratio_max": 0.80,
+            })
+            assert res.get("ok") == "1", res
+            for key in ("ood_max_prob_min", "sign_match_min_prob", "match_min_prob"):
+                assert abs(float(res[key]) - 0.25) < 1e-9, (key, res)
+            saved = json.loads(
+                (dataset.parent / "runs" / "latest" / "train_config.json")
+                .read_text(encoding="utf-8")
+            )
+            assert abs(float(saved["ood_max_prob_min"]) - 0.25) < 1e-9, saved
+            assert abs(float(saved["sign_match_min_prob"]) - 0.25) < 1e-9, saved
+            assert abs(float(saved["match_min_prob"]) - 0.25) < 1e-9, saved
+            assert abs(float(saved["ood_entropy_ratio_max"]) - 0.80) < 1e-9, saved
+        finally:
+            ctrl.stop()
+
+
 # ── runner ────────────────────────────────────────────────────────────────
 def main() -> int:
     tests = [
@@ -360,6 +387,7 @@ def main() -> int:
         ("train/config save backfills", test_train_config_save_backfills),
         ("preview upload raw bytes + reuse", test_preview_upload_raw_bytes_and_reuse),
         ("preview upload JSON + dispatch", test_preview_upload_json_and_dispatch),
+        ("preview/ood unifies the probability threshold", test_preview_ood_endpoint_unifies_the_probability_threshold),
     ]
     results = []
     for name, fn in tests:

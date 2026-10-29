@@ -33,6 +33,7 @@ import traceback
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parent
@@ -40,6 +41,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import ocr_preprocess as ocr  # noqa: E402
+import record_controller as rc  # noqa: E402
+from test_sign_preview_fixes import _thin_one_frame  # noqa: E402
 
 SOURCE = REPO / "TFLite_Sign" / "sign_glyph.c"
 HARNESS = REPO / "TFLite_Sign" / "tools" / "sign_glyph_host.c"
@@ -54,6 +57,31 @@ def _blocks(w, h, rects, paper=230):
     for (x1, y1, x2, y2, v) in rects:
         img[y1:y2, x1:x2] = v
     return img
+
+
+def _cluttered_room_frame(side: int = 96) -> np.ndarray:
+    """`side`x`side` room scene: a white sign plate in the middle carrying
+    dark "A 1 2" (x ~= 38..68, y ~= 44..62 at 96), and DISCONNECTED dark
+    room clutter blobs on the left, top and right — the capture that used
+    to drag the ROI out to 0..96 (RC2).  At 160 the scene is the same
+    capture at 160x160; mode 5 box-averages it back down to 96."""
+    f = int(side)
+    frame = np.full((f, f), 80, np.uint8)          # dark room surround
+
+    def _s(v: int) -> int:
+        return int(round(v * f / 96.0))
+
+    # Clutter first: the plate is drawn OVER them so the blobs stay
+    # outside the white board.
+    frame[_s(20):_s(80), 0:_s(34)] = 20            # left clutter (touches x=0)
+    frame[0:_s(15), _s(10):_s(40)] = 20            # top clutter (touches y=0)
+    frame[_s(25):_s(65), _s(85):_s(95)] = 20       # right clutter (mid-frame)
+    # The white plate, then the characters on it.
+    frame[_s(36):_s(70), _s(30):_s(76)] = 230
+    frame[_s(44):_s(62), _s(38):_s(45)] = 20       # A
+    frame[_s(44):_s(62), _s(50):_s(56)] = 20       # 1
+    frame[_s(44):_s(62), _s(61):_s(68)] = 20       # 2
+    return frame
 
 
 def _cases():
@@ -121,6 +149,121 @@ def _cases():
                    (w // 2, 3, w // 2 + 7, h - 3, 30),
                    (w - 12, 7, w - 3, h - 7, 30)], paper=220))
 
+    # Narrow single-stroke glyphs: the hairline '1' path.  Python widens
+    # these under NORM_CANON (ocr_preprocess._narrow_stroke_radius) and the
+    # C port must produce the same widened canvas.  Cover segmentation on
+    # (training capture), segmentation off (padded sign slot) and both
+    # polarities.
+    for (w, h, x, bw) in [(96, 96, 48, 1), (96, 96, 47, 2),
+                          (160, 160, 80, 2), (96, 96, 10, 3)]:
+        img = np.full((h, w), 230, np.uint8)
+        img[20:h - 20, x:x + bw] = 20
+        seq(f"narrow_stroke_{w}x{h}_{x}_{bw}", img, thresh=100)
+        add(3, f"single_narrow_{w}x{h}_{x}_{bw}", img, thresh=100,
+            polarity=0, seg=1, conv=1)
+        add(3, f"single_narrow_noseg_{w}x{h}_{x}_{bw}", img, thresh=100,
+            polarity=0, seg=0, conv=1)
+        # INK_BRIGHT: the same stroke, inverted.  Exercises the max-filter
+        # branch and the dark (0) plate fill.
+        bright = np.full((h, w), 20, np.uint8)
+        bright[20:h - 20, x:x + bw] = 230
+        seq(f"narrow_bright_{w}x{h}_{x}_{bw}", bright, thresh=100,
+            polarity=1)
+        add(3, f"single_narrow_bright_{w}x{h}_{x}_{bw}", bright,
+            thresh=100, polarity=1, seg=1, conv=1)
+    for (w, h) in [(96, 96), (160, 160)]:
+        img = np.full((h, w), 230, np.uint8)
+        for x in (w // 4, w // 2, 3 * w // 4):
+            img[20:h - 20, x:x + 2] = 20
+        seq(f"three_narrow_strokes_{w}", img, thresh=100)
+
+    # The real-car-sign path: a light board with a dark plastic frame ring,
+    # three interior characters and border clutter inside the 6 % margin.
+    # The interior-ROI search must discard the ring/clutter on BOTH sides.
+    board = np.full((160, 160), 215, np.uint8)
+    board[24:136, 24:136] = 245
+    board[20:28, 20:140] = 30
+    board[132:140, 20:140] = 30
+    board[20:140, 20:28] = 30
+    board[20:140, 132:140] = 30
+    board[66:90, 35:66] = 20       # A-ish block
+    board[65:94, 85:88] = 20       # hairline 1
+    board[66:89, 100:124] = 20     # 2-ish block
+    board[145:155, 2:30] = 15      # bottom-left border clutter
+    board[0:6, 60:90] = 25         # top border clutter
+    seq("board_ring_and_clutter", board, thresh=59)
+    seq("board_ring_and_clutter_otsu", board)
+    seq("board_ring_and_clutter_bright", 255 - board, thresh=196,
+        polarity=1)
+
+    # RC2: the cluttered room capture.  "A 1 2" on a white plate in the
+    # middle, disconnected dark room clutter on the left/top/right.  Both
+    # sides must lock the ROI onto the character cluster, under Otsu AND a
+    # pinned Lum window (the 160->96 box-average dilutes strokes into
+    # 110..145, so Lum=50 exercises the interior-Otsu fallback too).
+    clutter96 = _cluttered_room_frame(96)
+    clutter160 = _cluttered_room_frame(160)
+    seq("clutter_a12_otsu", clutter96)
+    seq("clutter_a12_lum50", clutter96, thresh=49)
+    add(5, "clutter_a12_160_otsu", clutter160, x0=96)
+    add(5, "clutter_a12_160_lum50", clutter160, x0=96, thresh=49)
+
+    # Real camera-style A12 board at capture (160) and preprocessed (96)
+    # sides, under Otsu and the two custom windows used in the field:
+    # Dark=0/Lum=121 -> thresh 120, and Dark=0/Lum=50 -> thresh 49.
+    board160 = _thin_one_frame()
+    board96 = rc._resize_square_box_average_u8(board160, 96)
+    for label, shot in (("a12_160", board160), ("a12_96", board96)):
+        for thr_name, thr in (("otsu", -1), ("lum121", 120), ("lum50", 49)):
+            seq(f"{label}_{thr_name}", shot, thresh=thr)
+    # Full 160->96 capture chain in C (frame_resize.h + sign_glyph.c) vs
+    # the host's _resize_square_box_average_u8 + preprocess.
+    for thr_name, thr in (("otsu", -1), ("lum121", 120), ("lum50", 49)):
+        add(5, f"a12_capture160_{thr_name}", board160, x0=96, thresh=thr)
+
+    # Real camera captures, when a dataset/ folder is present next to the
+    # app: square frames at their native side, plus the 160->96 chain.
+    dataset_dir = ROOT / "dataset"
+    if dataset_dir.is_dir():
+        loaded = 0
+        for p in sorted(dataset_dir.rglob("*.png")):
+            try:
+                shot = np.asarray(Image.open(p).convert("L"), dtype=np.uint8)
+            except Exception:
+                continue
+            if shot.ndim != 2 or shot.shape[0] != shot.shape[1] or shot.shape[0] < 8:
+                continue
+            tag = "".join(ch if ch.isalnum() else "_" for ch in p.stem)[:40]
+            seq(f"dataset_{loaded}_{tag}", shot, thresh=-1)
+            if shot.shape[0] > 96:
+                add(5, f"dataset_{loaded}_{tag}_96", shot, x0=96, thresh=-1)
+            loaded += 1
+            if loaded >= 12:
+                break
+
+    # Regression for the Preview ROI bug: a white plate whose 'A' sits
+    # inside the old 6 % frame margin, and a '1' broken into two strokes.
+    # The outer dark surround must still be stripped, but the edge glyph
+    # and BOTH '1' fragments must survive into their slots, on the host and
+    # the P4 (this case is compared C-vs-Python bit for bit).
+    edge = np.full((160, 160), 20, np.uint8)
+    edge[1:159, 1:159] = 245
+    # A: x=2..26 (2 px inside the plate), y=20..100
+    edge[20:100, 2:8] = 20
+    edge[20:100, 20:26] = 20
+    edge[20:26, 2:26] = 20
+    edge[56:62, 2:26] = 20
+    # 1: broken into a top stroke and a bottom stanza at the same columns
+    edge[20:52, 76:82] = 20
+    edge[60:100, 74:84] = 20
+    # 2: x=120..146, y=20..100
+    edge[20:26, 120:146] = 20
+    edge[20:60, 140:146] = 20
+    edge[56:62, 120:146] = 20
+    edge[56:94, 120:126] = 20
+    edge[94:100, 120:146] = 20
+    seq("edge_A_broken_one", edge, thresh=120)
+
     for i in range(SWEEP):
         w = int(rng.integers(40, 130))
         h = int(rng.integers(40, 130))
@@ -164,6 +307,14 @@ def _cases():
             dark=int(rng.choice([0, 0, 40])), conv=int(rng.integers(0, 2)))
     add(3, "single_flat", np.full((20, 20), 200, np.uint8))
     add(3, "single_blocks", base)
+    # Manual ROI '1' with a clipped neighbour foot in the bottom-left corner:
+    # the small boundary-touching, x-disjoint speck must be stripped before
+    # the bbox/centring on BOTH sides.
+    speck = np.full((96, 96), 230, np.uint8)
+    speck[20:80, 44:48] = 20      # vertical '1' stroke
+    speck[92:96, 0:10] = 20       # stray foot clipping the crop corner
+    add(3, "single_border_speck", speck, thresh=100, conv=1)
+    add(3, "single_border_speck_noseg", speck, thresh=100, conv=1, seg=0)
 
     for i in range(SWEEP):
         w = int(rng.integers(5, 100))
@@ -231,6 +382,18 @@ def _check_info(name, out_dir, want):
             errs.append(f"box {got_box} != None")
     elif got_box != tuple(int(v) for v in want_box):
         errs.append(f"box {got_box} != {want_box}")
+    if "roi_box" in want:
+        want_roi = want.get("roi_box")
+        got_roi = None if head.get("roi") in (None, "-") else tuple(
+            int(v) for v in str(head["roi"]).split(","))
+        if want_roi is None:
+            if got_roi is not None:
+                errs.append(f"roi {got_roi} != None")
+        elif got_roi != tuple(int(v) for v in want_roi):
+            errs.append(f"roi {got_roi} != {want_roi}")
+        if "pct" in head and "sign_pct" in want:
+            if abs(float(head["pct"]) - float(want["sign_pct"])) > 1e-4:
+                errs.append(f"pct {head['pct']} != {want['sign_pct']}")
     return head, slots, errs
 
 
@@ -288,7 +451,10 @@ def _run_corpus():
                     thresh=(None if c["thresh"] < 0 else c["thresh"]),
                     convention=(ocr.NORM_CANON if c["conv"]
                                 else ocr.NORM_STRETCH),
-                    dark_thr=c["dark"])
+                    dark_thr=c["dark"],
+                    # sign_glyph.c always strips border specks on this
+                    # single-glyph path; match it here.
+                    strip_specks=True)
                 head, _, errs = _check_info(name, tmp, want)
                 if c["seg"] and int(head["nb"]) != len(want["boxes"]):
                     errs.append(f"nb {head['nb']} != {len(want['boxes'])}")
@@ -300,29 +466,31 @@ def _run_corpus():
                 results["single"].append(errs)
 
             else:
+                src = data
+                if c["mode"] == 5:
+                    # C mode 5 box-averages w*h -> x0*x0 with the shared
+                    # frame_resize.h; mirror it with the host helper.
+                    src = rc._resize_square_box_average_u8(data, int(c["x0"]))
                 want = ocr.preprocess_sign_sequence(
-                    data, sign_sequence="ABC",
+                    src, sign_sequence="ABC",
                     reading_order=("rtl" if c["order"] else "ltr"),
                     out_size=c["out_size"], polarity=c["polarity"],
                     apply_segmentation=bool(c["seg"]),
                     convention=(ocr.NORM_CANON if c["conv"]
                                 else ocr.NORM_STRETCH),
                     thresh=(None if c["thresh"] < 0 else c["thresh"]),
-                    dark_thr=c["dark"])
+                    dark_thr=c["dark"], find_roi=True)
                 head, slots, errs = _check_info(name, tmp, {
                     "thresh": want["thresh"], "box": want["sign_box"],
                     "ok": want["ok"], "empty": want["empty"],
+                    "roi_box": want.get("roi_box") if c["seg"] else None,
+                    "sign_pct": want.get("sign_pct", 0.0),
                 })
                 if c["seg"]:
-                    t = int(want["thresh"])
-                    if t == 0 and c["thresh"] < 0:
-                        ink = np.zeros(data.shape, bool)
-                    else:
-                        ink = ocr.binarize_ink(data, t,
-                                               polarity=c["polarity"])
-                        if c["dark"] > 0:
-                            ink &= data >= np.uint8(min(255, int(c["dark"])))
-                    nb = len(ocr.segment_glyph_boxes(ink,
+                    # The C pipeline reports its raw run count AFTER the
+                    # interior-ROI cleanup (find_roi), so compare against the
+                    # same filtered mask Python returned.
+                    nb = len(ocr.segment_glyph_boxes(want["ink"],
                                                      min_run=c["min_run"]))
                     if nb != int(head["nb"]):
                         errs.append(f"nb {head['nb']} != {nb}")
@@ -404,6 +572,77 @@ def test_corpus_exercises_all_three_reconciliation_paths():
     assert paths["merge"] > 0, f"no merge-path case in {r['count']} cases"
     assert paths["split"] > 0, f"no split-path case in {r['count']} cases"
     assert paths["equal"] > 0, f"no equal-thirds case in {r['count']} cases"
+
+
+def test_cluttered_room_locks_tight_roi_and_matches_c():
+    """RC2: the dark room clutter around the plate must NOT enter the ROI.
+
+    "A 1 2" sits at x=38..68, y=44..62 on the white plate; disconnected
+    dark blobs sit at x=0..34/y=20..80, x=10..40/y=0..15 and
+    x=85..95/y=25..65.  The old band search unioned ALL of them into a
+    0..96 box and sliced the clutter into three garbage slots.  Now both
+    sides must:
+      * ignore the outer clutter blobs (border-touching, huge, or without
+        a majority-plate ring),
+      * lock roi_box tightly onto the character cluster
+        (x1 >= 35, x2 <= 72, y1 >= 40, y2 <= 66),
+      * and produce BIT-IDENTICAL roi_box and 3x28x28 slot glyphs in C
+        and Python — at 96x96 under Otsu and a pinned Lum=50 window, and
+        through the 160->96 mode-5 capture chain (which also exercises the
+        interior-Otsu fallback for the diluted strokes).
+    """
+    cases = [
+        ("clutter_a12_otsu", 0, 96, 96, -1),
+        ("clutter_a12_lum50", 0, 96, 96, 49),
+        ("clutter_a12_160_otsu", 5, 160, 96, -1),
+        ("clutter_a12_160_lum50", 5, 160, 96, 49),
+    ]
+    cc = os.environ.get("CC") or shutil.which("cc")
+    assert cc, "no C compiler found (set CC); the C-vs-Python parity suite cannot run"
+    with tempfile.TemporaryDirectory(prefix="sign_clutter_") as td:
+        tmp = Path(td)
+        exe = _build(tmp)
+        rows = []
+        for name, mode, side, x0, thresh in cases:
+            data = _cluttered_room_frame(side)
+            c = dict(mode=mode, name=name, w=side, h=side, out_size=28,
+                     count=3, order=0, polarity=0, seg=1, min_run=2,
+                     thresh=thresh, dark=0, conv=1, x0=x0, y0=0)
+            rows.append(" ".join(str(c[k]) for k in HEADER))
+            (tmp / f"{name}.raw").write_bytes(data.tobytes())
+            # Python side (mode 5 replays the 160->96 chain, as the C does).
+            src = rc._resize_square_box_average_u8(data, x0) if mode == 5 else data
+            want = ocr.preprocess_sign_sequence(
+                src, sign_sequence="ABC", reading_order="ltr",
+                out_size=28, polarity=ocr.INK_DARK,
+                apply_segmentation=True, convention=ocr.NORM_CANON,
+                thresh=(None if thresh < 0 else thresh), dark_thr=0,
+                find_roi=True)
+            box = want.get("roi_box")
+            assert isinstance(box, list) and len(box) == 4, (name, want)
+            x1, y1, x2, y2 = (int(v) for v in box)
+            assert x1 >= 35 and x2 <= 72, (name, "x", box)
+            assert y1 >= 40 and y2 <= 66, (name, "y", box)
+            assert want["ok"] and len(want["slots"]) == 3, (name, want)
+            for i, slot in enumerate(want["slots"]):
+                assert slot["ok"] and not slot["empty"], (name, i, slot)
+            (tmp / "want" / name).mkdir(parents=True, exist_ok=True)
+            np.save(tmp / "want" / f"{name}_roi.npy",
+                    np.asarray(box, dtype=np.int32))
+            np.save(tmp / "want" / f"{name}_glyphs.npy",
+                    np.stack(want["glyphs"]))
+        (tmp / "manifest.tsv").write_text(
+            " ".join(HEADER) + "\n" + "\n".join(rows) + "\n")
+        subprocess.run([str(exe), str(tmp)], check=True,
+                       stdout=subprocess.DEVNULL)
+        for name, _mode, _side, _x0, _thresh in cases:
+            head, slots = _parse_meta(tmp / f"{name}.cmeta")
+            got_roi = tuple(int(v) for v in head["roi"].split(","))
+            want_roi = tuple(int(v) for v in np.load(tmp / "want" / f"{name}_roi.npy"))
+            assert got_roi == want_roi, (name, "roi_box", got_roi, want_roi)
+            got_g = np.fromfile(tmp / f"{name}.cglyphs", np.uint8).reshape(3, 28, 28)
+            want_g = np.load(tmp / "want" / f"{name}_glyphs.npy")
+            assert np.array_equal(got_g, want_g), (name, "glyphs")
 
 
 def main() -> int:

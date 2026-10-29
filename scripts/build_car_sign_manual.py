@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the annotated Student Lab Manual for the Road Sign (3-Char) project.
+"""Build the annotated Student Lab Manual for the Car License Project (3-Char).
 
 What this script does
 ---------------------
@@ -10,13 +10,20 @@ What this script does
    Synth Mismatch -> Export / Save view.
 3. Injects numbered red callout boxes (``#e11d48``) through
    ``getBoundingClientRect()`` and captures 1440x900 @2x screenshots.
-4. Assembles the student manual with python-docx (Steps 1-8), reusing the
-   visual tone of the existing HKUST TFLite Training manual.
+   The Sample Worktable capture is polarity-guarded: the build fails if the
+   Processed Preview is not black ink on pure white (255).
+4. Assembles a STANDALONE student manual with python-docx:
+   Title / A) Objective / Briefing, then sections 1-5 walking the
+   TFLiteTraining app workflow (open project -> four areas -> target
+   license & samples -> Edit-page preprocessing -> training -> preview &
+   export), following the bullet style and table formats of the reference
+   manual's Task 2.  Section 5 ends with the physical car/checkpoint
+   placement (reserved photo placeholder boxes) and the on-car Serial
+   Monitor verification.  No hardware kit walkthrough (Task 0), no
+   Arduino IDE setup steps (Task 1), no MCU flashing guide (Task 3).
 5. Writes the .docx to the repository root and to the OneDrive Student_Helper
-   folder.
-
-The manual deliberately stops after Export Model / Save Project.  It contains
-no Arduino IDE, firmware-flashing, UART or Serial-Monitor instructions.
+   folder.  The reference "TF Lite Training Manual.docx" is never opened,
+   read or modified.
 
 Usage
 -----
@@ -31,6 +38,7 @@ Requires: streamlit, playwright (+ system Chrome), pillow, python-docx.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -68,10 +76,6 @@ LOCAL_DOCX = REPO_ROOT / "Lab_Manual_Car_Sign.docx"
 ONEDRIVE_DOCX = Path(
     "/Users/koil/Library/CloudStorage/OneDrive-HKUSTConnect/"
     "Student_Helper/TF Lite Training Manual - Car Sign.docx"
-)
-REFERENCE_DOCX = Path(
-    "/Users/koil/Library/CloudStorage/OneDrive-HKUSTConnect/"
-    "Student_Helper/TF Lite Training Manual.docx"
 )
 
 VIEWPORT = {"width": 1440, "height": 900}
@@ -212,15 +216,33 @@ def wait_workspace(page) -> Any:
 
 
 def dismiss_tour(ws) -> None:
-    for _ in range(3):
+    """Close the workspace tour before capturing.
+
+    The tour is a checkpoint-driven walk: `#tmTourClose` (the × in the card
+    head) is the exit and `#tmTourAutoskip` keeps later steps from walking
+    the student through the UI while screenshots are being taken.  The tour
+    may also start a moment after the workspace renders, so wait for it
+    briefly instead of checking only once.
+    """
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
         try:
-            if ws.locator("#tmTourSkip").count():
-                ws.evaluate("document.getElementById('tmTourSkip').click()")
-                log("Tour dismissed")
+            if ws.locator("#tmTourClose").count():
+                ws.evaluate(
+                    """() => {
+                      const auto = document.getElementById('tmTourAutoskip');
+                      if (auto && !auto.checked) auto.click();
+                      const close = document.getElementById('tmTourClose');
+                      if (close) close.click();
+                    }"""
+                )
+                log("Tour closed")
+                time.sleep(0.4)
                 return
         except Exception:  # noqa: BLE001 - tour may already be gone
             pass
-        time.sleep(0.4)
+        time.sleep(0.35)
+    log("Tour not present (or already closed)")
 
 
 def close_training_warning(ws) -> None:
@@ -351,6 +373,109 @@ def snap(page, path: Path) -> None:
     log(f"screenshot -> {path.name}")
 
 
+def snap_element(ws, selector: str, path: Path) -> None:
+    """Capture a single element of the workspace.
+
+    Playwright clips to the element's own box, so a modal card is captured
+    at its full rendered width — a fixed pixel crop would slice through
+    labels along the card's edges.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ws.locator(selector).screenshot(path=str(path))
+    log(f"screenshot -> {path.name} (element {selector})")
+    # The settings card has rounded corners; Chromium composites the dim
+    # modal backdrop into the corner cutouts, which shows up as gray blocks
+    # in the composite.  Restore the card's white corner background.
+    _whiteout_rounded_corners(path)
+
+
+def _whiteout_rounded_corners(path: Path, radius_css: float = 14.0) -> None:
+    """Replace the rounded-corner cutouts of an element capture with white.
+
+    Playwright element screenshots include the pixels BEHIND the element in
+    the corners left empty by the CSS border-radius (the dim modal
+    backdrop).  Pasting the image through a matching rounded-rectangle mask
+    onto a white canvas removes those gray corner blocks.
+    """
+    im = Image.open(path).convert("RGB")
+    radius = int(round(radius_css * DEVICE_SCALE))
+    mask = Image.new("L", im.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, im.width - 1, im.height - 1], radius=radius, fill=255
+    )
+    white = Image.new("RGB", im.size, (255, 255, 255))
+    white.paste(im, mask=mask)
+    white.save(path)
+
+
+def _assert_fully_visible(page, ws, selectors: Sequence[str], margin: int = 30) -> None:
+    """Fail the build if any of `selectors` is clipped by the page viewport.
+
+    Compares each element's rect (workspace-frame coordinates) against the
+    visible slice of the workspace iframe inside the Streamlit page.
+    """
+    rects = ws.evaluate(
+        """(sels) => {
+          const out = {};
+          for (const sel of sels) {
+            const e = document.querySelector(sel);
+            if (!e) { out[sel] = null; continue; }
+            const r = e.getBoundingClientRect();
+            out[sel] = { top: r.top, bottom: r.bottom };
+          }
+          return out;
+        }""",
+        list(selectors),
+    )
+    frame_top = page.evaluate(
+        """() => {
+          const frame = Array.from(document.querySelectorAll('iframe')).find((f) => {
+            try { return !!(f.contentDocument && f.contentDocument.querySelector('#classes')); }
+            catch (e) { return false; }
+          });
+          return frame ? frame.getBoundingClientRect().top : null;
+        }"""
+    )
+    viewport_h = page.evaluate("window.innerHeight")
+    for sel, rect in rects.items():
+        if rect is None:  # optional element (e.g. hint only present on NO)
+            continue
+        visible_bottom = rect["bottom"] <= viewport_h - frame_top - margin
+        visible_top = rect["top"] >= -frame_top + margin
+        if not (visible_bottom and visible_top):
+            raise RuntimeError(
+                f"{sel} would be clipped in the screenshot: top={rect['top']:.0f} "
+                f"bottom={rect['bottom']:.0f} frame_top={frame_top:.0f} "
+                f"viewport_h={viewport_h}"
+            )
+
+
+def _verify_processed_preview_polarity(ws) -> None:
+    """Guard the one screenshot whose polarity matters pedagogically.
+
+    The manual explains that the Sample Worktable's Processed Preview shows
+    the dark character on a pure white (255) background.  If the app ever
+    renders the old inverted white-on-black glyph, fail the build instead of
+    shipping a screenshot that contradicts the text.
+    """
+    shot = ws.locator(".class-preprocess-result img").screenshot()
+    im = Image.open(io.BytesIO(shot)).convert("L")
+    px = list(im.getdata())
+    n = len(px) or 1
+    mean = sum(px) / n
+    dark = sum(1 for p in px if p < 100) / n
+    bright = sum(1 for p in px if p > 200) / n
+    log(
+        f"processed-preview polarity: mean={mean:.0f} "
+        f"dark={dark * 100:.1f}% bright={bright * 100:.1f}%"
+    )
+    if not (mean > 150 and 0.005 <= dark <= 0.60 and bright > 0.30):
+        raise RuntimeError(
+            "Sample Worktable Processed Preview is not black ink on white "
+            "(polarity guard) — the 05 screenshot would mislead students"
+        )
+
+
 def click_js(ws, expression: str) -> None:
     ws.evaluate(expression)
     time.sleep(0.25)
@@ -363,7 +488,14 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(channel="chrome", headless=True)
-        page = browser.new_page(viewport=VIEWPORT, device_scale_factor=DEVICE_SCALE)
+        # Force prefers-color-scheme: light — the app follows the OS dark
+        # mode setting, and a printed student manual wants the same clean
+        # light UI as the reference manual's screenshots.
+        page = browser.new_page(
+            viewport=VIEWPORT,
+            device_scale_factor=DEVICE_SCALE,
+            color_scheme="light",
+        )
         page.goto(app.url, wait_until="domcontentloaded", timeout=90_000)
         page.wait_for_selector(".tm-start-card", timeout=120_000)
         page.wait_for_timeout(1200)
@@ -515,7 +647,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             ],
         )
         settings_top = ASSET_DIR / "_settings_top.png"
-        snap(page, settings_top)
+        snap_element(ws, "#globalSettingsModal .tm-settings-card", settings_top)
         clear_callouts(ws)
 
         # Bottom view: Advanced -> EMNIST samples + Save.  The modal card is
@@ -544,7 +676,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             ],
         )
         settings_bottom = ASSET_DIR / "_settings_bottom.png"
-        snap(page, settings_bottom)
+        snap_element(ws, "#globalSettingsModal .tm-settings-card", settings_bottom)
         clear_callouts(ws)
 
         click_js(ws, "document.getElementById('settingsSave').click()")
@@ -602,6 +734,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
         shots["05_sample_worktable_edit"] = ASSET_DIR / "05_sample_worktable_edit.png"
         snap(page, shots["05_sample_worktable_edit"])
         clear_callouts(ws)
+        _verify_processed_preview_polarity(ws)
         click_js(ws, "document.getElementById('classPreprocessCancel').click()")
         page.wait_for_timeout(600)
 
@@ -660,12 +793,18 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             ],
         )
         ocr_panel = ASSET_DIR / "_ocr_panel.png"
-        snap(page, ocr_panel)
+        snap_element(ws, "#globalSettingsModal .tm-settings-card", ocr_panel)
         clear_callouts(ws)
         click_js(ws, "document.getElementById('settingsCancel').click()")
         page.wait_for_timeout(600)
 
         # ── 07a / 07b Synth Match + Mismatch ──────────────────────────────
+        # The Preview card (square stage + three slot cards + hint + note)
+        # is taller than the 900 px viewport; enlarge the viewport so the
+        # whole card fits with a comfortable bottom margin, then assert the
+        # verdict elements are fully visible before snapping.
+        page.set_viewport_size({"width": VIEWPORT["width"], "height": 1200})
+        page.wait_for_timeout(600)
         if ws.evaluate("previewSource") != "upload":
             log("Preview source was not upload; switching through JS")
             ws.evaluate(
@@ -686,6 +825,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
         preview_top = ws_top(ws, "#previewCard")
         scroll_to_iframe_y(page, preview_top, target=20)
         page.wait_for_timeout(350)
+        _assert_fully_visible(page, ws, [".signmatch-main", ".signmatch-slots", "#previewNote"])
         preview_specs = [
             {"number": 1, "selectors": [".preview-synth-group"], "pad": 5},
             {"number": 2, "selectors": [".preview-controls"], "pad": 6},
@@ -706,6 +846,9 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
             timeout=240_000,
         )
         page.wait_for_timeout(1200)
+        _assert_fully_visible(
+            page, ws, [".signmatch-main", ".signmatch-slots", ".signmatch-hint", "#previewNote"]
+        )
         add_callouts(ws, preview_specs)
         shots["07b_preview_synth_mismatch"] = ASSET_DIR / "07b_preview_synth_mismatch.png"
         snap(page, shots["07b_preview_synth_mismatch"])
@@ -728,13 +871,15 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
 
         browser.close()
 
-    # Composite 04a (Preview source + Advanced EMNIST controls).
+    # Composite 04a (Preview source + Advanced EMNIST controls).  The two
+    # settings panels are element captures of the full modal card, so pass
+    # no crop box — nothing gets sliced through text.
     shots["04a_settings_emnist_autofill"] = ASSET_DIR / "04a_settings_emnist_autofill.png"
     _pair_panels(
         [
-            (settings_top, (300, 470, 760, 900),
+            (settings_top, None,
              "Settings → Preview: choose Local Image File"),
-            (settings_bottom, (300, 520, 1140, 900),
+            (settings_bottom, None,
              "Settings → Advanced: Auto-fill 24 EMNIST samples"),
         ],
         shots["04a_settings_emnist_autofill"],
@@ -745,7 +890,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
     _pair_panels(
         [
             (training_card, (640, 0, 980, 900), "Training card → Advanced"),
-            (ocr_panel, (680, 0, 1140, 900), "Settings → Training Hyperparameters"),
+            (ocr_panel, None, "Settings → Training Hyperparameters"),
         ],
         shots["06_training_and_advanced"],
     )
@@ -804,7 +949,9 @@ def _pair_panels(
     slot_h = canvas_h - label_h - margin
     x_positions = [margin, margin + slot_w + gap]
     for idx, (path, crop_box, label) in enumerate(panels[:2]):
-        crop = _crop_css(Image.open(path).convert("RGB"), crop_box)
+        crop = Image.open(path).convert("RGB")
+        if crop_box is not None:  # None = the capture is already cropped
+            crop = _crop_css(crop, crop_box)
         scale = min(slot_w / crop.width, slot_h / crop.height)
         crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))),
                            Image.LANCZOS)
@@ -892,7 +1039,7 @@ def _add_table(doc, headers: Sequence[str], rows: Sequence[Sequence[str]],
     return table
 
 
-def _callout_box(doc, title: str, body: Sequence[str]) -> None:
+def _callout_box(doc, title: str, body: Sequence[str], icon: str = "⚠") -> None:
     table = doc.add_table(rows=1, cols=1)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     cell = table.cell(0, 0)
@@ -900,7 +1047,7 @@ def _callout_box(doc, title: str, body: Sequence[str]) -> None:
     _set_cell_borders(cell)
     cell.text = ""
     p = cell.paragraphs[0]
-    run = p.add_run(f"⚠ {title}")
+    run = p.add_run(f"{icon} {title}")
     run.bold = True
     run.font.name = BODY_FONT
     run.font.size = Pt(11)
@@ -912,6 +1059,55 @@ def _callout_box(doc, title: str, body: Sequence[str]) -> None:
         r.font.name = BODY_FONT
         r.font.size = Pt(10)
         r.font.color.rgb = RGBColor(0x7F, 0x1D, 0x1D)
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def _reserved_image_box(doc, label: str) -> None:
+    """A clearly labeled box the author drops a photo into, in Word.
+
+    The manual ships with reserved spaces for hardware/setup photos that
+    only exist on the instructor's camera; the box stays in the document
+    as a visible drop target until the photo replaces it.
+    """
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cell = table.cell(0, 0)
+    _set_cell_shading(cell, "F8FAFC")
+    _set_cell_borders(cell, "94A3B8", 14)
+    p = cell.paragraphs[0]
+    p.clear()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(2)
+    r = p.add_run(f"📷 {label}")
+    r.bold = True
+    r.font.name = BODY_FONT
+    r.font.size = Pt(10.5)
+    r.font.color.rgb = RGBColor(0x33, 0x41, 0x55)
+    p2 = cell.add_paragraph()
+    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p2.paragraph_format.space_after = Pt(4)
+    r2 = p2.add_run("(Reserved space — drop the photo here)")
+    r2.italic = True
+    r2.font.name = BODY_FONT
+    r2.font.size = Pt(9)
+    r2.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+def _code_line(doc, text: str) -> None:
+    """A shaded monospace line, used for the Serial Monitor example output."""
+    table = doc.add_table(rows=1, cols=1)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    cell = table.cell(0, 0)
+    _set_cell_shading(cell, "F1F5F9")
+    _set_cell_borders(cell, "CBD5E1", 10)
+    p = cell.paragraphs[0]
+    p.clear()
+    r = p.add_run(text)
+    r.font.name = "Consolas"
+    r.font.size = Pt(9)
+    r.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
 
 
@@ -998,21 +1194,21 @@ def _heading(doc, text: str, level: int) -> None:
     p.paragraph_format.keep_with_next = True
     run = p.add_run(text)
     run.font.name = HEADING_FONT
-    run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
     if level == 2:
         run.font.size = Pt(16)
+        run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
         p.paragraph_format.space_before = Pt(14)
         p.paragraph_format.space_after = Pt(6)
     elif level == 3:
         run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
         p.paragraph_format.space_before = Pt(10)
         p.paragraph_format.space_after = Pt(3)
-    else:
-        run.font.size = Pt(10.5)
-
-
-def _page_break(doc) -> None:
-    doc.add_page_break()
+    else:  # level 4 — numbered sub-steps inside our Task 2
+        run.font.size = Pt(11.5)
+        run.font.color.rgb = RGBColor(0x1D, 0x4E, 0xD8)
+        p.paragraph_format.space_before = Pt(10)
+        p.paragraph_format.space_after = Pt(3)
 
 
 def _add_page_number(paragraph) -> None:
@@ -1032,6 +1228,7 @@ def _add_page_number(paragraph) -> None:
     run.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
 
 
+
 def build_docx(assets: Dict[str, Path]) -> Path:
     doc = Document()
     section = doc.sections[0]
@@ -1040,8 +1237,6 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     for attr in ("left_margin", "right_margin", "top_margin", "bottom_margin"):
         setattr(section, attr, Inches(1))
 
-    # Consistent styles; the reference manual is an Arial/Times mix, but the
-    # app screenshots are clean and modern, so Arial throughout reads best.
     styles = doc.styles
     normal = styles["Normal"]
     normal.font.name = BODY_FONT
@@ -1062,7 +1257,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
 
     # Header / footer.
     header = section.header.paragraphs[0]
-    header.text = "Student Lab Manual · TFLite Training"
+    header.text = "TFLiteTraining App Manual · Car License Project (3-Char)"
     header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     for r in header.runs:
         r.font.name = BODY_FONT
@@ -1070,365 +1265,243 @@ def build_docx(assets: Dict[str, Path]) -> Path:
         r.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    fr = footer.add_run("Road Sign (3-Char) · ")
+    fr = footer.add_run("Car License Project (3-Char) · ")
     fr.font.name = BODY_FONT
     fr.font.size = Pt(8.5)
     fr.font.color.rgb = RGBColor(0x64, 0x74, 0x8B)
     _add_page_number(footer)
 
     # ── Title block ─────────────────────────────────────────────────────
-    _heading(doc, "Student Lab Manual", 2)
-    p = doc.add_paragraph()
-    p.paragraph_format.space_after = Pt(2)
-    r = p.add_run("Road Sign / Car Sign Project (3-Char)")
-    r.bold = True
-    r.font.name = HEADING_FONT
-    r.font.size = Pt(22)
-    r.font.color.rgb = RGBColor(0x1D, 0x4E, 0xD8)
-    _para(doc, "TFLite Training desktop app · sign_ocr workflow", size=12, color="475569")
+    _heading(doc, "TFLiteTraining App Manual: Car License Project (3-Char)", 2)
+    _heading(doc, "A) Objective & Briefing:", 3)
+    _numbered(doc, "To get familiar with the TFLiteTraining desktop app.")
+    _numbered(doc, "To collect character samples, preprocess images with ROI and Darkness/Luminosity thresholds, and train an AI model.")
+    _numbered(doc, "To test 3-character car license / sign recognition (🟢 YES — MATCH / 🔴 NO — NOT MATCH) and export the trained model.")
+    _para(doc, "Briefing:", bold=True)
     _para(
         doc,
-        "In this lab you will build a three-character road-sign verifier: declare the target "
-        "sequence, collect or auto-generate character glyphs, train an int8 model, verify the "
-        "three-slot reading in Preview, then export the model and save the project archive.",
-        size=10.5,
-    )
-    _add_table(
-        doc,
-        ["Lab at a glance", "Details"],
-        [
-            ["Project type", "🛑 Road Sign (3-Char)  (sign_ocr)"],
-            ["Target in this lab", "A ▸ 1 ▸ 2  (reading direction: Left to Right)"],
-            ["Model input", "3 slots × 28 × 28 int8 glyphs"],
-            ["Verdict", "🟢 YES — MATCH / 🔴 NO — NOT MATCH"],
-            ["Estimated time", "45–60 minutes"],
-            ["Hardware", "Not required — EMNIST Auto-Fill + Synth plates"],
-            ["Ends with", "Export Model + Save Project (.tmproj)"],
-        ],
-        widths=[1.7, 4.8],
+        "In this task, you will learn how to train and export a TensorFlow Lite model through "
+        "data collection, image preprocessing, model training, and performance preview. "
+        "Specifically, you will train a model that can read a 3-character car license / sign "
+        "in sequence (such as A 1 2) and tell you whether the sign in front of the camera "
+        "matches your target (🟢 YES — MATCH or 🔴 NO — NOT MATCH). Please remember to save "
+        "your project regularly (File ▾ → Save) to avoid losing your work.",
     )
 
-    _heading(doc, "Before you start", 3)
+    # ── 2. Opening the project & the four main areas ────────────────────
+    _heading(doc, "1. Opening the Project & the Four Main Areas", 3)
     _para(
         doc,
-        "TensorFlow Lite (LiteRT) for Microcontrollers is designed to run small machine-learning "
-        "models on microcontrollers. TFLite Training is the desktop trainer used in this course: "
-        "it captures or imports samples, applies the same preprocessing the device will use, "
-        "trains an int8 TensorFlow Lite model, and exports C/C++ sources for a downstream project.",
+        "Open the app. On the Start Page, find the 🚗 Car License Project card and "
+        "click Get Started to start a new project, or click Open Project (.tmproj) to open a "
+        "saved template/project file.",
     )
-    _para(doc, "By the end of this lab you will be able to:")
-    _bullet(doc, "Explain why a sign is trained as one class per unique character, not as one class per sign.")
-    _bullet(doc, "Set a three-slot target and read the duplicate-character badge (e.g. A ▸ 1 ▸ A → “Slots 1 & 3”).")
-    _bullet(doc, "Collect glyph samples with the camera/device drawer or fill every empty class with EMNIST Auto-Fill.")
-    _bullet(doc, "Tune ROI and luminance thresholds in the Sample Worktable.")
-    _bullet(doc, "Choose sign-specific hyperparameters and explain the EMNIST mix and two-stage transfer learning.")
-    _bullet(doc, "Verify a sign in Preview and read the three per-slot results behind the YES / NO banner.")
-    _bullet(doc, "Export the trained artifacts and save/reopen the whole project as a .tmproj archive.")
+    _figure(doc, assets["01_start_page"], "Figure 1 — Start Page: choose the 🚗 Car License Project card.")
+    _para(doc, "After opening the project, you will see four main areas:")
+    _figure(doc, assets["02_workspace_overview"], "Figure 2 — The workspace: the four main areas.")
+    _bullet(doc, "Target Sign Bar (Top Left) – for typing the 3 letters or numbers on your car license in order (e.g., A, 1, 2).", bold_prefix="Target Sign Bar (Top Left)")
+    _bullet(doc, "Sample Area (Left) – for collecting and preprocessing single-character photos for each character card.", bold_prefix="Sample Area (Left)")
+    _bullet(doc, "Train Area (Middle) – for training the AI model by adjusting hyperparameters.", bold_prefix="Train Area (Middle)")
+    _bullet(doc, "Preview Area (Right) – for testing the trained model on a 3-character sign and checking the 🟢 YES / 🔴 NO result.", bold_prefix="Preview Area (Right)")
 
-    _heading(doc, "Key idea: training is per character; splitting is per sign", 3)
-    _para(
-        doc,
-        "The sign project reuses the same 28×28 single-glyph classifier as the OCR project. "
-        "Each character card collects glyphs of ONE character. The full three-character plate "
-        "is split into three slots only at Preview / inference time. Keeping those two ideas "
-        "separate is the most important rule in this lab.",
-    )
-
-    # ── Step 1 ──────────────────────────────────────────────────────────
-    _heading(doc, "Step 1 — Choose the Road Sign project", 2)
-    _para(
-        doc,
-        "Launch TFLite Training. The Start Page shows three project cards. Choose the third one, "
-        "🛑 Road Sign (3-Char).",
-    )
-    _figure(doc, assets["01_start_page"], "Figure 1 — Start Page: choose the Road Sign (3-Char) project.")
-    _numbered(doc, "Click Get Started on the 🛑 Road Sign (3-Char) card. A fresh project opens with the target A ▸ B ▸ C and matching character cards.")
-    _numbered(doc, "Alternatively, click Open Project (.tmproj) to reopen a saved sign project. The archive's project type is authoritative; a cross-type file is announced rather than silently switched.")
-    _numbered(doc, "The third button, Import classified class, starts the ordinary image importer. You do not need it for this lab.")
-    _para(doc, "Tip: the app follows the system dark-mode setting (prefers-color-scheme: dark).", size=10, color="475569")
-
-    # ── Step 2 ──────────────────────────────────────────────────────────
-    _heading(doc, "Step 2 — Tour the workspace and set the target", 2)
-    _para(
-        doc,
-        "The workspace has three columns: Character Sample Cards (left), Training (middle), "
-        "and Preview (right). The top toolbar holds File/Edit, Settings, Preferences, the "
-        "📖 Tutorial, and Return Home.",
-    )
-    _figure(doc, assets["02_workspace_overview"], "Figure 2 — Workspace overview with the five working areas.")
-    _bullet(doc, "Top bar — File ▾ (save/open/export dataset), Settings, 📖 Tutorial, ← Return Home, and the Preview card's Export Model button.")
-    _bullet(doc, "Target Sign Sequence Bar (#signSeqBar) — the single writer of the class list and target.")
-    _bullet(doc, "Character Sample Cards — one card per unique character; each card is a capture surface.")
-    _bullet(doc, "Training card — Train Embedded Model, status/accuracy, Advanced hyperparameters, 💡 Use recommended.")
-    _bullet(doc, "Preview card — source controls, Input/ROI/Orig, the 3-slot inference result, and 🧪 Synth pills for sign projects.")
-    _para(
-        doc,
-        "Set the target now: type A, 1, 2 into the three slots (left to right). "
-        "The class cards update automatically. If the first-run tour appears, close it with "
-        "Skip Tour or Esc — you can reopen it any time from 📖 Tutorial.",
-    )
-
-    # ── Step 3 ──────────────────────────────────────────────────────────
-    _heading(doc, "Step 3 — Understand the sequence bar and duplicate characters", 2)
-    _para(
-        doc,
-        "The three slots are the single source of truth. Each valid keystroke updates the target, "
-        "auto-advances to the next slot, and syncs the class cards to the server.",
-    )
-    _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 3 — Target slots, swap buttons, reading direction and duplicate-character badge.")
-    _bullet(doc, "Slots — click a slot and type 0–9 or A–Z. ✔ A complete character advances to the next slot. Backspace on an empty slot clears the previous one.")
-    _bullet(doc, "◀ / ▶ — swap the character with its neighbour. The edge buttons are disabled.")
-    _bullet(doc, "Reading direction — the bar echoes left → right (or right → left). Change it in Training → Advanced → Sign Reading Direction. RTL reverses the three boxes after the split; pixels are never mirrored.")
-    _bullet(doc, "Duplicate character — A ▸ 1 ▸ A creates only two class cards, A and 1. The A card carries the badge “Slots 1 & 3”; the model trains A once.")
-    _bullet(doc, "Auto-sync — every edit posts the new sequence/class list and returns fresh counts and previews atomically. New characters are auto-filled in the same request when Auto-Fill is on.")
-    _bullet(doc, "After training — editing the sequence changes the dataset fingerprint; the Training status adds ⚠ Stale until you retrain.")
-    _para(doc, "Return to A ▸ 1 ▸ 2 before continuing.", bold=False, color="B91C1C", size=10)
-
-    # ── Step 4 ──────────────────────────────────────────────────────────
-    _page_break(doc)
-    _heading(doc, "Step 4 — Collect training samples", 2)
+    # ── 3. Sample Area Part A ───────────────────────────────────────────
+    _heading(doc, "2. Sample Area — Part A: Setting the Target License & Collecting Samples", 3)
+    _para(doc, "Setting the Target License (single plate):", bold=True)
+    _bullet(doc, "Click each of the three boxes in the Target Sign Bar and type your 3 characters (for example, A, 1, 2). Use the ◀ / ▶ buttons beneath a slot to swap neighbouring characters.")
+    _bullet(doc, "If your license uses the same character twice (like A 1 A), the app automatically keeps just one A card with a “Slots 1 & 3” badge so you only need to collect samples for A once!")
+    _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 3 — The Target Sign Bar: typing characters, the ◀ / ▶ swap buttons and the duplicate-character badge.")
+    _para(doc, "Want your AI “gatekeeper” to accept more than one license plate?", bold=True)
+    _bullet(doc, "Besides typing a single 3-character plate (A ▸ 1 ▸ 2), you can click the 🪪 License List button next to ⚙ Settings in the top bar and add one or more allowed license plates — just like a parking-lot gatekeeper that remembers multiple authorized cars (for example A 1 2 and B 1 8)!", bold_prefix="🪪 License List")
+    _bullet(doc, "Shared characters are automatically merged: a character like 1 that appears on several plates becomes ONE Sample Area card, so you only collect samples for each unique character once!")
+    _bullet(doc, "In Preview, the app shows 🟢 YES — MATCH whenever ANY plate on your allowed list is seen!")
+    _para(doc, "Collecting Samples for Each Character Card:", bold=True)
     _callout_box(
         doc,
-        "Critical training rule",
+        "Key rule: one card = one character",
         [
-            "Each character card must collect single-character glyph samples — the input the 28×28 model actually learns.",
-            "Use EMNIST Auto-Fill (⚙ Settings → Advanced Settings) for a zero-camera workflow, or capture/upload a frame and isolate ONE character with Auto / Manual ROI.",
-            "A whole 3-character sign filed under “A” trains A on the whole sign. The automatic three-slot split belongs to Preview / inference, not training.",
+            "Each character card collects photos of ONE single letter/number (not the whole "
+            "3-character license at once). This way the AI learns each character separately, "
+            "and during Preview the app slices the whole license into 3 boxes and checks "
+            "each one by itself.",
         ],
+        icon="💡",
     )
-    _heading(doc, "4A — Zero hardware: EMNIST Auto-Fill (recommended first pass)", 3)
-    _para(
-        doc,
-        "Open ⚙ Settings → Preview and set Preview Image Input Source to Local Image File. "
-        "Then expand ▸ Advanced Settings, enable the auto-fill checkbox, and (optionally) click "
-        "Fill Empty Classes with EMNIST Samples Now. Each empty character class receives 24 "
-        "dark-ink-on-light 96×96 captures; real camera samples are never touched.",
-    )
-    _figure(doc, assets["04a_settings_emnist_autofill"], "Figure 4a — Preview source and EMNIST Auto-Fill controls in Settings.")
-    _numbered(doc, "Set Preview Image Input Source = Local Image File.")
-    _numbered(doc, "Enable Auto-fill empty classes with EMNIST template samples (24 / class).")
-    _numbered(doc, "Wait for each card to show 24 Image Samples; the fill is immediate. Use the one-shot button if the checkbox is already on.")
-    _numbered(doc, "Click Save changes to apply the settings.")
-    _para(
-        doc,
-        "The auto-fill flag is project state. Changing a slot later backfills the new character "
-        "in the same class-sync request, so a new class does not stay at 0 samples.",
-        size=10,
-        color="475569",
-    )
+    _bullet(doc, "Click “Webcam” — uses your laptop or USB camera. Capture single photos by clicking “Capture”, or take photos continuously by holding “Hold to Capture” (or holding the Space bar). Click “Close” to fold the panel.", bold_prefix="Click “Webcam”")
+    _bullet(doc, "Click “Upload” — choose one or more image files from your computer.", bold_prefix="Click “Upload”")
+    _bullet(doc, "Click “Device” — captures images streamed from the smart car camera over USB serial (select the serial port in ⚙ Settings).", bold_prefix="Click “Device”")
+    _figure(doc, assets["04b_capture_drawer"], "Figure 4b — The capture drawer on a character card: Webcam / Upload / Device tiles, Capture / Hold to Capture and Close.")
+    _bullet(doc, "Quick Auto-Fill Option (⚙ Settings): If you want to test the software right away without a camera, click ⚙ Settings in the top bar, expand ▸ Advanced Settings, and check Auto-fill empty classes with EMNIST template samples (24 / class) (or click Fill Empty Classes with EMNIST Samples Now), then click Save changes. Each empty character card immediately gets 24 handwriting samples!", bold_prefix="Quick Auto-Fill Option (⚙ Settings)")
+    _figure(doc, assets["04a_settings_emnist_autofill"], "Figure 4a — ⚙ Settings: the Auto-fill 24 EMNIST samples option (left: Preview source, right: Advanced Settings).")
 
-    _heading(doc, "4B — Camera, device drawer and upload", 3)
+    # ── 4. Sample Area Part B: the Edit page ────────────────────────────
+    _heading(doc, "3. Sample Area — Part B: Preprocessing the Samples (Edit Page)", 3)
     _para(
         doc,
-        "On a character card, click Webcam, Upload, or Device. The drawer opens below the card. "
-        "Capture saves one frame; Hold to Capture (or holding Space) records a burst. "
-        "Close folds the drawer away.",
+        "On each character card header there are small icons: the Edit button opens the image "
+        "processing page, and the eraser icon clears all the samples on that card.",
     )
-    _figure(doc, assets["04b_capture_drawer"], "Figure 4b — Device capture drawer: source tiles, Capture / Hold, Close and sample thumbnails.")
-    _para(
-        doc,
-        "The example above shows the drawer with no board attached: it reports that no "
-        "compatible serial device was detected and leaves the live preview empty. Choose the "
-        "correct port in Settings to see frames. Webcam and Upload work without a board.",
-        size=9.5,
-        color="475569",
-    )
-    _bullet(doc, "Webcam — pick the camera in Settings; live preview appears in the drawer.")
-    _bullet(doc, "Device — connect the ESP32-P4 serial source, choose the port in Settings, and capture from the live serial frame. Use Capture or Hold to Capture.")
-    _bullet(doc, "Upload — choose existing images. Great for photos of printed characters.")
-    _bullet(doc, "Space — while a Webcam/Device drawer is open: tap for one frame, hold ≥220 ms for a burst; release stops.")
-    _bullet(doc, "Close — the pill in the drawer header (title: Collapse panel (Esc)).")
-    _para(
-        doc,
-        "If you use camera samples, capture a close view where the current character is the "
-        "dominant glyph, or use Manual ROI in Step 5. Vary distance, tilt and lighting; aim for "
-        "at least 10–20 varied samples per class.",
-        size=10,
-        color="475569",
-    )
-
-    # ── Step 5 ──────────────────────────────────────────────────────────
-    _page_break(doc)
-    _heading(doc, "Step 5 — Inspect and tune samples in the Sample Worktable", 2)
-    _para(
-        doc,
-        "Click Edit on a character card to open the worktable. The left shows the Original "
-        "Sample with its ROI box; the right shows the Processed Preview — the 28×28 glyph "
-        "the model receives.",
-    )
-    _figure(doc, assets["05_sample_worktable_edit"], "Figure 5 — Sample Worktable: original/ROI, 28×28 processed glyph, mode, thresholds and save controls.")
-    _bullet(doc, "Original Sample — the raw capture. The green box is auto-detected; blue is Manual ROI.")
-    _bullet(doc, "Processed Preview — integer Otsu + projection + 28×28 normalization. It should show one centered glyph with a clean margin.")
-    _bullet(doc, "Preprocess Mode — Auto (find sign) or Manual ROI. Manual ROI pins a fixed box; drag on the original image or type ROI X1/Y1/X2/Y2 (0–1).")
-    _bullet(doc, "Dark Thr (0–100) / Lum Thr (50–255) — the luminance window. Defaults 0/100 mean exact Otsu; other values pin the threshold and add a dark floor.")
-    _bullet(doc, "Save Sample — stores the current sample's edits. Saved is shown when there is nothing to save.")
-    _bullet(doc, "Shortcuts — F1 Auto, F2 Manual ROI, S Save, D Delete Sample, Esc Close, arrows navigate, Shift+Arrows nudge the ROI.")
-    _para(
-        doc,
-        "Remember: the worktable edits a class sample, not the Preview's three-slot split. "
-        "Use it to make each character's glyph clean and consistent.",
-        size=10,
-        color="475569",
-    )
-
-    # ── Step 6 ──────────────────────────────────────────────────────────
-    _page_break(doc)
-    _heading(doc, "Step 6 — Train the model", 2)
-    _para(
-        doc,
-        "Open Training → ▸ Advanced. The project-specific controls are Sign Reading Direction "
-        "and Ink Polarity; the OCR/sign block holds EMNIST mixing and two-stage transfer "
-        "learning. Start with the defaults, then click Train Embedded Model.",
-    )
-    _figure(doc, assets["06_training_and_advanced"], "Figure 6 — Training card → Advanced (left) and Settings → Training Hyperparameters (right).")
-    _para(doc, "Complete hyperparameter reference for sign_ocr:", bold=True)
+    _para(doc, "The “Edit” page is composed of two parts: Image Viewer (Left) and Sample Worktable (Right):")
+    _bullet(doc, "In the Image Viewer, we can see two images: Original Sample and Processed Preview.", bold_prefix="In the Image Viewer")
+    _bullet(doc, "For the Original Sample: A green (Auto) or blue (Manual ROI) ROI (Region of Interest) box is shown. This ROI defines the area that will be cropped and passed for further processing.", bold_prefix="For the Original Sample")
+    _bullet(doc, "For the Processed Preview: Pixels in the original image whose brightness falls below the Darkness Threshold (Dark Thr) or above the Luminosity Threshold (Lum Thr) are converted to pure white (Brightness: 255), leaving the dark character cleanly isolated on a white background.", bold_prefix="For the Processed Preview")
+    _bullet(doc, "In the Sample Worktable, you can adjust the parameters to fine-tune the processing effect and minimize background noise:", bold_prefix="In the Sample Worktable")
+    _figure(doc, assets["05_sample_worktable_edit"], "Figure 5 — The Edit page: Image Viewer (left) and Sample Worktable (right), with the dark letter on a pure white (255) Processed Preview.")
     _add_table(
         doc,
-        ["Field", "Default", "Range / options", "What it does"],
+        ["Parameter", "Effects"],
         [
-            ["Ink Polarity", "0 — Dark ink on bright bg", "0 / 1", "Global ink polarity for every class; 1 = bright ink on dark bg."],
-            ["Sign Reading Direction", "Left to Right (L ➔ R)", "LTR / RTL", "Order of the three slots. RTL reverses boxes after the split, never pixels."],
-            ["Image Size", "28", "8–512", "Model input side. 28×28 is the glyph geometry; keep it for sign_ocr."],
-            ["Batch Size", "32", "≥1", "Samples per gradient step; auto-adjust may lower it for small sets."],
-            ["Epochs", "20", "≥1", "Base epoch count; the OCR strategy replaces it with Head + Fine-tune epochs."],
-            ["Validation Split", "0.25", "0–0.5", "Fraction held out for validation."],
-            ["Learning Rate", "0.0016", "≥0", "Base learning rate; the two-stage schedule has its own head/finetune rates."],
-            ["💡 Use recommended", "—", "button", "Sets Batch Size, Epochs, Learning Rate and Validation Split from the dataset size (~800 updates, ≥4 steps/epoch). Does not change Image Size or architecture."],
-            ["Mix EMNIST into every class", "On", "on/off", "Adds synthetic EMNIST glyphs to every real class."],
-            ["EMNIST split", "balanced", "balanced / letters / digits", "Which EMNIST subset supplies the synthetic glyphs."],
-            ["Synthetic per class", "200", "0–5000", "Synthetic EMNIST glyphs added per class."],
-            ["Background / noise class", "On", "on/off", "Appends the _background rejector used for blank slots."],
-            ["Background crops", "0", "0–5000", "Random non-glyph crops; 0 mirrors Synthetic per class."],
-            ["Fine-tune pre-trained backbone", "On", "on/off", "Two-stage transfer learning from a cached EMNIST backbone."],
-            ["Pre-train samples / class", "1200", "100–6000", "Backbone warm-up corpus size."],
-            ["Pre-train epochs", "4", "1–100", "Backbone warm-up epochs."],
-            ["Head epochs", "12", "1–200", "Phase 1: train the new head with the backbone frozen."],
-            ["Head learning rate", "0.0015", "≥0", "Phase 1 learning rate."],
-            ["Fine-tune epochs", "25", "0–200", "Phase 2: unfreeze the last conv block(s)."],
-            ["Fine-tune learning rate", "0.0002", "≥0", "Phase 2 learning rate."],
-            ["Conv blocks to unfreeze", "1", "0–16", "How many final backbone blocks are unfrozen."],
+            ["Preprocess Mode", "1. Auto (find sign): automatically finds and crops the character in the image. 2. Manual ROI: crop the ROI manually by dragging your mouse on the original image."],
+            ["Dark Thr (Darkness Threshold)", "Any pixel whose brightness is less than Dark Thr turns into pure white (255)."],
+            ["Lum Thr (Luminosity Threshold)", "Any pixel whose brightness is greater than Lum Thr turns into pure white (255)."],
+            ["ROI X1, Y1, X2, Y2 (Only for Manual ROI usage)", "The relative position (0.00 to 1.00) of the top-left (X1, Y1) and bottom-right (X2, Y2) corners of the crop box."],
         ],
-        widths=[1.65, 1.35, 1.35, 2.15],
+        widths=[1.9, 4.6],
+    )
+    _para(doc, "Keyboard shortcuts:", bold=True)
+    _bullet(doc, "Arrow keys — select the sample you want to process or check (move to the next/previous sample).")
+    _bullet(doc, "Shift + Arrow keys — move the ROI box in Manual ROI mode.")
+    _bullet(doc, "F1 — choose Auto preprocess mode. F2 — choose Manual ROI mode.")
+    _bullet(doc, "D — delete the sample. Esc — exit the “Edit” view. S — save the change.")
+    _para(doc, "Please remember to save after any changes!", bold=True, color="B91C1C", size=10)
+
+    # ── 5. Train Area ───────────────────────────────────────────────────
+    _heading(doc, "4. Train Area — Setting Hyperparameters & Training", 3)
+    _para(
+        doc,
+        "Next, move to the Train Area. After image processing is complete, click ▸ Advanced "
+        "to view or adjust the training hyperparameters. Below is the table for each "
+        "hyperparameter:",
+    )
+    _para(
+        doc,
+        "About the Image Size: even if the smart-car camera captures frames at 160×160 "
+        "(set in ⚙ Settings), the app automatically scales every camera frame to match the "
+        "model's input size — 96×96 for the picture preprocessing and 28×28 for each "
+        "character slot. The exported model carries its img_size with it (in "
+        "model_settings.h), so the car always scales the camera frames to exactly the size "
+        "the model was trained on.",
+    )
+    _add_table(
+        doc,
+        ["#", "Hyperparameter", "Default", "Range", "What it does"],
+        [
+            ["1", "Ink Polarity", "0 — Dark ink on bright bg", "0 / 1", "Which way round your letters are: normal dark-on-light writing (0), or bright letters on a dark sign (1)."],
+            ["2", "Sign Reading Direction", "Left to Right", "L ➔ R / R ➔ L", "The order the app reads the three boxes of your sign."],
+            ["3", "Image Size", "28", "8–512", "How many pixels wide the small letter picture is. 28×28 fits one letter perfectly — leave it. Whatever the camera sends (even 160×160), the app scales it to this size automatically."],
+            ["4", "Batch Size", "32", "1 or more", "How many photos the AI practices with in one go."],
+            ["5", "Epochs", "20", "1 or more", "How many times the AI reads through all your photos. For this project the app follows its own smart two-phase plan."],
+            ["6", "Validation Split", "0.25", "0–0.5", "The part of your photos kept secret for testing."],
+            ["7", "Learning Rate", "0.0016", "0 or more", "How big each learning step is. Small steps = careful but slow."],
+            ["8", "Mix EMNIST into every class", "On", "on / off", "Mixes built-in handwriting examples with your photos so the AI learns from more variety."],
+            ["9", "Use _background noise class to replace OOD rejection", "Off", "on / off", "Default is Off for the Car License Project so the AI focuses purely on your 3 characters and uses standard OOD/confidence checks; turn On only if you want an extra “no letter” class to replace OOD."],
+            ["10", "Fine-tune pre-trained backbone", "On", "on / off", "Starts from a smart pre-learned letter reader so your model trains fast and accurately even with just 20 photos!"],
+        ],
+        widths=[0.3, 1.55, 1.3, 1.0, 2.35],
         font_size=8.5,
     )
-    _para(
-        doc,
-        "Under the hood: EMNIST mixing aligns synthetic glyphs to the capture convention, "
-        "isolates and centers them, and appends random background crops for the _background "
-        "class. Two-stage transfer learning first warms a cached EMNIST backbone, then trains "
-        "the new classification head with the backbone frozen, and finally unfreezes the last "
-        "conv block(s) at the lower fine-tune rate.",
-        size=9.5,
-        color="475569",
-    )
-    _heading(doc, "After training", 3)
-    _bullet(doc, "The status changes to Model Trained · tap for accuracy. Click it to see per-class accuracy, including 1, 2, A and _background.")
-    _bullet(doc, "The Train button stays available for re-training with new samples or a changed target.")
-    _bullet(doc, "If you change a character after training, the status adds ⚠ Stale. Retrain before exporting; the old model's labels may not include the new character.")
-    _bullet(doc, "Training uses the same int8 graph Preview runs, so Preview accuracy predicts the exported model's behavior.")
+    _para(doc, "What to do, step by step:", bold=True)
+    _numbered(doc, "Click 💡 Use recommended to automatically fill in recommended settings for your dataset size.")
+    _numbered(doc, "Click Train Embedded Model and wait for training to finish.")
+    _numbered(doc, "Click Model Trained · tap for accuracy to view the per-class accuracy popup.")
+    _numbered(doc, "If you change the target characters later, a ⚠ Stale badge reminds you to click Train Embedded Model again.")
+    _figure(doc, assets["06_training_and_advanced"], "Figure 6 — The Train Area → Advanced (left) and ⚙ Settings → Training Hyperparameters (right).")
 
-    # ── Step 7 ──────────────────────────────────────────────────────────
-    _page_break(doc)
-    _heading(doc, "Step 7 — Verify the sign in Preview", 2)
+    # ── 6. Preview Area & export ────────────────────────────────────────
+    _heading(doc, "5. Preview Area — Testing 3-Slot Matching & Exporting", 3)
+    _para(doc, "Select the Preview Image Input Source in ⚙ Settings → Preview:")
+    _bullet(doc, "Device (MCU) — live pictures from the smart car camera.", bold_prefix="Device (MCU)")
+    _bullet(doc, "Webcam — your laptop camera.", bold_prefix="Webcam")
+    _bullet(doc, "Local Image File — for uploaded images and the 3 quick-test buttons 🧪 Synth Match, 🔀 Synth Reversed, ❌ Synth Mismatch.", bold_prefix="Local Image File")
+    _para(doc, "The toggles and sliders on the Preview card:", bold=True)
+    _bullet(doc, "Toggle Input ON to start live prediction.", bold_prefix="Toggle Input")
+    _bullet(doc, "Toggle ROI: when unchecked, it shows the full image with the green ROI box drawn on it; when checked, it zooms in to show only the cropped image inside the ROI box.", bold_prefix="Toggle ROI")
+    _bullet(doc, "Toggle Orig: switches between the threshold-cleaned black-on-white view and the original raw grayscale image.", bold_prefix="Toggle Orig")
+    _bullet(doc, "Dark / Lum sliders: adjust brightness thresholds live so the sign letters stand out cleanly on a white background.", bold_prefix="Dark / Lum sliders")
+    _para(doc, "Reading the 3-Slot Sign Match Output:", bold=True)
+    _figure(doc, assets["07a_preview_synth_match"], "Figure 7a — 🧪 Synth Match: all three slots agree → 🟢 YES — MATCH.")
+    _figure(doc, assets["07b_preview_synth_mismatch"], "Figure 7b — ❌ Synth Mismatch: one slot disagrees → 🔴 NO — NOT MATCH.")
+    _bullet(doc, "The app slices the detected license horizontally into 3 character slots in your chosen reading direction.")
+    _bullet(doc, "Each slot card shows WANT <character>, the character read by the AI, the 28×28 image fed to the model, and the confidence percentage (%).")
+    _bullet(doc, "When all 3 slots match your target characters with at least 60% confidence, the banner turns green: 🟢 YES — MATCH. If any slot reads a different character, is below 60%, or is blank (_background), the banner turns red: 🔴 NO — NOT MATCH and explains which slot failed.")
+    _para(doc, "Positioning the Smart Car and Checkpoint on the Map:", bold=True)
     _para(
         doc,
-        "Set Preview Image Input Source to Local Image File. The context bar shows the Upload "
-        "control and three sign-only pills: 🧪 Synth Match, 🔀 Synth Reversed and "
-        "❌ Synth Mismatch. Toggle Input ON to run predictions.",
+        "Before testing with the real car camera, place the car and the checkpoint stand "
+        "exactly as shown below — the right placement lets the RFID Reader read the tag and "
+        "gives the camera the perfect view of the license plate.",
     )
-    _figure(doc, assets["07a_preview_synth_match"], "Figure 7a — Synth Match: three-slot reading and the 🟢 YES — MATCH verdict.")
-    _bullet(doc, "🧪 Synth Match — composes the current target characters into a sign plate and asserts YES.")
-    _bullet(doc, "🔀 Synth Reversed — composes the characters in reversed order to probe LTR/RTL direction.")
-    _bullet(doc, "❌ Synth Mismatch — substitutes a wrong character and asserts NO.")
-    _bullet(doc, "Input — starts/stops the prediction loop; ROI draws the crop box; Orig shows the full masked frame.")
-    _bullet(doc, "The banner replaces the class bars: 🟢 YES — MATCH means all three slots agreed; 🔴 NO — NOT MATCH names the failing slot(s).")
-    _bullet(doc, "Each .signmatch-slot shows WANT <char>, the read glyph, its 28×28 image, and the confidence percentage. Green = match, red = fail.")
-    _para(doc, "A YES requires all three slots to satisfy the same per-slot rule:", bold=True)
-    doc.paragraphs[-1].paragraph_format.keep_with_next = True
-    _numbered(doc, "The split found ink in the slot.")
-    _numbered(doc, "The winning class is not _background.")
-    _numbered(doc, "The winning class equals the target character for that slot.")
-    _numbered(doc, "The raw confidence (best_raw / sum(raw)) is at least 0.60.")
-    _numbered(doc, "The exported model uses the same rule; the sign path opens the generic OOD layers and rejects with _background + the confidence floor.")
-    _figure(doc, assets["07b_preview_synth_mismatch"], "Figure 7b — Synth Mismatch: the red NO verdict and the per-slot hint.")
+    _bullet(doc, "First, find the green RFID Reader mounted underneath the smart car chassis (between the two wheels). Locate it first, because its position is used to align the car on the map edge!")
+    _reserved_image_box(doc, "[Reserved Image 1 — Photo of Smart Car Underside Showing Green RFID Reader]")
     _para(
         doc,
-        "Read a red banner from the hint: “slot 2 read ‘6’ at 41.2%” means the glyph was "
-        "classified as the wrong character or missed the 60% floor. A _background result means "
-        "the slot crop held no recognized glyph. Use the worktable to clean that character's "
-        "samples, then retrain.",
-        size=10,
-        color="475569",
+        "Place the smart car on the starting edge of the white map with the front IR "
+        "line-tracking sensors over the black line. The vertical projection (shadow) of the "
+        "REAR edge (back end) of the RFID Reader should sit right along the outer edge of the "
+        "white map. At this exact position, the RFID Reader is just inside the map edge and "
+        "can reliably detect the tag, while the camera gets the ideal distance to view the "
+        "checkpoint sign.",
     )
+    _reserved_image_box(doc, "[Reserved Image 2 — Photo of Smart Car Aligned at the Edge of the Map]")
+    _para(
+        doc,
+        "Place the checkpoint stand so its square clear acrylic base is rotated at a 45° "
+        "angle, with the corner tip of the acrylic base just touching (tangent to) the "
+        "straight black line. This guarantees the camera faces the 3-character license plate "
+        "at the optimal angle while keeping the track clear.",
+    )
+    _reserved_image_box(doc, "[Reserved Image 3 — Photo of Checkpoint Acrylic Base Tangent to the Black Line at 45°]")
 
-    # ── Step 8 ──────────────────────────────────────────────────────────
-    _page_break(doc)
-    _heading(doc, "Step 8 — Export the model and save the project", 2)
+    _para(doc, "Exporting the Model & Saving Your Project:", bold=True)
+    _bullet(doc, "Click Export Model at the top-right of the Preview card to export the C/C++ model files (tm_model_data.cpp/.h, model_resolver.h, model_settings.cpp/.h, tm.tflite, labels.txt).")
+    _bullet(doc, "The export packs in everything the car needs: the trained weights, the img_size scaling parameters, the _background / OOD settings, and the full list of your allowed license plates — all into model_settings.h. When the car sees a plate, the ESP32-P4 checks it against the list and tells the ESP32-S3 which specific plate number matched!")
+    _bullet(doc, "Click File ▾ → Save (or Save as) at the top-left menu to save your project as a .tmproj file.")
+    _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model on the Preview card and File ▾ → Save / Save as.")
+    _para(doc, "On-Car Verification (Arduino Serial Monitor):", bold=True)
     _para(
         doc,
-        "When the Preview verdict is reliably correct, export the trained artifacts for your "
-        "downstream project and save the whole workspace so you can reopen it later.",
+        "After exporting the model into the TFLite_Sign/ folder and uploading TFLite_Sign.ino "
+        "to the ESP32-P4, open the Arduino IDE Serial Monitor (921600 baud). When the car "
+        "reads a license plate, you will see an output line like this:",
     )
-    _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model in the Preview card and Save / Save as in the File menu.")
-    _heading(doc, "Export Model", 3)
-    _numbered(doc, "Click Export Model in the Preview card head.")
-    _numbered(doc, "Choose the target folder for the downstream project.")
-    _numbered(doc, "Confirm overwrite if the folder already contains an export.")
-    _para(doc, "With the default export name tm, the folder receives:")
-    _add_table(
-        doc,
-        ["File", "Purpose"],
-        [
-            ["tm.tflite", "The trained int8 TensorFlow Lite model."],
-            ["tm_model_data.h / .cpp", "The model bytes as a C/C++ array (default symbol g_tm_model_data)."],
-            ["model_settings.h / .cpp", "Labels, 28×28 geometry, target sequence, class indices, reading order, confidence floor, thresholds and OOD constants."],
-            ["model_resolver.h", "The MicroInterpreter operator resolver for this model's ops."],
-            ["labels.txt", "Human-readable label order, including _background when enabled."],
-        ],
-        widths=[2.1, 4.4],
-    )
+    _code_line(doc, "SIGN: MATCH (YES) plate=A12 [0] 'A'->A 0.95 [1] '1'->1 0.86 [2] '2'->2 0.78")
+    _bullet(doc, "Each slot [0], [1], [2] prints the character the AI predicted and its confidence score — for example [1] '1'->1 0.86 means slot 1 read the character '1' with 86% confidence.")
+    _bullet(doc, "The verdict MATCH (flags=0x02) tells the ESP32-S3 which authorized license plate matched (plate=A12), so the car can execute the corresponding action!")
+    _reserved_image_box(doc, "[Reserved Image 4 — Screenshot of Arduino IDE TFLite_Sign.ino Serial Monitor Output]")
     _para(
         doc,
-        "For the downstream project, the usual integration set is tm_model_data.cpp/.h, "
-        "model_resolver.h and model_settings.cpp/.h. The .tflite and labels.txt are useful "
-        "diagnostics. Exporting also pins Preview to this exact model until the next export.",
-        size=10,
-        color="475569",
-    )
-    _heading(doc, "Save Project (.tmproj)", 3)
-    _numbered(doc, "Open File ▾ → Save (⌘S / Ctrl+S) to save to the current path, or Save as (⇧⌘S / Shift+Ctrl+S) to choose a new file.")
-    _numbered(doc, "The .tmproj is a ZIP archive containing the project header/type, classes and target, samples, preprocessing, training config and the latest run artifacts.")
-    _numbered(doc, "Reopen it later with Open Project (.tmproj) on the Start Page. The archive restores the full sign workspace, including sign_sequence, reading_order and the Auto-Fill flag.")
-    _callout_box(
-        doc,
-        "Save early and often",
-        [
-            "Save the .tmproj before training and again after a good result. A project archive is the only way to return to the exact class list, target, preprocessing and trained model.",
-        ],
-    )
-    _para(
-        doc,
-        "You have completed the full Road Sign (3-Char) workflow: target sequence → glyph "
-        "samples → worktable preprocessing → training → three-slot Preview verification → "
-        "export and project save.",
+        "That's it — you collected letters, trained an AI to read them, tested a whole license, "
+        "exported your model and watched it recognize a plate on the car. Well done!",
         bold=True,
-        size=10.5,
         color="1D4ED8",
     )
 
-    # Scope guard: this lab stops at Export / Save.  A future edit that
-    # slips an Arduino/Serial section back in should fail the build rather
-    # than silently producing the wrong manual.
+    # Scope guard: this is the standalone Car License manual.  No hardware
+    # kit walkthrough (Task 0), no Arduino IDE setup steps (Task 1), no MCU
+    # flashing guide (Task 3) — a future edit that slips them back in fails
+    # the build instead of silently producing the wrong manual.  (The
+    # on-car placement and Serial Monitor verification at the end of
+    # Section 5 are part of the Car License workflow, not Task 0/1/3.)
     all_text = "\n".join(p.text for p in doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 all_text += "\n" + cell.text
-    for banned in ("Arduino", "Serial Monitor", "TFLite_Sign.ino", "TFLite_Sign"):
+    for banned in (
+        "Task 0",
+        "Task 1",
+        "Task 3",
+        "esp32_mannual",
+        "Signpost",
+        "Battery Cabin",
+        "Boot Button",
+        "TF Card",
+    ):
         if banned.lower() in all_text.lower():
             raise RuntimeError(f"manual scope violation: contains {banned!r}")
-    if len(doc.inline_shapes) < 10:
-        raise RuntimeError(f"expected 10 figures, found {len(doc.inline_shapes)}")
+    if len(doc.inline_shapes) != 10:
+        raise RuntimeError(
+            f"expected exactly 10 figures, found {len(doc.inline_shapes)}"
+        )
 
     LOCAL_DOCX.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(LOCAL_DOCX))
@@ -1437,7 +1510,6 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     shutil.copy2(LOCAL_DOCX, ONEDRIVE_DOCX)
     log(f"docx -> {ONEDRIVE_DOCX}")
     return LOCAL_DOCX
-
 
 # ── main ────────────────────────────────────────────────────────────────────
 def main(argv: Optional[Sequence[str]] = None) -> int:

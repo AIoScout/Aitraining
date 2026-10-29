@@ -68,7 +68,7 @@ def _sign_payload(*, match: bool, variant: str, chars, filename: str):
         "processed_image_b64": "cm9p",
         "processed_variant": "sign_search",
         "crop_image_b64": "Y3JvcA==",
-        "full_image_b64": "ZnVsbA==",
+        "full_image_b64": _TINY_PNG_B64,
         "image_b64": _TINY_PNG_B64,
         "orig_b64": _TINY_PNG_B64,
         "roi_b64": "cm9p",

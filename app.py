@@ -1062,6 +1062,69 @@ def _status_style(status: str) -> str:
     return "tm-status tm-status-idle"
 
 
+def _render_licenses_expander() -> None:
+    """In-product third-party license declaration.
+
+    The commercial distribution obligation: every bundled open-source
+    component's license declaration must ship WITH the app and stay
+    reachable from the UI.  The notices file is generated from the venv
+    (tools/gen_third_party_notices.py).  Called from the Start Page and
+    from every workspace header so the declaration is always findable.
+    """
+    try:
+        _notices_path = os.path.join(
+            os.path.dirname(__file__) or ".", "THIRD_PARTY_NOTICES.md"
+        )
+        if os.path.exists(_notices_path):
+            with open(_notices_path, encoding="utf-8") as _nfh:
+                _notices_text = _nfh.read()
+            with st.expander("📄 Open Source Licenses"):
+                st.markdown(_notices_text)
+                _license_path = os.path.join(os.path.dirname(__file__) or ".", "LICENSE")
+                if os.path.exists(_license_path):
+                    with open(_license_path, encoding="utf-8") as _lfh:
+                        st.markdown("### This software's license (Apache License 2.0)\n")
+                        st.code(_lfh.read(), language=None)
+    except Exception:
+        pass
+
+
+def _render_legal_footer() -> None:
+    """Compact page footer: copyright claim + one small legal entry.
+
+    The license declarations stay one click away (that reachability is
+    what keeps a commercial distribution compliant) without dominating
+    the page.  All content is English, matching the rest of the UI.
+    """
+    try:
+        with st.expander("⚖️ EULA · Open Source Licenses"):
+            _eula_path = os.path.join(os.path.dirname(__file__) or ".", "EULA.md")
+            if os.path.exists(_eula_path):
+                with open(_eula_path, encoding="utf-8") as _efh:
+                    st.markdown(_efh.read())
+            _notices_path = os.path.join(
+                os.path.dirname(__file__) or ".", "THIRD_PARTY_NOTICES.md"
+            )
+            if os.path.exists(_notices_path):
+                with open(_notices_path, encoding="utf-8") as _nfh:
+                    st.markdown(_nfh.read())
+            _license_path = os.path.join(os.path.dirname(__file__) or ".", "LICENSE")
+            if os.path.exists(_license_path):
+                with open(_license_path, encoding="utf-8") as _lfh:
+                    st.markdown("### This software's license (Apache License 2.0)\n")
+                    st.code(_lfh.read(), language=None)
+    except Exception:
+        pass
+    st.markdown(
+        '<div style="margin-top:2.5rem;padding-top:1rem;border-top:1px solid #E2E8F0;'
+        'color:#94A3B8;font-size:12px;text-align:center;">'
+        '© 2026 AIoScout — All rights reserved · '
+        '<a href="https://aioscout.io" style="color:#64748B;text-decoration:none;">'
+        'aioscout.io</a></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_tm_workspace_header() -> None:
     class_count, sample_count = _tm_dataset_stats()
     meta = _tm_load_train_latest()
@@ -1104,6 +1167,7 @@ def _render_tm_workspace_header() -> None:
         ''',
         unsafe_allow_html=True,
     )
+    _render_licenses_expander()
 
 
 def _render_tm_flow_lane() -> None:
@@ -1316,7 +1380,7 @@ def _tm_notice_opened_project(path: Path, state: Any, project_type: str) -> None
 _TM_PROJECT_TYPE_LABELS = {
     "image": "Image Project",
     "ocr": "OCR / Character Project",
-    "sign_ocr": "Road Sign (3-Char) Project",
+    "sign_ocr": "🚗 Car License Project",
     "image_classified_import": "Classified Import",
 }
 
@@ -1570,10 +1634,10 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">🛑 Road Sign (3-Char)</h3>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">🚗 Car License Project</h3>
             <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
             </div>
-            <p>Train a 3-character road-sign reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the sign in view.</p>
+            <p>Train a 3-character car-license reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the plate in view.</p>
             </div>
             </div>
             ''').strip(),
@@ -1602,6 +1666,9 @@ def _render_new_project() -> None:
             st.session_state.step = 0
             _tm_set_query_params(tm_project=PROJECT_TYPE_CLASSIFIED_IMPORT, tm_session=st.session_state.session_id)
             st.rerun()
+
+    # ── Legal footer: copyright claim + one small licenses entry ────────
+    _render_legal_footer()
 
     # All three cards are on screen before any of them acts.  Cancelling the
     # picker comes back as (None, "") — a silent no-op, not a warning box in
@@ -3615,8 +3682,8 @@ def _render_tm_old_frontend_html(
     }}
     #classPreprocessModal {{
       z-index: 2400;
-      align-items: stretch;
-      justify-content: stretch;
+      align-items: center;
+      justify-content: center;
       padding: 18px;
     }}
     .class-preprocess-shell {{
@@ -3652,9 +3719,9 @@ def _render_tm_old_frontend_html(
       flex: 1;
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(0, 1.18fr) minmax(260px, 0.82fr);
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 14px;
-      align-items: stretch;
+      align-items: start;
     }}
     .class-preprocess-visual-pane {{
       display: flex;
@@ -3677,7 +3744,9 @@ def _render_tm_old_frontend_html(
       font-weight: 700;
     }}
     .class-preprocess-stage {{
-      flex: 1;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      height: auto;
       min-height: 0;
       border-radius: 16px;
       background: var(--surface-frost);
@@ -3694,6 +3763,7 @@ def _render_tm_old_frontend_html(
       height: 100%;
       object-fit: contain;
       display: block;
+      image-rendering: pixelated;
       user-select: none;
       -webkit-user-drag: none;
     }}
@@ -3707,14 +3777,22 @@ def _render_tm_old_frontend_html(
     .preview-stage {{
       position: relative;
       width: 100%;
-      height: 100%;
+      max-width: 420px;
+      aspect-ratio: 1 / 1;
+      height: auto;
+      margin: 0 auto;
       overflow: hidden;
+      background: var(--surface-soft);
     }}
     .preview-stage img {{
       width: 100%;
       height: 100%;
+      max-height: none;
       object-fit: contain;
       display: block;
+      /* The device streams 96x96 / 160x160 frames.  Do not let the browser's
+         smooth upscale hide individual pixels while debugging a sign. */
+      image-rendering: pixelated;
     }}
     .class-preprocess-grid {{
       display: grid;
@@ -3824,10 +3902,12 @@ def _render_tm_old_frontend_html(
       min-width: 0;
     }}
     .class-preprocess-result {{
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      height: auto;
+      min-height: 0;
       border-radius: 14px;
       background: var(--surface-soft);
-      min-height: 0;
-      flex: 1;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -3870,6 +3950,7 @@ def _render_tm_old_frontend_html(
       height: 100%;
       object-fit: contain;
       display: block;
+      image-rendering: pixelated;
     }}
     .class-preprocess-actions {{
       display: flex;
@@ -4665,30 +4746,123 @@ def _render_tm_old_frontend_html(
       background: color-mix(in srgb, var(--blue) 16%, transparent);
       font-weight: 700;
     }}
-    /* The checkpoint was satisfied.  Shown in the beat between the user's
-       own press and the next step's card, so the tour answers the click it
-       just received instead of silently swapping the slide underneath it. */
-    .tm-tour-cue.pass {{
-      border-style: solid;
-      border-color: color-mix(in srgb, #16a34a 60%, transparent);
-      background: color-mix(in srgb, #16a34a 16%, transparent);
-      font-weight: 700;
-    }}
+    /* The checkpoint was satisfied.  The tour no longer advances on its own
+       — the user does — so this green pass state lives on the floating orb
+       (`#tmTourOrb.ready`) and in `flashOrb`, not on the card. */
     .tm-tour-actions {{ display: flex; align-items: center; gap: 8px; }}
+    .tm-tour-actions + .tm-tour-actions {{ margin-top: 8px; }}
     .tm-tour-spacer {{ flex: 1 1 auto; }}
     .tm-tour-btn {{
       padding: 7px 12px; border-radius: 8px;
       border: 1px solid var(--line); background: var(--surface-soft);
       color: var(--text); font-size: 12.5px; font-weight: 700; cursor: pointer;
     }}
+    /* The one button that swaps the card for the floating orb spans the
+       whole footer: it is the difference between reading and doing, so it
+       gets the row to itself rather than competing with Skip / Back. */
+    .tm-tour-btn.wide {{ flex: 1 1 100%; text-align: center; }}
     .tm-tour-btn:hover:not(:disabled) {{ border-color: var(--blue); color: var(--blue); }}
     .tm-tour-btn:disabled {{ opacity: 0.45; cursor: default; }}
     .tm-tour-btn.primary {{ background: var(--blue); border-color: var(--blue); color: var(--text-inverse); }}
     .tm-tour-btn.primary:hover:not(:disabled) {{ background: var(--blue); color: var(--text-inverse); filter: brightness(1.06); }}
     .tm-tour-btn.ghost {{ background: transparent; border-color: transparent; color: var(--muted); }}
     .tm-toolbar-tour {{ color: var(--blue); }}
+    /* ── Workflow overview (step 0) ───────────────────────────────────
+       Step 0 is the map rather than a lesson, so instead of prose it lists
+       the whole trip as numbered stages: the user sees where they are
+       going before the guide starts pointing at controls. */
+    .tm-tour-stages {{ list-style: none; margin: 0 0 10px; padding: 0; }}
+    .tm-tour-stages li {{
+      display: flex; gap: 9px; align-items: flex-start;
+      padding: 7px 0; border-top: 1px solid var(--line);
+    }}
+    .tm-tour-stages li:first-child {{ border-top: 0; }}
+    .tm-tour-stage-num {{
+      flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: var(--blue); color: var(--text-inverse);
+      font-size: 11px; font-weight: 800;
+    }}
+    .tm-tour-stage-txt {{ display: flex; flex-direction: column; gap: 1px; min-width: 0; }}
+    .tm-tour-stage-t {{ font-weight: 700; color: var(--text); }}
+    .tm-tour-stage-d {{ color: var(--muted); font-size: 11.5px; line-height: 1.45; }}
+    /* ── Floating orb · Phase B "hands-on" mode ───────────────────────
+       The moment the user starts working, the dim layer and the big card
+       are pushed out of the way and this pill takes over: docked in the
+       bottom-right corner, draggable, gently pulsing, and carrying the
+       LIVE state of whatever they are doing (sample counts, thresholds,
+       training).  It is deliberately small and corner-parked so it never
+       covers the control being used, and it never advances on its own —
+       the user clicks it when they are ready. */
+    #tmTourOrb {{
+      position: fixed;
+      display: none;
+      right: 18px;
+      bottom: 18px;
+      z-index: 4004;
+      max-width: min(420px, calc(100vw - 36px));
+      align-items: center;
+      gap: 9px;
+      padding: 9px 12px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--blue) 55%, var(--line));
+      background: var(--card);
+      color: var(--text);
+      box-shadow: 0 12px 32px rgba(10, 15, 25, 0.38);
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+    }}
+    #tmTourOrb.on {{ display: inline-flex; }}
+    /* The gentle "I am still here" pulse lives on a pseudo-element so the
+       dark-mode override can keep owning the real drop shadow. */
+    #tmTourOrb::before {{
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      animation: tmTourOrbPulse 2.4s ease-out infinite;
+    }}
+    @keyframes tmTourOrbPulse {{
+      0% {{ box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 55%, transparent); }}
+      70%, 100% {{ box-shadow: 0 0 0 10px color-mix(in srgb, var(--blue) 0%, transparent); }}
+    }}
+    /* The step's own job is done — the badge turns green and stops
+       pulsing, so "you may move on now" is a colour change away from
+       "keep working". */
+    #tmTourOrb.ready {{
+      border-color: #16a34a;
+      background: color-mix(in srgb, #16a34a 14%, var(--card));
+      box-shadow: 0 12px 32px rgba(10, 15, 25, 0.38), 0 0 0 3px color-mix(in srgb, #16a34a 28%, transparent);
+    }}
+    #tmTourOrb.ready::before {{ display: none; }}
+    #tmTourOrb.dragging {{ cursor: grabbing; }}
+    #tmTourOrb.dragging::before {{ display: none; }}
+    .tm-tour-orb-dot {{
+      flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+      background: #16a34a;
+    }}
+    .tm-tour-orb-text {{ flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .tm-tour-orb-text b {{ color: var(--text); font-weight: 800; }}
+    .tm-tour-orb-go {{
+      flex: 0 0 auto; padding: 4px 10px; border-radius: 999px;
+      border: 1px solid transparent; background: var(--blue); color: var(--text-inverse);
+      font-size: 11.5px; font-weight: 800; white-space: nowrap; cursor: pointer;
+    }}
+    #tmTourOrb.ready .tm-tour-orb-go {{ background: #16a34a; }}
+    .tm-tour-orb-help {{
+      flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid var(--line); background: var(--surface-soft);
+      color: var(--muted); font-size: 12px; font-weight: 800; cursor: pointer;
+    }}
+    .tm-tour-orb-help:hover {{ color: var(--text); border-color: var(--blue); }}
     @media (prefers-color-scheme: dark) {{
       #tmTourCard {{ box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); }}
+      #tmTourOrb {{ box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6); }}
+      #tmTourOrb.ready {{ box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 3px color-mix(in srgb, #16a34a 32%, transparent); }}
       #tmTourArrow {{ color: #8ab4f8; }}
       .tm-tour-beacon-ring {{
         border-color: #8ab4f8;
@@ -4732,6 +4906,7 @@ def _render_tm_old_frontend_html(
     </div>
   </div>
   <button type="button" class="tm-toolbar-btn" id="navSettings" title="Global input settings (camera, serial, FPS, frame)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.19.42.58.74 1.06.91.48.17.99.22 1.51.09"></path></svg></span>Settings</button>
+  <button type="button" class="tm-toolbar-btn" id="navLicenseList" style="display:none" title="Manage allowed 3-character car license plates (1 or more valid targets)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><line x1="7" y1="9" x2="17" y2="9"></line><line x1="7" y1="13" x2="14" y2="13"></line></svg></span>🪪 License List <span id="navLicenseCount" style="display:inline-block;min-width:18px;padding:1px 6px;margin-left:6px;border-radius:9px;background:#DBEAFE;color:#1D4ED8;font-size:11px;font-weight:800;text-align:center;">1</span></button>
   <button type="button" class="tm-toolbar-btn" id="navPreferences" title="Preferences (display limits, caching)"><span class="tm-toolbar-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg></span>Preferences</button>
   <button type="button" class="tm-toolbar-btn tm-toolbar-tour" id="navTutorial" title="Interactive tutorial &amp; built-in manual">📖 Tutorial</button>
   <div class="tm-toolbar-sep"></div>
@@ -4951,9 +5126,9 @@ def _render_tm_old_frontend_html(
             <div class="adv-help" id="advOcrMixHelp">EMNIST glyphs are already isolated and centred, so they bypass segmentation and are polarity-aligned to the capture convention before scaling.</div>
             <div class="train-adv-row" id="advOcrSplitRow"><span>EMNIST split <span class="tm-help" data-tooltip="Which EMNIST character set to sample from (ByClass, ByMerge, Letters, Digits, MNIST).">?</span></span><select id="advOcrSplit">{emnist_split_options}</select></div>
             <div class="train-adv-row" id="advOcrPerClassRow"><span>Synthetic per class <span class="tm-help" data-tooltip="Extra EMNIST glyphs added per class to balance and enlarge the training set.">?</span></span><input id="advOcrPerClass" type="number" min="0" max="5000" step="10"/></div>
-            <div class="train-adv-row"><span>Background / noise class <span class="tm-help" data-tooltip="Adds a catch-all background class so the model learns to reject non-sign crops.">?</span></span><input id="advOcrBackground" type="checkbox"/></div>
-            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops <span class="tm-help" data-tooltip="Number of random background/noise crops used to train the rejector class.">?</span></span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
-            <div class="adv-help">0 mirrors the per-class count. The extra N+1 class is named <b>{BACKGROUND_CLASS_NAME}</b> and teaches the model to reject OOD crops.</div>
+            <div class="train-adv-row" id="advOcrBackgroundRow"><span>Use <b>_background</b> noise class to replace OOD rejection <span class="tm-help" data-tooltip="OFF (the Car License default): train only the target character classes and reject non-sign crops with the standard OOD gates (sign %, max prob, entropy) plus the match-probability floor. ON: train an extra synthetic _background class and let it be the only per-slot rejector (kSignBackgroundIsTheOnlyRejector = 1 on export).">?</span></span><input id="settingsUseBackgroundOod" type="checkbox"/></div>
+            <div class="train-adv-row" id="advOcrBackgroundNRow"><span>Background crops <span class="tm-help" data-tooltip="Number of random background/noise crops used to train the rejector class. Used only when the _background toggle above is ON.">?</span></span><input id="advOcrBackgroundN" type="number" min="0" max="5000" step="10"/></div>
+            <div class="adv-help">0 mirrors the per-class count. With the toggle OFF a Car License model has exactly the target characters as classes (e.g. A, 1, 2) and no <b>{BACKGROUND_CLASS_NAME}</b> output; with it ON the extra N+1 class named <b>{BACKGROUND_CLASS_NAME}</b> teaches the model to reject OOD crops directly.</div>
             <div class="train-adv-sub">Transfer learning</div>
             <div class="train-adv-row"><span>Fine-tune pre-trained backbone <span class="tm-help" data-tooltip="Uses a pre-trained EMNIST backbone and fine-tunes it on your data instead of training from scratch.">?</span></span><input id="advOcrTransfer" type="checkbox"/></div>
             <div class="train-adv-row"><span>Pre-train samples / class <span class="tm-help" data-tooltip="Samples per class used to warm up the backbone before the head is attached.">?</span></span><input id="advOcrPretrainN" type="number" min="100" max="6000" step="100"/></div>
@@ -4995,6 +5170,27 @@ def _render_tm_old_frontend_html(
     <div class="tm-settings-foot">
       <button type="button" class="tm-btn" id="settingsCancel">Cancel</button>
       <button type="button" class="tm-btn primary" id="settingsSave">Save changes</button>
+    </div>
+  </div>
+</div>
+<!-- Allowed License Plates (Car License whitelist) -->
+<div class="tm-settings-modal" id="licenseListModal" role="dialog" aria-modal="true">
+  <div class="tm-settings-card">
+    <div class="tm-settings-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;">
+      <div>
+        <h3>🪪 Allowed License Plates</h3>
+        <p>One or more valid 3-character plates. Classes are the union of their characters; Preview says YES when the plate in view matches any entry.</p>
+      </div>
+      <button type="button" id="licenseListClose" class="tm-btn" style="min-width:34px;padding:6px 10px;" title="Close">✕</button>
+    </div>
+    <div id="licenseListRows" style="display:flex;flex-direction:column;gap:10px;margin:14px 0;"></div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <button type="button" id="licenseListAdd" class="tm-btn">+ Add Allowed License Plate</button>
+      <span id="licenseListHint" style="font-size:12px;color:#475569;"></span>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:20px;">
+      <button type="button" id="licenseListCancel" class="tm-btn">Cancel</button>
+      <button type="button" id="licenseListSave" class="tm-btn" style="background:#1D4ED8;color:#fff;border-color:#1D4ED8;">Save &amp; Sync Classes</button>
     </div>
   </div>
 </div>
@@ -5061,7 +5257,7 @@ def _render_tm_old_frontend_html(
               </select>
             </div>
             <div id="advReadingOrderRow" class="train-adv-row" style="display:none">
-              <span>Sign Reading Direction <span class="tm-help" data-tooltip="Which way the characters on a road sign are read. Left to Right for signs like &quot;L 50&quot;; Right to Left for signs whose glyphs run the other way, such as Arabic or Hebrew signage.">?</span></span>
+              <span>Sign Reading Direction <span class="tm-help" data-tooltip="Which way the characters on a license plate are read. Left to Right for plates like &quot;L 50&quot;; Right to Left for plates whose glyphs run the other way, such as Arabic or Hebrew signage.">?</span></span>
               <select id="advReadingOrder">
                 <option value="ltr">Left to Right (L ➔ R)</option>
                 <option value="rtl">Right to Left (R ➔ L)</option>
@@ -5119,6 +5315,18 @@ def _render_tm_old_frontend_html(
 <div id="tmTourBeacon" aria-hidden="true">
   <span class="tm-tour-beacon-ring"></span>
   <span class="tm-tour-beacon-hand">👆</span>
+</div>
+<!-- Phase B of every step.  The card explains the step and points at the
+     control; the moment the user starts working, the dim layer and the
+     card step aside and this pill takes over, carrying the live state of
+     whatever they are doing.  The whole pill advances the tour; `?` brings
+     the instruction card back.  It is filled in by the tour engine, so an
+     unstarted tour leaves nothing behind. -->
+<div id="tmTourOrb" role="status" aria-live="polite" title="Click to move to the next step · drag to move me">
+  <span class="tm-tour-orb-dot"></span>
+  <span class="tm-tour-orb-text" id="tmTourOrbText"></span>
+  <button type="button" class="tm-tour-orb-go" id="tmTourOrbGo">Next Step &rarr;</button>
+  <button type="button" class="tm-tour-orb-help" id="tmTourOrbHelp" title="Re-open the instruction card">?</button>
 </div>
 
 <script>
@@ -5694,13 +5902,14 @@ let previewLumThresh = 100;
 let previewThreshUserModified = false;  // true only after user moves a slider
 let previewOodSignPctMin = 0.3;
 let previewOodSignPctMax = 70.0;
-let previewOodMaxProbMin = 0.60;
-let previewOodEntropyRatioMax = 0.70;
+let previewOodMaxProbMin = 0.40;
+let previewOodEntropyRatioMax = 0.85;
 let previewUploadImageSrc = '';
 let previewUploadImageB64 = '';
 let previewUploadFilename = '';
 let previewPredictInFlight = false;
 let previewSynthInFlight = false;
+let previewSynthPlateIndex = 0;
 let previewPredictController = null;
 let previewPredictToken = 0;
 let previewLastPredictData = null;
@@ -5730,6 +5939,10 @@ STATE.processed_previews = STATE.processed_previews || {{}};
 const openSourceStorageKey = `tm-open-source-${{STATE.session}}`;
 const trainCfgStorageKey = `tm-train-cfg-${{STATE.session}}`;
 const previewStorageKey = `tm-preview-${{STATE.session}}`;
+// v2: OOD MAX PROB became the single probability threshold (0.40 default,
+// was 0.60) and ENTROPY MAX default became 0.85 (was 0.70).  Cached v1
+// values are migrated once in restorePreviewState().
+const PREVIEW_STORAGE_VERSION = 2;
 const exportDirStorageKey = `tm-export-dir-${{STATE.session}}`;
 const exportNameStorageKey = `tm-export-name-${{STATE.session}}`;
 const exportArrayStorageKey = `tm-export-array-${{STATE.session}}`;
@@ -5827,6 +6040,7 @@ function restoreTrainCfgFromStorage() {{
     }}
     if ('ocr_emnist_per_class' in data) next.ocr_emnist_per_class = clampInt(data.ocr_emnist_per_class, 0, 5000, nullish(prev.ocr_emnist_per_class, 200));
     if ('ocr_background_enabled' in data) next.ocr_background_enabled = !!data.ocr_background_enabled;
+    if ('sign_background_replace_ood' in data) next.sign_background_replace_ood = !!data.sign_background_replace_ood;
     if ('ocr_background_samples' in data) next.ocr_background_samples = clampInt(data.ocr_background_samples, 0, 5000, nullish(prev.ocr_background_samples, 0));
     if ('ocr_transfer_learning' in data) next.ocr_transfer_learning = !!data.ocr_transfer_learning;
     if ('ocr_pretrain_per_class' in data) next.ocr_pretrain_per_class = clampInt(data.ocr_pretrain_per_class, 100, 6000, nullish(prev.ocr_pretrain_per_class, 1200));
@@ -6191,7 +6405,13 @@ async function refreshClassProcessedPreview(opts) {{
         class: targetClass,
         filename: targetFilename,
         class_config: targetClassConfig,
-        sample_config: targetSampleConfig
+        sample_config: targetSampleConfig,
+        // sign_ocr Auto needs the target sequence to extract this class's
+        // slot from a whole-board capture (the run may not have a saved
+        // train_config.json before the first training).
+        sign_sequence: isSignOcrProject() ? signSequence().join('') : '',
+        sign_sequences: isSignOcrProject() ? signSequences() : [],
+        reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))
       }})
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
@@ -6856,11 +7076,31 @@ function restorePreviewState() {{
     previewThreshUserModified = !!data.threshModified;
     previewOodSignPctMin = Number(data.oodSignPctMin ?? previewOodSignPctMin ?? 0.3);
     previewOodSignPctMax = Number(data.oodSignPctMax ?? previewOodSignPctMax ?? 70.0);
-    previewOodMaxProbMin = Number(data.oodMaxProbMin ?? previewOodMaxProbMin ?? 0.60);
-    previewOodEntropyRatioMax = Number(data.oodEntropyRatioMax ?? previewOodEntropyRatioMax ?? 0.70);
+    const storageVersion = Number(data.version || 1);
+    let cachedMaxProb = Number(
+      data.oodMaxProbMin ?? data.signMatchMinProb
+      ?? previewOodMaxProbMin ?? 0.40
+    );
+    let cachedEntropy = Number(
+      data.oodEntropyRatioMax ?? previewOodEntropyRatioMax ?? 0.85
+    );
+    if (storageVersion < PREVIEW_STORAGE_VERSION) {{
+      // A v1 cache wrote the old 0.60 / 0.70 defaults for every project, so
+      // they overwrote the backend's new 0.40 / 0.85 values on load.
+      // Migrate ONLY those exact defaults: a custom 0.25 / 0.30 survives.
+      if (Math.abs(cachedMaxProb - 0.60) < 1e-9) cachedMaxProb = 0.40;
+      if (Math.abs(cachedEntropy - 0.70) < 1e-9) cachedEntropy = 0.85;
+    }}
+    previewOodMaxProbMin = Math.max(0, Math.min(1, cachedMaxProb));
+    previewOodEntropyRatioMax = Math.max(0, Math.min(1, cachedEntropy));
     if (previewThreshUserModified) {{
       previewDarkThresh = Number(data.darkThresh ?? STATE.preview_dark_thresh ?? 0);
       previewLumThresh = Number(data.lumThresh ?? STATE.preview_lum_thresh ?? 100);
+    }}
+    if (storageVersion < PREVIEW_STORAGE_VERSION) {{
+      // One-time rewrite, so a later intentional 0.60 / 0.70 is not
+      // converted again on the next load.
+      persistPreviewState();
     }}
   }} catch (e) {{}}
 }}
@@ -6878,10 +7118,31 @@ function persistPreviewState() {{
       lumThresh: Number((previewLumThresh ?? 100)),
       oodSignPctMin: Number((previewOodSignPctMin ?? 0.3)),
       oodSignPctMax: Number((previewOodSignPctMax ?? 70.0)),
-      oodMaxProbMin: Number((previewOodMaxProbMin ?? 0.60)),
-      oodEntropyRatioMax: Number((previewOodEntropyRatioMax ?? 0.70)),
-      threshModified: !!previewThreshUserModified
+      oodMaxProbMin: Number((previewOodMaxProbMin ?? 0.40)),
+      oodEntropyRatioMax: Number((previewOodEntropyRatioMax ?? 0.85)),
+      // One threshold under both names; OOD MAX PROB is authoritative.
+      signMatchMinProb: Number((previewOodMaxProbMin ?? 0.40)),
+      threshModified: !!previewThreshUserModified,
+      version: PREVIEW_STORAGE_VERSION
     }}));
+  }} catch (e) {{}}
+}}
+async function pushPreviewOodToBackend() {{
+  // OOD MAX PROB is the single per-slot probability threshold.  Pushing the
+  // four Input Settings values immediately persists that unification in the
+  // project train config (the export and /classes/sync_ocr both read it).
+  try {{
+    await fetch(`${{baseUrl}}/preview/ood`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        session: STATE.session,
+        ood_sign_pct_min: Number(previewOodSignPctMin ?? 0.3),
+        ood_sign_pct_max: Number(previewOodSignPctMax ?? 70.0),
+        ood_max_prob_min: Number(previewOodMaxProbMin ?? 0.40),
+        ood_entropy_ratio_max: Number(previewOodEntropyRatioMax ?? 0.85)
+      }})
+    }});
   }} catch (e) {{}}
 }}
 function previewStateForProject() {{
@@ -6898,8 +7159,10 @@ function previewStateForProject() {{
     thresh_modified: !!previewThreshUserModified,
     ood_sign_pct_min: Number((previewOodSignPctMin ?? 0.3)),
     ood_sign_pct_max: Number((previewOodSignPctMax ?? 70.0)),
-    ood_max_prob_min: Number((previewOodMaxProbMin ?? 0.60)),
-    ood_entropy_ratio_max: Number((previewOodEntropyRatioMax ?? 0.70)),
+    ood_max_prob_min: Number((previewOodMaxProbMin ?? 0.40)),
+    ood_entropy_ratio_max: Number((previewOodEntropyRatioMax ?? 0.85)),
+    // Compatibility alias; OOD MAX PROB is the single authoritative value.
+    sign_match_min_prob: Number((previewOodMaxProbMin ?? 0.40)),
   }};
 }}
 function applyPreviewState(raw) {{
@@ -6913,7 +7176,10 @@ function applyPreviewState(raw) {{
   if (typeof p.thresh_modified === 'boolean') previewThreshUserModified = p.thresh_modified;
   if (isFinite(Number(p.ood_sign_pct_min))) previewOodSignPctMin = Number(p.ood_sign_pct_min);
   if (isFinite(Number(p.ood_sign_pct_max))) previewOodSignPctMax = Number(p.ood_sign_pct_max);
-  if (isFinite(Number(p.ood_max_prob_min))) previewOodMaxProbMin = Number(p.ood_max_prob_min);
+  const projectMaxProb = isFinite(Number(p.ood_max_prob_min))
+    ? Number(p.ood_max_prob_min)
+    : (isFinite(Number(p.sign_match_min_prob)) ? Number(p.sign_match_min_prob) : null);
+  if (projectMaxProb !== null) previewOodMaxProbMin = projectMaxProb;
   if (isFinite(Number(p.ood_entropy_ratio_max))) previewOodEntropyRatioMax = Number(p.ood_entropy_ratio_max);
 }}
 function clearPreviewUploadState() {{
@@ -7907,9 +8173,9 @@ function openGlobalSettings() {{
     const oodMax = document.getElementById('settingsOodSignPctMax');
     if (oodMax) oodMax.value = Number(previewOodSignPctMax ?? 70.0);
     const oodProb = document.getElementById('settingsOodMaxProbMin');
-    if (oodProb) oodProb.value = Number(previewOodMaxProbMin ?? 0.60);
+    if (oodProb) oodProb.value = Number(previewOodMaxProbMin ?? 0.40);
     const oodEnt = document.getElementById('settingsOodEntropyRatioMax');
-    if (oodEnt) oodEnt.value = Number(previewOodEntropyRatioMax ?? 0.70);
+    if (oodEnt) oodEnt.value = Number(previewOodEntropyRatioMax ?? 0.85);
     // ── Training Hyperparameters group (live TrainConfig state) ──
     try {{
       if (typeof syncAdvancedInlineInputs === 'function') syncAdvancedInlineInputs();
@@ -8022,10 +8288,11 @@ async function saveGlobalSettings() {{
     const oodMaxEl = document.getElementById('settingsOodSignPctMax');
     if (oodMaxEl) previewOodSignPctMax = Math.max(0, Math.min(100, Number(oodMaxEl.value) || 70.0));
     const oodProbEl = document.getElementById('settingsOodMaxProbMin');
-    if (oodProbEl) previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodProbEl.value) || 0.60));
+    if (oodProbEl) previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodProbEl.value) || 0.40));
     const oodEntEl = document.getElementById('settingsOodEntropyRatioMax');
-    if (oodEntEl) previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntEl.value) || 0.70));
+    if (oodEntEl) previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntEl.value) || 0.85));
     persistPreviewState();
+    await pushPreviewOodToBackend();
 
     // Resolve webcam uid from the selected option
     let webcamUid = '';
@@ -8087,6 +8354,65 @@ async function saveGlobalSettings() {{
     toast(`Settings save failed: ${{String(err && err.message ? err.message : err)}}`);
   }}
 }}
+// ── Settings modal keyboard shortcuts: Escape = Cancel, Enter = Save ──
+// The modal is rebuilt by every render(), so the listener lives on `window`
+// rather than on any node inside it: a rebuild can neither detach it nor
+// stack a second copy.  The flag makes installation idempotent even if this
+// script is evaluated again in the same window.
+function settingsModalIsOpen() {{
+  const modal = document.getElementById('globalSettingsModal');
+  if (!modal || modal.hidden || !modal.classList.contains('open')) return false;
+  const style = window.getComputedStyle(modal);
+  return style.display !== 'none' && style.visibility !== 'hidden';
+}}
+function installSettingsKeyboardShortcuts() {{
+  if (window.__tmSettingsShortcutBound) return;
+  window.__tmSettingsShortcutBound = true;
+  window.addEventListener('keydown', (e) => {{
+    const key = String(e.key || '');
+    const isEscape = key === 'Escape' || key === 'Esc';
+    const isEnter = key === 'Enter';
+    if (!isEscape && !isEnter) return;
+    if (!settingsModalIsOpen()) return;
+    if (e.defaultPrevented) return;
+
+    if (isEscape) {{
+      // Cancel, never Save.  Owning the key outright also keeps the
+      // workspace Escape stack and window.tmTour from acting on a press
+      // that has already dismissed the modal — the tour hands Escape back
+      // while a layer is open, but this listener is registered first.
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      closeGlobalSettings();
+      return;
+    }}
+
+    // Enter saves, except where Enter means something else.
+    if (e.isComposing || e.keyCode === 229) return;   // IME candidate window
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+    const active = document.activeElement;
+    const tag = String((active && active.tagName) || '').toUpperCase();
+    if (tag === 'TEXTAREA') return;                    // newline, not Save
+    if (active && active.isContentEditable) return;
+    if (tag === 'BUTTON') {{
+      const id = String((active && active.id) || '');
+      // Enter on Cancel / Close / Reset must never commit the form.
+      const dismiss = id === 'settingsCancel' || id === 'settingsClose' ||
+        id === 'settingsReset' ||
+        /(?:^|[-_])(cancel|close|reset)(?:$|[-_])/i.test(id);
+      if (dismiss) return;
+    }}
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    const saveBtn = document.getElementById('settingsSave');
+    if (saveBtn) saveBtn.click();
+    else saveGlobalSettings();
+  }}, true);
+}}
+installSettingsKeyboardShortcuts();
 function applyProjectState(state) {{
   const s = state && typeof state === 'object' ? state : {{}};
   // #region debug-point C:apply-project-state
@@ -8137,8 +8463,8 @@ function applyProjectState(state) {{
   previewThreshUserModified = false;
   previewOodSignPctMin = 0.3;
   previewOodSignPctMax = 70.0;
-  previewOodMaxProbMin = 0.60;
-  previewOodEntropyRatioMax = 0.70;
+  previewOodMaxProbMin = 0.40;
+  previewOodEntropyRatioMax = 0.85;
   const cls = Array.isArray(s.classes) ? s.classes.slice() : [];
   STATE.classes = cls;
   const cnt = s.counts && typeof s.counts === 'object' ? s.counts : {{}};
@@ -8447,8 +8773,8 @@ function buildExportRuntimeConfig() {{
   return {{
     ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
     ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
-    ood_max_prob: Number(previewOodMaxProbMin ?? 0.60),
-    ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.70),
+    ood_max_prob: Number(previewOodMaxProbMin ?? 0.40),
+    ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.85),
     bg_dark_thresh: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : 0,
     bg_lum_thresh: previewThreshUserModified ? Number(previewLumThresh ?? 100) : 100,
     // sign_ocr only.  The server ignores these for every other project
@@ -8458,10 +8784,13 @@ function buildExportRuntimeConfig() {{
     // trained to read, so it must come from the same TrainConfig state the
     // trainer and the preview use.
     sign_sequence: signSequence().join(''),
+    sign_sequences: signSequences(),
+    capture_frame_side: Number(currentSerialFrameSide || 96),
     reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
-    // No SPA control yet: the per-slot confidence floor is the server's
-    // documented default, and exporting it makes that explicit on-device.
-    match_min_prob: 0.60,
+    // ONE probability threshold: OOD MAX PROB is also the per-slot match
+    // floor, and the exporter writes it to both kOodMaxProbMin and
+    // kSignMatchMinProb.  No hidden 0.40 floor.
+    match_min_prob: Number(previewOodMaxProbMin ?? 0.40),
   }};
 }}
 async function exportRunWithOverwriteConfirm(exportDirValue, modelNameValue, arrayNameValue) {{
@@ -8927,6 +9256,7 @@ async function seedEmnistSamples(names, opts) {{
         {{session: STATE.session, classes: target, count: 24}},
         isSignOcrProject() ? {{
           sign_sequence: signSequence().join(''),
+          sign_sequences: signSequences(),
           reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         }} : {{}}
       ))
@@ -9121,6 +9451,7 @@ async function fillEmptyClassesWithEmnist() {{
         {{ session: STATE.session, only_empty: true, count: 24 }},
         isSignOcrProject() ? {{
           sign_sequence: signSequence().join(''),
+          sign_sequences: signSequences(),
           reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         }} : {{}}
       ))
@@ -9855,9 +10186,17 @@ function renderSignMatch(data) {{
     const fails = slots.filter((s) => s && !s.match);
     const reasons = fails.map((s, i) => {{
       const idx = Number(s.index != null ? s.index : i) + 1;
+      const got = s.label
+        ? `read "${{String(s.label)}}" at ${{Math.round(Number(s.prob || 0) * 1000) / 10}}%`
+        : 'produced no glyph';
+      // If an OOD gate fired, name THAT gate: a correct character below the
+      // entropy floor must not be explained as a confidence failure.
+      if (s.ood && s.ood_reason) {{
+        return `slot ${{idx}} ${{got}} — rejected by OOD (${{String(s.ood_reason)}})`;
+      }}
       if (s.background) return `slot ${{idx}} came back as background`;
-      if (!s.label) return `slot ${{idx}} produced no glyph`;
-      return `slot ${{idx}} read "${{String(s.label)}}" at ${{Math.round(Number(s.prob || 0) * 1000) / 10}}%`;
+      if (s.empty) return `slot ${{idx}} contained no ink`;
+      return `slot ${{idx}} ${{got}} (wanted "${{String(s.char || SIGN_SEQUENCE_PAD)}}")`;
     }});
     const hint = document.createElement('div');
     hint.className = 'signmatch-hint';
@@ -9921,7 +10260,7 @@ async function refreshPreviewPrediction(token) {{
   previewPredictController = new AbortController();
   const note = document.getElementById('previewNote');
   try {{
-    const res = await fetch(`${{baseUrl}}/preview/predict?session=${{encodeURIComponent(STATE.session)}}&source=${{encodeURIComponent(previewSource)}}&preprocess=${{encodeURIComponent(previewPreprocessMode)}}&bg_dark=${{encodeURIComponent(previewThreshUserModified ? String(previewDarkThresh ?? '') : '')}}&bg_lum=${{encodeURIComponent(previewThreshUserModified ? String(previewLumThresh ?? '') : '')}}&ood_sign_min=${{encodeURIComponent(String(previewOodSignPctMin ?? 0.3))}}&ood_sign_max=${{encodeURIComponent(String(previewOodSignPctMax ?? 70.0))}}&ood_max_prob=${{encodeURIComponent(String(previewOodMaxProbMin ?? 0.60))}}&ood_entropy_max=${{encodeURIComponent(String(previewOodEntropyRatioMax ?? 0.70))}}&sign_seq=${{encodeURIComponent(signSequence().join(''))}}&reading=${{encodeURIComponent(String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')))}}&_ts=${{Date.now()}}`, {{ signal: previewPredictController.signal }});
+    const res = await fetch(`${{baseUrl}}/preview/predict?session=${{encodeURIComponent(STATE.session)}}&source=${{encodeURIComponent(previewSource)}}&preprocess=${{encodeURIComponent(previewPreprocessMode)}}&bg_dark=${{encodeURIComponent(previewThreshUserModified ? String(previewDarkThresh ?? '') : '')}}&bg_lum=${{encodeURIComponent(previewThreshUserModified ? String(previewLumThresh ?? '') : '')}}&ood_sign_min=${{encodeURIComponent(String(previewOodSignPctMin ?? 0.3))}}&ood_sign_max=${{encodeURIComponent(String(previewOodSignPctMax ?? 70.0))}}&ood_max_prob=${{encodeURIComponent(String(previewOodMaxProbMin ?? 0.40))}}&ood_entropy_max=${{encodeURIComponent(String(previewOodEntropyRatioMax ?? 0.85))}}&sign_seq=${{encodeURIComponent(signSequence().join(''))}}&sign_seqs=${{encodeURIComponent(signSequences().join(','))}}&reading=${{encodeURIComponent(String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')))}}&_ts=${{Date.now()}}`, {{ signal: previewPredictController.signal }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
     if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Preview failed.');
     previewLastPredictData = data;
@@ -9969,12 +10308,12 @@ function updatePreviewRoiOverlay(crop, isManual, frameMatches = true) {{
   const overlay = document.getElementById('previewRoiOverlay');
   if (!overlay) return;
   const valid = Array.isArray(crop) && crop.length === 4;
-  // The ROI toggle owns the box: ON draws it, OFF hides it.  `crop` is
-  // normalized to the ORIGINAL frame, so it only maps onto a view that
-  // keeps that frame (the raw scene, or the full masked frame from Orig).
-  // The processed crop / sign-split composite has its own coordinates and
-  // passes frameMatches = false.
-  const show = valid && previewShowRoi && frameMatches;
+  // ROI is a crop toggle: ON shows the cropped image itself, so the box is
+  // hidden; OFF shows the full frame and draws the box to locate the ROI.
+  // `crop` is normalized to the ORIGINAL frame, so it only maps onto a view
+  // that keeps that frame (the raw or threshold full frame); cropped views
+  // pass frameMatches = false as a second guard.
+  const show = valid && !previewShowRoi && frameMatches;
   if (!show) {{
     overlay.style.display = 'none';
     return;
@@ -10029,8 +10368,8 @@ async function runPreviewUploadPrediction() {{
         bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 0) : '', 
         ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
         ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
-        ood_max_prob: Number(previewOodMaxProbMin ?? 0.60),
-        ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.70),
+        ood_max_prob: Number(previewOodMaxProbMin ?? 0.40),
+        ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.85),
         // The target sign travels with the request rather than being read
         // from the session: it is edited in the SPA and lives in STATE.train_cfg
         // until the project is saved, so the server has no other way to know
@@ -10225,11 +10564,11 @@ function buildPreviewSettingsMarkup() {{
     </label>
     <label title="Minimum softmax confidence required before Preview accepts a class result.">
       OOD max prob
-      <input id="previewOodMaxProbMin" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodMaxProbMin ?? 0.60)}}"/>
+      <input id="previewOodMaxProbMin" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodMaxProbMin ?? 0.40)}}"/>
     </label>
     <label title="Maximum entropy ratio allowed before Preview suppresses to No Sign.">
       OOD entropy max
-      <input id="previewOodEntropyRatioMax" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodEntropyRatioMax ?? 0.70)}}"/>
+      <input id="previewOodEntropyRatioMax" type="number" min="0" max="1" step="0.01" value="${{Number(previewOodEntropyRatioMax ?? 0.85)}}"/>
     </label>
   `;
   // One panel regardless of source: the source-specific CONTROLS live in
@@ -10288,9 +10627,10 @@ function renderPreviewSettings() {{
       const oodEntropyEl = document.getElementById('previewOodEntropyRatioMax');
       previewOodSignPctMin = Math.max(0, Math.min(100, Number(oodSignMinEl ? oodSignMinEl.value : (previewOodSignPctMin ?? 0.3))));
       previewOodSignPctMax = Math.max(0, Math.min(100, Number(oodSignMaxEl ? oodSignMaxEl.value : (previewOodSignPctMax ?? 70.0))));
-      previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodMaxProbEl ? oodMaxProbEl.value : (previewOodMaxProbMin ?? 0.60))));
-      previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntropyEl ? oodEntropyEl.value : (previewOodEntropyRatioMax ?? 0.70))));
+      previewOodMaxProbMin = Math.max(0, Math.min(1, Number(oodMaxProbEl ? oodMaxProbEl.value : (previewOodMaxProbMin ?? 0.40))));
+      previewOodEntropyRatioMax = Math.max(0, Math.min(1, Number(oodEntropyEl ? oodEntropyEl.value : (previewOodEntropyRatioMax ?? 0.85))));
       persistPreviewState();
+      await pushPreviewOodToBackend();
       previewSettingsOpen = false;
       renderPreviewSettings();
       renderPreviewCard();
@@ -10336,7 +10676,7 @@ function previewContextBarSignature() {{
   // pills, and the bar otherwise only rebuilds when the source or option
   // lists change.
   const sign = isSignOcrProject()
-    ? `1:${{signSequence().join('')}}:${{String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))}}:${{STATE.export_enabled ? '1' : '0'}}`
+    ? `1:${{signSequence().join('')}}:${{signSequences().join(',')}}:${{String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr'))}}:${{STATE.export_enabled ? '1' : '0'}}`
     : '0';
   return `${{previewContextSource()}}|${{(STATE.webcam_options || []).length}}|${{(STATE.serial_ports || []).length}}|${{sign}}`;
 }}
@@ -10397,6 +10737,23 @@ function renderPreviewContextBar() {{
       if (isSignOcrProject()) {{
         const group = document.createElement('span');
         group.className = 'preview-synth-group';
+        const plateSeqs = signSequences();
+        if (plateSeqs.length > 1) {{
+          const plateSel = document.createElement('select');
+          plateSel.id = 'previewSynthPlateSelect';
+          plateSel.title = 'Which allowed plate Synth should draw';
+          plateSeqs.forEach((text, idx) => {{
+            const opt = document.createElement('option');
+            opt.value = String(idx);
+            opt.textContent = `Plate #${{idx + 1}} (${{text}})`;
+            plateSel.appendChild(opt);
+          }});
+          plateSel.value = String(Math.max(0, Math.min(plateSeqs.length - 1, Number(previewSynthPlateIndex) || 0)));
+          plateSel.onchange = () => {{
+            previewSynthPlateIndex = Math.max(0, Math.min(plateSeqs.length - 1, Number(plateSel.value) || 0));
+          }};
+          group.appendChild(plateSel);
+        }}
         const defs = [
           ['match', '🧪 Synth Match', 'Combine current 3 target characters into a synthetic sign image', 'previewSynthMatchBtn'],
           ['reversed', '🔀 Synth Reversed', 'Combine in reversed order to test LTR/RTL direction', 'previewSynthRevBtn'],
@@ -10515,9 +10872,16 @@ async function handleSynthesizeSignPreview(variant, opts) {{
         // The target is the SPA's editor state; the server persists it but
         // this request must test what is on screen right now.
         sign_sequence: signSequence().join(''),
+        sign_sequences: signSequences(),
+        plate_index: Number(previewSynthPlateIndex ?? 0),
         reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         bg_dark: previewThreshUserModified ? Number(previewDarkThresh ?? 0) : '',
         bg_lum: previewThreshUserModified ? Number(previewLumThresh ?? 100) : '',
+        // OOD MAX PROB is the single per-slot probability threshold.
+        ood_max_prob: Number(previewOodMaxProbMin ?? 0.40),
+        ood_entropy_max: Number(previewOodEntropyRatioMax ?? 0.85),
+        ood_sign_min: Number(previewOodSignPctMin ?? 0.3),
+        ood_sign_max: Number(previewOodSignPctMax ?? 70.0),
       }})
     }});
     const data = await res.json().catch(() => ({{ok:'0'}}));
@@ -10833,24 +11197,27 @@ function applyPreviewSrcToPane(data) {{
   const hasData = !!data;
   const rawFromData = hasData && data.image_b64 ? `data:image/png;base64,${{data.image_b64}}` : '';
   const roiFromData = hasData && data.processed_image_b64 ? `data:image/png;base64,${{data.processed_image_b64}}` : '';
+  const cropFromData = hasData && data.crop_image_b64 ? `data:image/png;base64,${{data.crop_image_b64}}` : '';
   const fullFromData = hasData && data.full_image_b64 ? `data:image/png;base64,${{data.full_image_b64}}` : '';
   const uploadedSrc = previewSource === 'upload' ? previewUploadImageSrc : '';
   const rawSrc = rawFromData || uploadedSrc || previewLastStaticImageSrc || '';
-  const roiSrc = roiFromData || fullFromData || rawSrc;
   const fullSrc = fullFromData || rawSrc;
-  let src = rawSrc;
-  let fullFrame = true;  // does `src` share the original frame's coordinates?
-  if (previewShowRaw && previewShowRoi) {{
-    // Cropped AND filtered: the processed tensor (or the sign split
-    // composite).  Its pixels are not the original frame, so the ROI box
-    // cannot be placed on it.
-    src = roiSrc;
-    fullFrame = !roiFromData;
+  const rawCropSrc = cropFromData || rawSrc;
+  // ROI is a CROP toggle:
+  //   OFF -> full frame (threshold by default, raw when Orig is on) + box
+  //   ON  -> cropped content inside the ROI (threshold/raw), no box
+  // Orig is the raw/threshold toggle:
+  //   OFF -> thresholded black-on-white view (default, so sliders are visible)
+  //   ON  -> original unprocessed grayscale
+  let src;
+  let fullFrame;
+  if (previewShowRoi) {{
+    src = previewShowRaw ? rawCropSrc : (roiFromData || rawSrc);
+    fullFrame = false;
+  }} else {{
+    src = previewShowRaw ? rawSrc : fullSrc;
+    fullFrame = true;
   }}
-  else if (previewShowRaw) src = fullSrc;
-  // ROI alone keeps the full scene on screen — that is the only view the
-  // normalized search box maps onto; the box itself is drawn below.
-  else if (previewShowRoi) src = rawSrc;
   // `ready` is set even when the pane shows the Input-off empty state, so
   // the FIRST prediction (including a synth plate clicked before any image
   // was selected) must be able to replace that placeholder with a stage.
@@ -11531,6 +11898,50 @@ function normalizeSignSequence(value) {{
   return chars.slice(0, SIGN_SEQUENCE_LEN);
 }}
 
+// JS mirror of ocr_preprocess.normalize_sign_sequences: the complete,
+// unique 3-character whitelist, first-appearance order.  Incomplete plates
+// (a '?' pad) are not targets and are dropped here; the editable primary
+// lives on in sign_sequence so the bar can still show a half-typed plate.
+function normalizeSignSequences(value) {{
+  const raw = Array.isArray(value)
+    ? value.slice()
+    : (value == null || value === '' ? [] : String(value).split(','));
+  const singleCharList = raw.length === SIGN_SEQUENCE_LEN && raw.every(
+    (v) => !Array.isArray(v) && String(v == null ? '' : v).trim().length <= 1
+  );
+  const items = singleCharList ? [raw] : raw;
+  const out = [];
+  const seen = {{}};
+  items.forEach((item) => {{
+    if (item == null) return;
+    const seq = normalizeSignSequence(item);
+    if (seq.some((c) => c === SIGN_SEQUENCE_PAD)) return;
+    const text = seq.join('');
+    if (!/^[0-9A-Z]{{3}}$/.test(text) || seen[text]) return;
+    seen[text] = true;
+    out.push(text);
+  }});
+  return out;
+}}
+
+function signSequences() {{
+  const cfg = STATE.train_cfg || {{}};
+  const seqs = normalizeSignSequences(cfg.sign_sequences);
+  const primary = normalizeSignSequence(cfg.sign_sequence);
+  if (!primary.some((c) => c === SIGN_SEQUENCE_PAD)) {{
+    // sign_sequences[0] is ALWAYS the primary.  A stale first entry (e.g.
+    // an older boot payload, or a test/editor that wrote sign_sequence
+    // directly) must not survive beside the new primary; any other plate
+    // that happens to equal it is deduped too.
+    const primaryText = primary.join('');
+    const at = seqs.indexOf(primaryText);
+    if (at > 0) seqs.splice(at, 1);
+    if (seqs.length) seqs[0] = primaryText;
+    else seqs.push(primaryText);
+  }}
+  return seqs;
+}}
+
 function signSequence() {{
   const cfg = STATE.train_cfg || {{}};
   return normalizeSignSequence(cfg.sign_sequence);
@@ -11550,9 +11961,16 @@ function signSequenceIsSet() {{
 // keeps one, and neither has to know about the other.
 function signSequenceClasses() {{
   const out = [];
-  signSequence().forEach((c) => {{
-    if (c !== SIGN_SEQUENCE_PAD && out.indexOf(c) === -1) out.push(c);
+  signSequences().forEach((text) => {{
+    for (const c of text) {{
+      if (c !== SIGN_SEQUENCE_PAD && out.indexOf(c) === -1) out.push(c);
+    }}
   }});
+  if (!out.length) {{
+    signSequence().forEach((c) => {{
+      if (c !== SIGN_SEQUENCE_PAD && out.indexOf(c) === -1) out.push(c);
+    }});
+  }}
   return out;
 }}
 
@@ -11566,21 +11984,259 @@ const SIGN_SLOT_RE = /^[0-9A-Z]$/;
 // class without hiding the fact that it is matched twice.
 function signSlotPositions(ch) {{
   const out = [];
-  signSequence().forEach((c, idx) => {{ if (c === ch) out.push(idx + 1); }});
+  signSequences().forEach((text) => {{
+    for (let idx = 0; idx < text.length; idx++) {{
+      if (text[idx] === ch && out.indexOf(idx + 1) === -1) out.push(idx + 1);
+    }}
+  }});
+  if (!out.length) {{
+    signSequence().forEach((c, idx) => {{ if (c === ch && out.indexOf(idx + 1) === -1) out.push(idx + 1); }});
+  }}
+  out.sort((a, b) => a - b);
   return out;
 }}
 
 function signSlotLabel(ch) {{
+  const seqs = signSequences();
+  if (seqs.length > 1) {{
+    const plates = seqs.filter((text) => text.indexOf(ch) !== -1).length;
+    if (plates > 1) {{
+      const pos = signSlotPositions(ch);
+      const posText = pos.length === 1
+        ? `Slot ${{pos[0]}}`
+        : (pos.length === 2
+          ? `Slots ${{pos[0]}} & ${{pos[1]}}`
+          : `Slots ${{pos.slice(0, -1).join(', ')}} & ${{pos[pos.length - 1]}}`);
+      return `${{plates}} plates · ${{posText}}`;
+    }}
+  }}
   const pos = signSlotPositions(ch);
   if (pos.length < 2) return '';
   if (pos.length === 2) return `Slots ${{pos[0]}} & ${{pos[1]}}`;
   return `Slots ${{pos.slice(0, -1).join(', ')}} & ${{pos[pos.length - 1]}}`;
 }}
 
+// Replace the whole whitelist (the License List modal's Save & Sync path).
+// The first plate is the primary, so sign_sequence always stays sequences[0].
+function setSignSequences(list) {{
+  const seqs = normalizeSignSequences(list);
+  if (!seqs.length) return false;
+  const next = Object.assign({{}}, STATE.train_cfg || {{}});
+  next.sign_sequences = seqs.slice();
+  next.sign_sequence = normalizeSignSequence(seqs[0]);
+  STATE.train_cfg = next;
+  adoptSignSequenceClasses();
+  render();
+  scheduleSignClassSync(0);
+  try {{
+    if (previewInputOn && typeof startPreviewPredictLoop === 'function') startPreviewPredictLoop();
+  }} catch (e) {{}}
+  return true;
+}}
+
 // Focus survives the rebuilds a sequence edit causes.  render() clears
 // #classes and renderSignSequenceBar() refills the bar; either would drop the
 // caret the user is typing through.  A snapshot is taken before the DOM is
 // cleared and restored on the new input with the same id.
+// ── Allowed License Plates modal (gatekeeper whitelist) ──────────────────
+let licenseListOpen = false;
+let licenseDraft = [];
+
+function licenseDraftText(row) {{
+  return String((licenseDraft[row] == null ? '' : licenseDraft[row]))
+    .toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, SIGN_SEQUENCE_LEN);
+}}
+function licenseDraftChars(row) {{
+  const text = licenseDraftText(row);
+  const out = text.split('');
+  while (out.length < SIGN_SEQUENCE_LEN) out.push('');
+  return out;
+}}
+function renderLicenseListModal() {{
+  const modal = document.getElementById('licenseListModal');
+  if (!modal) return;
+  modal.classList.toggle('open', !!licenseListOpen);
+  if (!licenseListOpen) return;
+  const host = document.getElementById('licenseListRows');
+  if (!host) return;
+  if (!Array.isArray(licenseDraft) || !licenseDraft.length) licenseDraft = [''];
+  licenseDraft = licenseDraft.map((_, i) => licenseDraftText(i));
+  host.innerHTML = '';
+  licenseDraft.forEach((text, row) => {{
+    const rowEl = document.createElement('div');
+    rowEl.setAttribute('data-license-row', String(row));
+    rowEl.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px;border:1px solid #E2E8F0;border-radius:10px;background:#F8FAFC;';
+    const label = document.createElement('span');
+    label.style.cssText = 'min-width:102px;font-weight:700;font-size:13px;color:#0F172A;';
+    label.textContent = row === 0 ? 'Plate #1 · Primary' : `Plate #${{row + 1}}`;
+    rowEl.appendChild(label);
+    const chars = licenseDraftChars(row);
+    for (let slot = 0; slot < SIGN_SEQUENCE_LEN; slot++) {{
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'signseq-slot' + (chars[slot] ? '' : ' empty');
+      inp.id = `licenseSlot-${{row}}-${{slot}}`;
+      inp.value = chars[slot] || '';
+      inp.maxLength = 1;
+      inp.placeholder = SIGN_SEQUENCE_PAD;
+      inp.autocomplete = 'off';
+      inp.autocapitalize = 'characters';
+      inp.spellcheck = false;
+      inp.title = `Plate #${{row + 1}} position ${{slot + 1}}`;
+      inp.onfocus = () => {{ try {{ inp.select(); }} catch (e) {{}} }};
+      inp.oninput = () => {{
+        const raw = String(inp.value || '').trim().toUpperCase();
+        const nextCh = SIGN_SLOT_RE.test(raw.slice(0, 1)) ? raw.slice(0, 1) : '';
+        inp.value = nextCh;
+        const nextChars = licenseDraftChars(row);
+        nextChars[slot] = nextCh;
+        licenseDraft[row] = nextChars.join('').replace(/\?+$/, '');
+        if (nextCh && slot < SIGN_SEQUENCE_LEN - 1) {{
+          const following = document.getElementById(`licenseSlot-${{row}}-${{slot + 1}}`);
+          if (following) {{ following.focus(); try {{ following.select(); }} catch (e) {{}} }}
+        }}
+        const hint = document.getElementById('licenseListHint');
+        if (hint) {{
+          const seqs = normalizeSignSequences(licenseDraft);
+          const union = [];
+          seqs.forEach((t) => {{ for (const c of t) if (union.indexOf(c) === -1) union.push(c); }});
+          hint.textContent = `${{seqs.length}} complete plate(s) · classes: ${{union.join(' ') || '—'}}`;
+        }}
+      }};
+      rowEl.appendChild(inp);
+    }}
+    const left = document.createElement('button');
+    left.type = 'button';
+    left.className = 'signseq-move-left';
+    left.textContent = '◀';
+    left.title = 'Swap positions 1 and 2';
+    left.disabled = !(licenseDraft[row] || '').length;
+    left.onclick = () => {{
+      const c = licenseDraftChars(row);
+      const t = c[0]; c[0] = c[1]; c[1] = t;
+      licenseDraft[row] = c.join('').replace(/\?+$/, '');
+      renderLicenseListModal();
+    }};
+    const right = document.createElement('button');
+    right.type = 'button';
+    right.className = 'signseq-move-right';
+    right.textContent = '▶';
+    right.title = 'Swap positions 2 and 3';
+    right.disabled = !(licenseDraft[row] || '').length;
+    right.onclick = () => {{
+      const c = licenseDraftChars(row);
+      const t = c[1]; c[1] = c[2]; c[2] = t;
+      licenseDraft[row] = c.join('').replace(/\?+$/, '');
+      renderLicenseListModal();
+    }};
+    rowEl.appendChild(left);
+    rowEl.appendChild(right);
+    if (row > 0) {{
+      const primaryBtn = document.createElement('button');
+      primaryBtn.type = 'button';
+      primaryBtn.className = 'tm-btn';
+      primaryBtn.textContent = '⭐ Set as Primary';
+      primaryBtn.title = 'Make this the plate Preview and the device treat as primary';
+      primaryBtn.onclick = () => {{
+        const moved = licenseDraft.splice(row, 1)[0];
+        licenseDraft.unshift(moved);
+        renderLicenseListModal();
+      }};
+      rowEl.appendChild(primaryBtn);
+    }}
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'tm-btn';
+    remove.textContent = '🗑️ Remove';
+    remove.disabled = licenseDraft.length <= 1;
+    remove.onclick = () => {{
+      if (licenseDraft.length <= 1) return;
+      licenseDraft.splice(row, 1);
+      renderLicenseListModal();
+    }};
+    rowEl.appendChild(remove);
+    host.appendChild(rowEl);
+  }});
+  const hint = document.getElementById('licenseListHint');
+  if (hint) {{
+    const seqs = normalizeSignSequences(licenseDraft);
+    const union = [];
+    seqs.forEach((t) => {{ for (const c of t) if (union.indexOf(c) === -1) union.push(c); }});
+    hint.textContent = `${{seqs.length}} complete plate(s) · classes: ${{union.join(' ') || '—'}}`;
+  }}
+}}
+function openLicenseListModal() {{
+  if (!isSignOcrProject()) return;
+  const seqs = signSequences();
+  licenseDraft = (seqs.length ? seqs : [signSequence().join('')]).slice();
+  licenseListOpen = true;
+  renderLicenseListModal();
+}}
+function closeLicenseListModal() {{
+  licenseListOpen = false;
+  const modal = document.getElementById('licenseListModal');
+  if (modal) modal.classList.remove('open');
+}}
+function syncLicenseListNav() {{
+  const btn = document.getElementById('navLicenseList');
+  if (!btn) return;
+  const show = isSignOcrProject();
+  btn.style.display = show ? '' : 'none';
+  if (show) {{
+    const count = document.getElementById('navLicenseCount');
+    if (count) count.textContent = String(Math.max(1, signSequences().length));
+  }}
+}}
+async function saveLicenseList() {{
+  const seqs = normalizeSignSequences(licenseDraft);
+  if (!seqs.length) {{
+    toast('Add at least one complete 3-character plate.');
+    return;
+  }}
+  const names = [];
+  seqs.forEach((text) => {{ for (const c of text) if (names.indexOf(c) === -1) names.push(c); }});
+  const next = Object.assign({{}}, STATE.train_cfg || {{}});
+  next.sign_sequences = seqs.slice();
+  next.sign_sequence = normalizeSignSequence(seqs[0]);
+  STATE.train_cfg = next;
+  applySignClassesState(names);
+  render();
+  const autoSeedOn = !!(autoSeedEmnistSamples
+    || (STATE.train_cfg && STATE.train_cfg.auto_seed_emnist_samples));
+  try {{
+    const res = await fetch(`${{baseUrl}}/classes/sync_ocr`, {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        session: STATE.session,
+        names: names,
+        sign_sequence: normalizeSignSequence(seqs[0]).join(''),
+        sign_sequences: seqs,
+        reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
+        auto_seed_emnist_samples: autoSeedOn,
+      }})
+    }});
+    const data = await res.json().catch(() => ({{ok: '0'}}));
+    if (!res.ok || data.ok !== '1') throw new Error(data.error || 'Unable to sync license plates.');
+    const nextClasses = Array.isArray(data.classes) && data.classes.length ? data.classes : names;
+    signSyncSavedTarget = `${{names.join('')}}|${{seqs.join(',')}}`;
+    if (!signClassesMatch(nextClasses)) applySignClassesState(nextClasses);
+    if (data.counts || data.sample_previews || typeof data.train_enabled === 'boolean') {{
+      applyRuntimeState(data);
+    }}
+    if (data.seed_error) toast('Auto-fill failed: ' + String(data.seed_error));
+    render();
+    syncLicenseListNav();
+    closeLicenseListModal();
+    toast(`Saved ${{seqs.length}} allowed plate(s).`);
+    try {{
+      if (previewInputOn && typeof startPreviewPredictLoop === 'function') startPreviewPredictLoop();
+    }} catch (e) {{}}
+  }} catch (err) {{
+    toast(String(err && err.message ? err.message : err));
+  }}
+}}
+
 function signSlotFocusSnapshot() {{
   const el = document.activeElement;
   const id = String((el && el.id) || '');
@@ -11603,6 +12259,17 @@ function restoreSignSlotFocus(snapshot) {{
 function setSignSequence(seq) {{
   const next = Object.assign({{}}, STATE.train_cfg || {{}});
   next.sign_sequence = normalizeSignSequence(seq);
+  const text = next.sign_sequence.join('');
+  const seqs = signSequences();
+  if (!next.sign_sequence.some((c) => c === SIGN_SEQUENCE_PAD)) {{
+    if (seqs.length) seqs[0] = text;
+    else seqs.push(text);
+    next.sign_sequences = seqs;
+  }} else if (Array.isArray(next.sign_sequences)) {{
+    // A half-typed primary is not a valid plate; leave the persisted
+    // whitelist alone until it is complete (the modal is the guided path).
+    next.sign_sequences = seqs;
+  }}
   STATE.train_cfg = next;
   // persistTrainCfgStorage() is deliberately NOT called.  See the note above:
   // the sequence is project content, and letting it join the localStorage
@@ -11731,7 +12398,8 @@ async function syncSignClassesToSequence() {{
   if (!isSignOcrProject()) return;
   const target = signSequenceClasses();
   if (!target.length) return;           // no target: never delete every class
-  const key = target.join('');
+  const seqText = signSequences().join(',');
+  const key = `${{target.join('')}}|${{seqText}}`;
   if (key === signSyncSavedTarget && signClassesMatch(target)) return;
   if (signSyncInFlight) {{ signSyncQueued = true; return; }}
   signSyncInFlight = true;
@@ -11751,6 +12419,7 @@ async function syncSignClassesToSequence() {{
         session: STATE.session,
         names: target,
         sign_sequence: signSequence().join(''),
+        sign_sequences: signSequences(),
         reading_order: String(nullish((STATE.train_cfg || {{}}).reading_order, 'ltr')),
         auto_seed_emnist_samples: autoSeedOn,
       }})
@@ -11760,7 +12429,8 @@ async function syncSignClassesToSequence() {{
     // A newer edit may have landed while this request was in flight.  Its
     // response describes the OLD sequence; applying it would make the cards
     // jump back, so ignore it and let the queued pass send the new one.
-    if (signSequenceClasses().join('') !== key) {{
+    if (signSequenceClasses().join('') !== target.join('')
+        || signSequences().join(',') !== seqText) {{
       signSyncQueued = true;
       return;
     }}
@@ -11813,6 +12483,7 @@ function ensureSignSequenceDefault() {{
   if (!ocrIsFreshProject()) return false;
   const next = Object.assign({{}}, STATE.train_cfg || {{}});
   next.sign_sequence = SIGN_DEFAULT_SEQUENCE.slice();
+  next.sign_sequences = [SIGN_DEFAULT_SEQUENCE.join('')];
   STATE.train_cfg = next;
   return true;
 }}
@@ -11855,6 +12526,15 @@ function renderSignSequenceBar(root) {{
   dirTag.className = 'signseq-note';
   dirTag.textContent = rtl ? 'right → left' : 'left → right';
   head.appendChild(dirTag);
+  const platesBtn = document.createElement('button');
+  platesBtn.type = 'button';
+  platesBtn.id = 'signSeqPlatesBtn';
+  platesBtn.className = 'tm-btn';
+  platesBtn.style.cssText = 'margin-left:auto;padding:4px 10px;font-size:12px;';
+  platesBtn.textContent = `+ Plates (${{signSequences().length || 1}})`;
+  platesBtn.title = 'Manage allowed 3-character car license plates';
+  platesBtn.onclick = (e) => {{ if (e) e.stopPropagation(); openLicenseListModal(); }};
+  head.appendChild(platesBtn);
   box.appendChild(head);
 
   // The one-line instruction is the whole tutorial.  Everything below it is an
@@ -12451,12 +13131,20 @@ function syncAdvancedInlineInputs() {{
   set('advOcrFinetuneLr', nullish(cfg.ocr_finetune_lr, 0.0002));
   set('advOcrUnfreeze', nullish(cfg.ocr_unfreeze_blocks, 1));
   setBool('advOcrEmnist', nullish(cfg.ocr_emnist_enabled, true));
-  setBool('advOcrBackground', nullish(cfg.ocr_background_enabled, true));
+  // One toggle, two backing fields: a Car License project owns the explicit
+  // "use _background INSTEAD of OOD" setting (default OFF); a basic OCR
+  // project keeps its existing background-class switch (default ON).
+  setBool(
+    'settingsUseBackgroundOod',
+    isSignOcrProject()
+      ? !!nullish(cfg.sign_background_replace_ood, false)
+      : !!nullish(cfg.ocr_background_enabled, true)
+  );
   setBool('advOcrTransfer', nullish(cfg.ocr_transfer_learning, true));
   syncOcrPanelVisibility();
   refreshRecHints();
 }}
-const OCR_BOOL_KEYS = ['ocr_emnist_enabled', 'ocr_background_enabled', 'ocr_transfer_learning'];
+const OCR_BOOL_KEYS = ['ocr_emnist_enabled', 'ocr_background_enabled', 'sign_background_replace_ood', 'ocr_transfer_learning'];
 const OCR_STRING_KEYS = ['ocr_emnist_split', 'reading_order'];
 const OCR_FLOAT_KEYS = ['ocr_head_lr', 'ocr_finetune_lr'];
 function setTrainCfgField(key, rawValue) {{
@@ -12576,7 +13264,10 @@ function syncOcrPanelVisibility() {{
   show('advOcrSplitRow', ocr && mix);
   show('advOcrPerClassRow', ocr && mix);
   show('advOcrMixHelp', ocr && mix);
-  show('advOcrBackgroundNRow', ocr && !!nullish(cfg.ocr_background_enabled, true));
+  const useBackgroundOod = isSignOcrProject()
+    ? !!nullish(cfg.sign_background_replace_ood, false)
+    : !!nullish(cfg.ocr_background_enabled, true);
+  show('advOcrBackgroundNRow', ocr && useBackgroundOod);
 }}
 function renderAdvancedPanel() {{
   const panel = document.getElementById('trainAdvPanel');
@@ -12703,7 +13394,20 @@ function bindAdvancedInlineHandlers() {{
   // still carries its value into the train payload.
   bindSelect('advReadingOrder', 'reading_order');
   bindNum('advOcrPerClass', 'ocr_emnist_per_class');
-  bindCheck('advOcrBackground', 'ocr_background_enabled');
+  // The toggle writes BOTH fields.  `sign_background_replace_ood` is what a
+  // Car License training/export reads; `ocr_background_enabled` keeps a
+  // basic-OCR project's background switch in sync and is what the mixed-set
+  // builder ultimately consumes.  Writing both here is what makes one
+  // checkbox mean the same thing in either workspace.
+  const bgOodToggle = document.getElementById('settingsUseBackgroundOod');
+  if (bgOodToggle) {{
+    bgOodToggle.addEventListener('change', (e) => {{
+      const on = !!e.target.checked;
+      setTrainCfgField('sign_background_replace_ood', on);
+      setTrainCfgField('ocr_background_enabled', on);
+      syncAdvancedInlineInputs();
+    }});
+  }}
   bindNum('advOcrBackgroundN', 'ocr_background_samples');
   bindCheck('advOcrTransfer', 'ocr_transfer_learning');
   bindNum('advOcrPretrainN', 'ocr_pretrain_per_class');
@@ -12730,12 +13434,16 @@ function resetTrainCfg() {{
   // Read the target BEFORE the reset overwrites it: signSequence() reads
   // STATE.train_cfg, and the defaults carry null there.
   const keptSignSequence = isSignOcrProject() ? signSequence() : null;
+  const keptSignSequences = isSignOcrProject() ? signSequences() : null;
   STATE.train_cfg = Object.assign({{}}, defaults);
   // The target sign sequence is project CONTENT, not a hyperparameter: it says
   // what the project is about, the way the class list does.  A reset that
   // silently dropped it would leave a trained model pointed at nothing, with
   // no way to notice.  Carried across, like the classes are.
-  if (isSignOcrProject()) STATE.train_cfg.sign_sequence = keptSignSequence;
+  if (isSignOcrProject()) {{
+    STATE.train_cfg.sign_sequence = keptSignSequence;
+    STATE.train_cfg.sign_sequences = keptSignSequences;
+  }}
   persistTrainCfgStorage();
   syncAdvancedInlineInputs();
   renderTrainStatus();
@@ -12899,6 +13607,7 @@ function render() {{
   try {{
     renderSignSequenceBar(root);
     restoreSignSlotFocus(signFocus);
+    syncLicenseListNav();
   }} catch (e) {{ console.error('[render] sign sequence bar', e); }}
   // A fresh OCR project presents onboarding instead of two untouched
   // placeholders.  Decided once, before the loop, because the loop's input is
@@ -13316,6 +14025,31 @@ function render() {{
       closeToolbarDropdowns();
       openGlobalSettings();
     }};
+    const navLicenseList = document.getElementById('navLicenseList');
+    if (navLicenseList) navLicenseList.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      closeToolbarDropdowns();
+      openLicenseListModal();
+    }};
+    const licClose = document.getElementById('licenseListClose');
+    if (licClose) licClose.onclick = (e) => {{ if (e) e.stopPropagation(); closeLicenseListModal(); }};
+    const licCancel = document.getElementById('licenseListCancel');
+    if (licCancel) licCancel.onclick = (e) => {{ if (e) e.stopPropagation(); closeLicenseListModal(); }};
+    const licSave = document.getElementById('licenseListSave');
+    if (licSave) licSave.onclick = (e) => {{ if (e) e.stopPropagation(); saveLicenseList(); }};
+    const licAdd = document.getElementById('licenseListAdd');
+    if (licAdd) licAdd.onclick = (e) => {{
+      if (e) e.stopPropagation();
+      licenseDraft.push('');
+      renderLicenseListModal();
+      const row = licenseDraft.length - 1;
+      const first = document.getElementById(`licenseSlot-${{row}}-0`);
+      if (first) first.focus();
+    }};
+    const licModal = document.getElementById('licenseListModal');
+    if (licModal) licModal.onclick = (e) => {{
+      if (e && e.target === licModal) closeLicenseListModal();
+    }};
     const setCancel = document.getElementById('settingsCancel');
     if (setCancel) setCancel.onclick = (e) => {{ if (e) e.stopPropagation(); closeGlobalSettings(); }};
     const setSave = document.getElementById('settingsSave');
@@ -13563,6 +14297,13 @@ function render() {{
     document.onvisibilitychange = () => {{
       if (document.hidden) stopHoldCapture();
     }};
+    // Everything above this point has just been rebuilt.  If the interactive
+    // guide is open, the spotlight and the click-to-advance binding were
+    // built on nodes that no longer exist, so ask it to re-seat itself on
+    // the fresh DOM (it re-measures and re-binds its own listeners).
+    if (window.tmTour && typeof window.tmTour.sync === 'function') {{
+      try {{ window.tmTour.sync(); }} catch (e) {{ console.warn('[render] tour sync failed', e); }}
+    }}
     toast(STATE.notice);
   }} catch (tailErr) {{
     // Last-resort safety net: class cards are already in the DOM at this
@@ -13627,6 +14368,7 @@ window.addEventListener('load', () => {{
     if (isTypingTarget(active) && !insideModal(active)) {{ active.blur(); return; }}
     if (dropdownOpen()) {{ closeNavMenu(); return; }}
     if (classPreprocessOpen) {{ closeClassPreprocessEditor(); return; }}
+    if (typeof licenseListOpen !== 'undefined' && licenseListOpen) {{ closeLicenseListModal(); return; }}
     if (settingsModalOpen()) {{ closeGlobalSettings(); return; }}
     if (preferencesModalOpen()) {{ closePreferences(); return; }}
     if (ocrCharModalOpen) {{ closeOcrCharModal(); return; }}
@@ -13855,14 +14597,6 @@ mountReflowTimers.push(window.setTimeout(() => {{
     try {{ openGlobalSettings(); }} catch (err) {{ console.warn('[tour] open settings failed', err); }}
   }}
 
-  /* Same idea for the EMNIST group: it lives behind the modal's Advanced
-     disclosure, so entering its checkpoint from a chapter pill would
-     otherwise spotlight a `display:none` row. */
-  function openSettingsEmnistGroup() {{
-    openSettingsModal();
-    unfoldSettingsAdvanced();
-  }}
-
   /* Folding the sampling drawer away.  The drawer's own ▴ Close is the
      checkpoint; this only guarantees the workspace is drawer-free when a
      later step is reached by skipping past that checkpoint. */
@@ -13907,6 +14641,39 @@ mountReflowTimers.push(window.setTimeout(() => {{
     return !!(d && d.classList.contains('open'));
   }}
 
+  function fileMenuOpen() {{
+    var d = byId('menuFileDropdown');
+    return !!(d && d.classList.contains('open'));
+  }}
+
+  function preferencesOpen() {{
+    var m = byId('preferencesModal');
+    return !!(m && m.classList.contains('open'));
+  }}
+
+  function glyphModalOpen() {{
+    return typeof ocrGlyphModalOpen !== 'undefined' && !!ocrGlyphModalOpen;
+  }}
+
+  function navMenuOpenNow() {{
+    return typeof navMenuOpen !== 'undefined' && !!navMenuOpen;
+  }}
+
+  /* Is any workspace layer sitting above the tour card?  Escape belongs to
+     the topmost layer, and while a menu, modal or the source drawer is
+     open that is NOT the tour: handing the key straight to the tour used to
+     kill the guide instead of closing the thing the user was looking at. */
+  function workspaceLayerOpen() {{
+    try {{
+      if (fileMenuOpen() || editMenuOpen() || navMenuOpenNow()) return true;
+      if (worktableOpen() || settingsOpen() || preferencesOpen()) return true;
+      if (typeof licenseListOpen !== 'undefined' && licenseListOpen) return true;
+      if (charModalOpen() || glyphModalOpen()) return true;
+      if (drawerOpen()) return true;
+    }} catch (err) {{ return false; }}
+    return false;
+  }}
+
   /* EMNIST mixing lives inside the Settings modal's *collapsed* Advanced
      disclosure, so opening the modal alone still leaves that group at
      `display:none`.  A step that documents it resumes onto the group, so
@@ -13921,6 +14688,22 @@ mountReflowTimers.push(window.setTimeout(() => {{
     body.style.display = 'flex';
   }}
 
+  /* The targets that live behind that collapsed disclosure.  A step that
+     documents any of them has to unfold it, or `firstVisible()` finds
+     nothing and the ring has no control left to sit on. */
+  var ADVANCED_DISCLOSURE_TARGETS = ['#settingsAdvancedToggle', '#settingsEmnistGroup',
+    '#settingsAutoSeedEmnist', '#settingsSeedEmnistNowBtn'];
+
+  function ensureStepDisclosure(step) {{
+    if (!step || !settingsOpen()) return;
+    var sels = [step.target].concat(step.fallback || []);
+    if (step.advanceTarget) sels.push(step.advanceTarget);
+    (step.advanceAlso || []).forEach(function (s) {{ sels.push(s); }});
+    for (var i = 0; i < sels.length; i++) {{
+      if (ADVANCED_DISCLOSURE_TARGETS.indexOf(sels[i]) >= 0) {{ unfoldSettingsAdvanced(); return; }}
+    }}
+  }}
+
   /* ═══ Curriculum 1 · Image Project (20 steps) ═══════════════════════
      The original comprehensive walkthrough: the three-column workspace,
      the capture sources, ROI + brightness thresholds, the 9 CNN
@@ -13929,35 +14712,71 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var IMAGE_STEPS = [
     {{
       chapter: 1,
-      title: 'Welcome to TFLite Training (Image Project)',
-      /* target: null → no cut-out on the welcome step: the card floats
-         centred over a full-screen dimmed workspace, exactly like
-         Adobe's welcome screen. Cutting out the whole .layout box left
-         only a hairline rim dimmed, which read as a bug, not a welcome. */
+      title: 'Your Image Project, End to End',
+      /* Step 0 is the big picture rather than a lesson, so it carries
+         `overview` and a `stages` list instead of a spotlight: the card
+         floats centred over a dimmed workspace (target: null — cutting
+         the whole .layout box out left only a hairline rim dimmed, which
+         read as a bug, not a welcome) and its one button starts the
+         walkthrough. */
       target: null,
       fallback: [],
       placement: 'auto',
-      body: '<p>This workspace builds a tiny embedded image classifier and deploys it to your <b>ESP32-P4</b>. Work left to right, exactly like the lab manual:</p>' +
-        '<ul>' +
-        '<li><b>1 · Sample Area (left)</b> — collect and filter labeled images for every class.</li>' +
-        '<li><b>2 · Training Area (middle)</b> — train a lightweight CNN and read the per-class accuracy.</li>' +
-        '<li><b>3 · Preview &amp; Export (right)</b> — test the quantized model live, then export <code>int8</code> C/C++ files.</li>' +
-        '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>This tour is <b>state-aware</b>: as you press <b>Next →</b> it opens the real panels it talks about, then puts them back.</span></div>' +
-        '<p class="tm-tour-muted">Use <kbd>←</kbd> / <kbd>→</kbd> to step through, <kbd>Esc</kbd> to exit.</p>'
+      overview: true,
+      stages: [
+        {{ t: 'Collect Samples', d: 'Add your classes, then capture labelled images from the webcam, a folder or the ESP32-P4 serial link.' }},
+        {{ t: 'Clean &amp; Crop', d: 'Open the Sample Worktable to set the ROI box and the Dark / Lum thresholds for each class.' }},
+        {{ t: 'Train', d: 'Set the CNN hyperparameters, train the int8 model and read the per-class accuracy.' }},
+        {{ t: 'Test Live', d: 'Watch the preview verdict, and the 3-layer OOD gate throwing out frames that are not your classes.' }},
+        {{ t: 'Export &amp; Deploy', d: 'Build the 5-file C/C++ package that the ESP32-P4 flashes.' }}
+      ],
+      body: '<p>This workspace builds a tiny embedded image classifier and deploys it to your <b>ESP32-P4</b>. Work left to right, exactly like the lab manual.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>The guide <b>points</b> at the real control for every step — and the moment you start working it shrinks into a floating orb in the corner, so it never covers what you are using.</span></div>' +
+        '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
     }},
     {{
       chapter: 1,
-      title: 'Save the Project, then Open Input Settings',
+      title: 'Save, Open &amp; Export from the File Menu',
+      target: '#menuFileBtn',
+      fallback: ['.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#menuFileBtn',
+      checkpoint: 'Click "File ▾" to see the project commands',
+      body: '<p><b>File ▾</b> holds everything that acts on the project as a whole:</p>' +
+        '<ul>' +
+        '<li><b>New project</b> (<kbd>⌘N</kbd>) — start a fresh, empty workspace.</li>' +
+        '<li><b>Open project</b> (<kbd>⌘O</kbd>) — load a saved <code>.tmproj</code> archive, including its samples and settings.</li>' +
+        '<li><b>Save</b> (<kbd>⌘S</kbd>) and <b>Save as</b> (<kbd>⇧⌘S</kbd>) — write the project to disk under a new name.</li>' +
+        '<li><b>Export dataset</b> — dump the raw sample images as files, for a backup or an offline experiment.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Save before every training run. A <code>.tmproj</code> keeps the samples, the ROI boxes and the brightness thresholds — not just the class names.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Preferences &amp; Return Home',
+      target: '#navPreferences',
+      fallback: ['#navReturn', '.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navPreferences',
+      checkpoint: 'Click "Preferences" to see the display settings',
+      body: '<ul>' +
+        '<li><b>Preferences</b> opens a small modal whose one setting, <b>Max sample thumbnails</b> (<code>#prefMaxSamples</code>), caps how many sample thumbnails each class card caches and draws — 12 by default.</li>' +
+        '<li>Raise it while you are eyeballing a set for bad captures; lower it on a slow machine or a project with thousands of samples.</li>' +
+        '<li><b>← Return Home</b> leaves the workspace for the start page. It is navigation, not a reset: the project on disk is untouched.</li>' +
+        '</ul>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Open Input Settings',
       target: '#navSettings',
       fallback: ['.topnav'],
       placement: 'bottom',
       advanceTarget: '#navSettings',
       checkpoint: 'Click "⚙ Settings" in the top bar to open Input Settings',
-      body: '<ul>' +
-        '<li><b>File ▾ → Save</b> writes a <code>.tmproj</code> file holding your labels, samples and settings. Save often, or press <kbd>⌘S</kbd> / <kbd>Ctrl+S</kbd>.</li>' +
-        '<li><b>⚙ Settings</b> is the single source of truth for the webcam, the serial link and the capture frame — applied to every class card at once.</li>' +
+      body: '<p><b>⚙ Settings</b> is the single source of truth for the capture hardware — the webcam, the ESP32-P4 serial link and the frame geometry — applied to every class card at once.</p>' +
+        '<ul>' +
         '<li>MCU defaults: frame <b>96×96</b>, <b>Grayscale</b>, baud <b>115200</b> (or <b>921600</b>), sync header <b>AA 55 AA</b>.</li>' +
+        '<li>The next three checkpoints walk the modal from top to bottom, then close it again.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Close the Arduino IDE <b>Serial Monitor</b> before connecting — only one program can own the ESP32-P4 serial port.</span></div>'
     }},
@@ -13992,6 +14811,32 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 1,
+      title: 'Preview Source &amp; the OOD Gates',
+      target: '#settingsOodGroup',
+      fallback: ['#settingsPreviewSource', '#globalSettingsModal'],
+      placement: 'left',
+      /* Still inside the modal.  A chapter pill can land here with the modal
+         shut, so the step re-doors onto ⚙ exactly like the group above. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsPreviewSource',
+      checkpoint: 'Pick the preview source, then check the four OOD gates',
+      body: '<ul>' +
+        '<li><b>Preview input source</b> (<code>#settingsPreviewSource</code>) decides what the preview pane reads: <b>Webcam</b>, <b>Device (MCU)</b> over serial, or a <b>Local Image File</b>. The preview card draws its own source row from this value.</li>' +
+        '<li><b>OOD sign min %</b> / <b>max %</b> — Layer 1, the share of dark target pixels. Below the min (empty scene) or above the max (covered lens) the frame is rejected <b>before inference</b>.</li>' +
+        '<li><b>OOD max prob</b> — Layer 2, the winning class must clear this floor.</li>' +
+        '<li><b>OOD entropy max</b> — Layer 3, the probabilities must not be spread too evenly, i.e. the model must not be guessing.</li>' +
+        '</ul>' +
+        '<details class="tm-tour-details"><summary>🎛️ Tuning cheat-sheet</summary><div class="tm-tour-details-body">' +
+        '<table class="tm-tour-table"><tr><th>Symptom</th><th>Fix</th></tr>' +
+        '<tr><td>Real signs are missed</td><td><b>Loosen</b>: lower <code>sign min %</code>, raise <code>sign max %</code>, lower <code>max prob</code>, raise <code>entropy max</code>.</td></tr>' +
+        '<tr><td>Empty wall is classified</td><td><b>Tighten</b>: raise <code>sign min %</code>, lower <code>sign max %</code>, raise <code>max prob</code>, lower <code>entropy max</code>.</td></tr>' +
+        '</table></div></details>' +
+        '<p class="tm-tour-muted">Defaults: sign <b>0.3 % – 70 %</b>, max prob <b>≥ 0.60</b>, entropy <b>≤ 0.70</b>. These four <code>constexpr</code> values travel into the exported <code>model_settings.h</code>.</p>'
+    }},
+    {{
+      chapter: 1,
       title: 'Leave Input Settings',
       target: '#settingsCancel',
       fallback: ['#settingsSave', '.tm-settings-card'],
@@ -14008,7 +14853,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       advanceAlso: ['#settingsSave'],
       onLeave: closeSettingsModal,
       checkpoint: 'Click "Cancel" (or "Save changes") to exit Settings and return to the workspace',
-      body: '<p><b>Cancel</b> closes the modal without applying the edits on screen; <b>Save changes</b> applies them to every class card at once.</p>' +
+      body: '<p><b>Cancel</b> closes the modal without applying the edits on screen; <b>Save changes</b> applies them to every class card at once and writes the OOD gates into the host preview.</p>' +
         '<p class="tm-tour-muted">The modal can also be dismissed with <kbd>Esc</kbd>, but the tour follows you out either way.</p>'
     }},
     {{
@@ -14017,12 +14862,28 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.class-card',
       fallback: ['.col-classes'],
       placement: 'right',
-      body: '<ul>' +
-        '<li>Click <b>✏️</b> to rename a class (for example <code>LEFT</code>, <code>STOP</code>, <code>RIGHT</code>).</li>' +
-        '<li><b>+ Add a class</b> at the bottom of the column adds another label.</li>' +
-        '<li>Drag the <b>⋮⋮</b> handle to reorder. The top-to-bottom order <b>is</b> the class index (<b>0, 1, 2…</b>) that the ESP32-P4 sends to the ESP32-S3.</li>' +
+      body: '<p>Every icon on a class card header does one thing:</p>' +
+        '<ul>' +
+        '<li><b>⠿</b> (drag handle) — drag the card to reorder. The top-to-bottom order <b>is</b> the class index (<b>0, 1, 2…</b>) the ESP32-P4 sends to the ESP32-S3.</li>' +
+        '<li><b>✏️</b> (<code>.tm-rename-btn</code>) — rename the class, e.g. <code>LEFT</code>, <code>STOP</code>, <code>RIGHT</code>.</li>' +
+        '<li><b>🧹</b> (<code>.clear-samples</code>) — clear every sample in that class without deleting the class itself.</li>' +
+        '<li><b>🗑</b> (<code>.tm-delete-class</code>) — delete the class, samples and all. This one cannot be undone.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔧</span><span>Reordering changes the on-device index mapping — re-export the model after you reorder.</span></div>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Add a Class',
+      target: '.addclass',
+      fallback: ['.col-classes'],
+      placement: 'right',
+      advanceTarget: '.addclass',
+      checkpoint: 'Click "+ Add a class" to add another label',
+      body: '<p><b>+ Add a class</b> at the foot of the column appends a new label with an empty sample set. Rename it straight away, then capture its samples.</p>' +
+        '<ul>' +
+        '<li>Two classes is the minimum a classifier can learn; most projects want three or more.</li>' +
+        '<li>A brand-new class arrives with zero samples, so <b>Train</b> stays disabled until every class has some.</li>' +
+        '</ul>'
     }},
     {{
       chapter: 2,
@@ -14043,6 +14904,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 2,
       title: 'Capture Labeled Image Samples',
+      live: 'samples',
       target: '[id^="sourceCapture-"]',
       fallback: ['.source-actions', '.source-panel'],
       placement: 'right',
@@ -14053,12 +14915,17 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseTarget: '.tm-action-toolbar button.sample',
       phaseName: 'the camera drawer',
       advanceTarget: '[id^="sourceCapture-"]',
+      /* Holding the button is the burst gesture, and Upload swaps the pair
+         for a file picker: all three finish the same checkpoint, so all
+         three are bound. */
+      advanceAlso: ['[id^="sourceHold-"]', '[id^="uploadPick-"]'],
       checkpoint: 'Click "Capture" for one frame, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
       body: '<p>The drawer opens under the class card. Its preview is <b>live</b> for Webcam and Device, and empty for Upload.</p>' +
         '<ul>' +
         '<li><b>Capture</b> grabs a single frame and files it under this class.</li>' +
         '<li><b>Hold to Capture</b> — hold the button (or hold <kbd>Space</kbd>) to <b>burst-capture</b> while you move the sign around.</li>' +
         '<li><b>Upload</b> instead offers <b>Choose images from your files</b>.</li>' +
+        '<li>A <b>⚙</b> chip in the drawer head jumps straight to this class&rsquo;s settings without leaving the drawer.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Aim for <b>50–100+ samples per class</b>, varying distance, angle and lighting — the model only learns what it sees.</span></div>'
     }},
@@ -14095,6 +14962,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 3,
       title: 'Auto ROI vs. Manual ROI Cropping',
+      live: 'thresholds',
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
@@ -14120,6 +14988,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 3,
       title: 'Dark Thr &amp; Lum Thr Noise Filtering',
+      live: 'thresholds',
       target: '#classPreprocessDark',
       fallback: ['.class-preprocess-right', '#classPreprocessModal'],
       placement: 'left',
@@ -14138,7 +15007,11 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<li><b>Lum Thr</b> — pixels brighter than the threshold become <b>white (255)</b>, i.e. bright background.</li>' +
         '</ul>' +
         '<p>Together they isolate the dark sign body from everything else. Tune both until the right-hand preview is mostly white with a crisp black glyph.</p>' +
-        '<p>Click <b>Save Sample</b> (or Close <b>&times;</b>) to return to the workspace.</p>' +
+        '<ul>' +
+        '<li>The <b>thumbnail strip</b> (<code>.class-preprocess-thumb</code>) jumps between this class&rsquo;s samples.</li>' +
+        '<li><b>Delete Sample</b> throws the current frame away for good — keep it for blur, glare or a hand in the way.</li>' +
+        '<li><b>Save Sample</b> writes the crop and the thresholds onto this sample, then returns to the workspace.</li>' +
+        '</ul>' +
         '<details class="tm-tour-details"><summary>Deep dive · worktable shortcuts</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table">' +
         '<tr><td><kbd>F1</kbd></td><td>Switch to Auto ROI</td></tr>' +
@@ -14210,16 +15083,21 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseIf: function () {{ return !advancedOpen(); }},
       phaseTarget: '#advBtn',
       phaseName: 'the <b>Advanced</b> training options',
+      advanceTarget: '#advUseRec',
+      /* Reset restores the defaults, and the inline rows are the numbers
+         the recommended button fills in: touching any of them settles this
+         checkpoint too. */
+      advanceAlso: ['#advReset', '#advInkPolarity', '#advEpochsInline', '#advBatchInline', '#advLrInline'],
       checkpoint: 'Tune the rows, or click "💡 Use recommended" to fill them in',
       body: '<ul>' +
-        '<li>Click <b>💡 Use recommended</b> to auto-calculate <code>Epochs</code> and <code>Batch Size</code> for roughly <b>800 gradient updates</b>.</li>' +
+        '<li>Click <b>💡 Use recommended</b> to auto-calculate <code>Epochs</code> and <code>Batch Size</code> for roughly <b>800 gradient updates</b>; <b>Reset</b> puts the shipped defaults back.</li>' +
         '<li><b>Speed vs. accuracy:</b> larger <code>Image Size</code> (96 / 160 / 384), <code>Conv1/Conv2 Filters</code> and <code>Dense Units</code> raise capacity but <b>slow on-device inference</b> and grow the flash footprint.</li>' +
         '<li>Keep <code>Image Size</code> equal to the MCU <code>IMG_SIZE</code>, or the exported model will reject every frame.</li>' +
         '</ul>' +
         '<details class="tm-tour-details"><summary>📖 View all 9 hyperparameters</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table"><tr><th>Parameter</th><th>What it controls</th></tr>' +
         '<tr><td><code>Image Size</code></td><td>Square input resolution; must equal the MCU <code>IMG_SIZE</code>.</td></tr>' +
-        '<tr><td><code>Color Mode</code></td><td>1 channel is roughly 3× cheaper; road signs need no colour.</td></tr>' +
+        '<tr><td><code>Color Mode</code></td><td>1 channel is roughly 3× cheaper; license plates need no colour.</td></tr>' +
         '<tr><td><code>Batch Size</code></td><td>How many samples make up one gradient step.</td></tr>' +
         '<tr><td><code>Epochs</code></td><td>Full passes over the training data.</td></tr>' +
         '<tr><td><code>Validation Split</code></td><td>Fraction held out to produce an honest accuracy score.</td></tr>' +
@@ -14236,67 +15114,40 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.train-card', '.col-train'],
       placement: 'left',
       advanceTarget: '#trainBtn',
+      live: 'train',
       checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
-      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>). When it finishes, click the green <b>Model Trained · tap for accuracy</b> pill to inspect the per-class score.</p>' +
+      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>). The run streams per-epoch progress into the card.</p>' +
+        '<ul>' +
+        '<li>When it finishes, the status pill (<code>#trainStatus</code>) turns into <b>Model Trained · tap for accuracy</b> — click it for the per-class score.</li>' +
+        '<li>The pill is disabled until <b>every</b> class has at least one sample; it is the app&rsquo;s way of saying the training set is not ready.</li>' +
+        '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>If one class lags far behind the others, it usually needs more samples or a tighter ROI — go back to <b>Edit</b> before re-training.</span></div>'
     }},
     {{
       chapter: 5,
-      title: 'Real-Time Model Preview (Input · ROI · Orig)',
+      title: 'Real-Time Preview (Input · ROI · Orig)',
+      target: '.preview-card',
+      fallback: ['.col-preview'],
+      placement: 'left',
+      body: '<p>The preview card runs the <b>same int8</b> graph on the host CPU that the MCU will run, so accuracy here predicts on-device accuracy.</p>' +
+        '<ul>' +
+        '<li><b>Input</b> — streaming on/off. While it is off the pane holds the last frame.</li>' +
+        '<li><b>ROI</b> — draw the crop rectangle over the scene.</li>' +
+        '<li><b>Orig</b> — show the full masked frame. With both on, the pane shows the processed crop the network is handed.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📁</span><span>The row underneath picks where the pane reads from — a <b>Webcam</b>, the <b>Device</b> port plus <b>Refresh</b>, or <b>Upload Image…</b> — independently of the capture drawer.</span></div>'
+    }},
+    {{
+      chapter: 5,
+      title: 'Live Dark / Lum Sliders &amp; the Confidence Bars',
       target: '.preview-card',
       fallback: ['.col-preview'],
       placement: 'left',
       body: '<ul>' +
-        '<li>Toggle <b>Input</b> ON to stream live frames from the Webcam or the ESP32-P4 Device through the quantized TFLite model.</li>' +
-        '<li>Toggle <b>ROI</b> to draw the crop rectangle over the scene, and <b>Orig</b> to see the full masked frame. With both on, the pane shows the processed crop (for a sign, the split with each glyph).</li>' +
-        '<li>Fine-tune the live <b>Dark</b> / <b>Lum</b> sliders under the image — they should match the thresholds you used in the worktable.</li>' +
-        '<li>Read the confidence bars at the bottom; an OOD verdict of <code>No Sign</code> appears above them.</li>' +
+        '<li>The live <b>Dark</b> / <b>Lum</b> sliders under the image re-tune the brightness mask while you watch — they should match the thresholds you saved in the worktable.</li>' +
+        '<li>The <b>confidence bars</b> underneath are the per-class scores for the frame on screen; the empty-space guard reads <code>No Sign</code> when a gate rejects it.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>Preview runs the <b>same int8</b> graph on the host CPU that the MCU will run, so accuracy here predicts on-device accuracy.</span></div>'
-    }},
-    {{
-      chapter: 5,
-      title: 'Out-of-Distribution (OOD) 3-Layer Rejection Gate',
-      target: '#settingsOodGroup',
-      fallback: ['#settingsOodSignPctMin', '#globalSettingsModal'],
-      placement: 'left',
-      /* Settings lives behind the ⚙ button in the top bar.  The step opens
-         with the arrow on that button and a prompt to press it; the modal
-         appears because the user asked for it, and the spotlight then
-         moves inside onto the OOD gates. */
-      phaseTarget: '#navSettings',
-      phaseName: 'the <b>OOD</b> gate settings',
-      checkpoint: 'Click the highlighted ⚙ Settings button to reach the OOD gates',
-      body: '<p>A SoftMax classifier always names a class — even when you point the camera at an empty wall. To answer <b>“is there actually a sign?”</b> the host and the MCU run <b>3 rejection layers</b>:</p>' +
-        '<ul>' +
-        '<li><b>Layer 1 · Sign-pixel ratio</b> (<code>OOD sign min %</code> / <code>max %</code>) — frames are rejected <b>before inference</b> when dark target pixels fall below the min (empty scene) or above the max (camera covered).</li>' +
-        '<li><b>Layer 2 · Top probability</b> (<code>OOD max prob</code>) — rejects when the winning class probability is too low.</li>' +
-        '<li><b>Layer 3 · Normalized entropy</b> (<code>OOD entropy max</code>) — rejects when the probabilities are spread too evenly, i.e. the model is guessing.</li>' +
-        '</ul>' +
-        '<details class="tm-tour-details"><summary>🎛️ Tuning cheat-sheet</summary><div class="tm-tour-details-body">' +
-        '<table class="tm-tour-table"><tr><th>Symptom</th><th>Fix</th></tr>' +
-        '<tr><td>Real signs are missed</td><td><b>Loosen</b>: lower <code>sign min %</code>, raise <code>sign max %</code>, lower <code>max prob</code>, raise <code>entropy max</code>.</td></tr>' +
-        '<tr><td>Empty wall is classified</td><td><b>Tighten</b>: raise <code>sign min %</code>, lower <code>sign max %</code>, raise <code>max prob</code>, lower <code>entropy max</code>.</td></tr>' +
-        '</table></div></details>' +
-        '<p class="tm-tour-muted">Defaults: sign <b>0.3 % – 70 %</b>, max prob <b>≥ 0.60</b>, entropy <b>≤ 0.70</b>.</p>'
-    }},
-    {{
-      chapter: 5,
-      title: 'Close Input Settings',
-      target: '#settingsCancel',
-      fallback: ['#settingsSave', '.tm-settings-card'],
-      placement: 'left',
-      /* The OOD checkpoint left Settings open on purpose, so the exit is
-         the user's own press rather than a modal vanishing under them. */
-      phaseIf: function () {{ return !settingsOpen(); }},
-      phaseTarget: '#navSettings',
-      phaseName: 'Input Settings',
-      advanceTarget: '#settingsCancel',
-      advanceAlso: ['#settingsSave'],
-      onLeave: closeSettingsModal,
-      checkpoint: 'Click "Save changes" (or "Cancel") to close Settings',
-      body: '<p>Leaving the modal is the last step of the Settings flow: <b>Save changes</b> applies the new OOD gates to the host preview and to the exported firmware constants; <b>Cancel</b> keeps the previous values.</p>' +
-        '<p class="tm-tour-muted">Both close the modal — the same <kbd>Esc</kbd> you used to get here also works.</p>'
+        '<p class="tm-tour-muted">Sanity-check the preview before exporting: a mask that looks wrong here will look exactly as wrong on the device.</p>'
     }},
     {{
       chapter: 6,
@@ -14366,18 +15217,42 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var OCR_STEPS = [
     {{
       chapter: 1,
-      title: 'Welcome to Character OCR',
+      title: 'Your Character OCR Project, End to End',
+      /* Step 0 is the big picture rather than a lesson, so it carries
+         `overview` and a `stages` list instead of a spotlight: the card
+         floats centred over a dimmed workspace and its one button starts
+         the walkthrough. */
       target: null,
       fallback: [],
       placement: 'auto',
+      overview: true,
+      stages: [
+        {{ t: 'Set Your Character Set', d: 'Pick which characters this project must read — digits, letters, or the punctuation the firmware knows.' }},
+        {{ t: 'Collect &amp; Crop Samples', d: 'Capture one glyph per crop, then open the Sample Worktable to set the ROI box and the Dark / Lum thresholds.' }},
+        {{ t: 'Binarize the Glyph', d: 'Apply the same integer Otsu the MCU runs, at 28×28, so host and device see byte-identical input.' }},
+        {{ t: 'Transfer-Learn from EMNIST', d: 'Train the int8 classifier, warm-starting from EMNIST with the ink polarity matching your captures.' }},
+        {{ t: 'Preview &amp; Export', d: 'Preview a single glyph, watch the _background rejection class, then export the OCR firmware.' }}
+      ],
       body: '<p>This workspace trains a <b>single-character</b> classifier — one glyph per crop — and ships it to the <b>ESP32-P4</b> as <code>TFLite_OCR</code>.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Nothing here is read as a <b>sequence</b>: one crop in, one character out. The <b>🚗 Car License Project</b> is a separate project type. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
+        '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Save, Open &amp; Export from the File Menu',
+      target: '#menuFileBtn',
+      fallback: ['.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#menuFileBtn',
+      checkpoint: 'Click "File ▾" to see the project commands',
+      body: '<p><b>File ▾</b> holds everything that acts on the project as a whole — including the character set you are about to pick:</p>' +
         '<ul>' +
-        '<li><b>Every class is one character</b>: <code>0–9</code>, <code>A–Z</code> and the punctuation the firmware knows.</li>' +
-        '<li>Each crop is binarized to <b>28×28</b> with the <b>same integer Otsu</b> the MCU runs, so host and device see byte-identical input.</li>' +
-        '<li>A <code>_background</code> rejection class keeps a blank or junk frame from being read as a letter.</li>' +
+        '<li><b>New project</b> (<kbd>⌘N</kbd>) — start a fresh, empty workspace.</li>' +
+        '<li><b>Open project</b> (<kbd>⌘O</kbd>) — load a saved <code>.tmproj</code> archive, samples, character set and thresholds included.</li>' +
+        '<li><b>Save</b> (<kbd>⌘S</kbd>) and <b>Save as</b> (<kbd>⇧⌘S</kbd>) — write the project to disk under a new name.</li>' +
+        '<li><b>Export dataset</b> — dump the raw glyph images as files, for a backup or an offline experiment.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Nothing here is read as a <b>sequence</b>: one crop in, one character out. Road signs are a separate project type.</span></div>' +
-        '<p class="tm-tour-muted">Use <kbd>←</kbd> / <kbd>→</kbd> to step through, <kbd>Esc</kbd> to exit.</p>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Save before every training run. A <code>.tmproj</code> keeps the glyphs, the crop boxes and the brightness thresholds — not just the class names.</span></div>'
     }},
     {{
       chapter: 1,
@@ -14403,14 +15278,195 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<p>Leave <b>_background</b> enabled unless you are certain the camera will only ever see a glyph.</p>'
     }},
     {{
+      chapter: 1,
+      title: 'Preferences &amp; Return Home',
+      target: '#navPreferences',
+      fallback: ['#navReturn', '.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navPreferences',
+      checkpoint: 'Click "Preferences" to see the display settings',
+      body: '<ul>' +
+        '<li><b>Preferences</b> opens a small modal whose one setting, <b>Max sample thumbnails</b> (<code>#prefMaxSamples</code>), caps how many glyph thumbnails each character card caches and draws — 12 by default.</li>' +
+        '<li>Raise it while you are scanning a character&rsquo;s set for bad crops; lower it on a slow machine or a project with thousands of glyphs.</li>' +
+        '<li><b>← Return Home</b> leaves the workspace for the start page. It is navigation, not a reset: the project on disk is untouched.</li>' +
+        '</ul>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Open Input Settings',
+      target: '#navSettings',
+      fallback: ['.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navSettings',
+      checkpoint: 'Click "⚙ Settings" in the top bar to open Input Settings',
+      body: '<p><b>⚙ Settings</b> is the single source of truth for the capture hardware — the webcam, the ESP32-P4 serial link and the frame geometry — applied to every character card at once.</p>' +
+        '<ul>' +
+        '<li>The four checkpoints after this one walk the modal from top to bottom: the camera and serial fields, the preview source and the OOD gates, the EMNIST mixing panel, and the zero-hardware sample filler.</li>' +
+        '<li>It ends by asking you to close the modal yourself, so nothing vanishes from under your hands.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Close the Arduino IDE <b>Serial Monitor</b> before connecting — only one program can own the ESP32-P4 serial port.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Camera &amp; MCU Serial Fields',
+      target: '#settingsCameraGroup',
+      fallback: ['#settingsMcuGroup', '#settingsWebcam', '#globalSettingsModal'],
+      placement: 'left',
+      /* Inside the modal now.  The guard only covers the ways in that skip
+         the Open checkpoint — a chapter pill, or `Skip step →` — where the
+         modal may still be shut; there the step re-doors onto ⚙ instead of
+         spotlighting a group the modal is covering. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      checkpoint: 'Click the highlighted ⚙ Settings button to open Input Settings',
+      body: '<ul>' +
+        '<li><b>Webcam</b> — the camera you hold the characters up to; <b>Capture FPS</b> throttles the live stream.</li>' +
+        '<li><b>Serial Device (port)</b> — the ESP32-P4 USB device. Re-scan after plugging it in.</li>' +
+        '<li><b>Frame side</b> / <b>Channels</b> must match the firmware — a glyph pipeline usually runs <b>28×28</b> or <b>96×96</b>, <b>Grayscale</b>.</li>' +
+        '<li><b>Baud rate</b>: <b>115200</b> for reliability, <b>921600</b> for faster frame streaming.</li>' +
+        '</ul>' +
+        '<details class="tm-tour-details"><summary>Deep dive · what each serial field does</summary><div class="tm-tour-details-body">' +
+        '<table class="tm-tour-table"><tr><th>Field</th><th>Meaning</th></tr>' +
+        '<tr><td><code>Port</code></td><td>USB serial device of the ESP32-P4 (re-scan after plugging in).</td></tr>' +
+        '<tr><td><code>Frame side</code></td><td>Square frame the device streams; must match its firmware.</td></tr>' +
+        '<tr><td><code>Channels</code></td><td><b>1</b> = grayscale (default), <b>3</b> = RGB colour.</td></tr>' +
+        '<tr><td><code>Baud</code></td><td>115200 for reliability, 921600 for faster frame streaming.</td></tr>' +
+        '<tr><td><code>Sync header</code></td><td>Byte pattern marking the start of a frame (AA 55 AA) — under <b>▸ Advanced Settings</b>.</td></tr>' +
+        '</table></div></details>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Preview Source &amp; the OOD Gates',
+      target: '#settingsOodGroup',
+      fallback: ['#settingsPreviewSource', '#globalSettingsModal'],
+      placement: 'left',
+      /* Still inside the modal.  A chapter pill can land here with the modal
+         shut, so the step re-doors onto ⚙ exactly like the group above. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsPreviewSource',
+      checkpoint: 'Pick the preview source, then check the four OOD gates',
+      body: '<ul>' +
+        '<li><b>Preview input source</b> (<code>#settingsPreviewSource</code>) decides what the preview pane reads: <b>Webcam</b>, <b>Device (MCU)</b> over serial, or a <b>Local Image File</b>. The preview card draws its own source row from this value.</li>' +
+        '<li><b>OOD sign min %</b> / <b>max %</b> — Layer 1, the share of dark target pixels. Below the min (empty frame) or above the max (covered lens) the frame is rejected <b>before inference</b>, so a blank page never scores.</li>' +
+        '<li><b>OOD max prob</b> — Layer 2, the winning character must clear this floor.</li>' +
+        '<li><b>OOD entropy max</b> — Layer 3, the glyph probabilities must not be spread too evenly, i.e. the model must not be guessing.</li>' +
+        '</ul>' +
+        '<details class="tm-tour-details"><summary>🎛️ Tuning cheat-sheet</summary><div class="tm-tour-details-body">' +
+        '<table class="tm-tour-table"><tr><th>Symptom</th><th>Fix</th></tr>' +
+        '<tr><td>A real glyph reads <code>No Sign</code></td><td><b>Loosen</b>: lower <code>sign min %</code>, lower <code>max prob</code>, raise <code>entropy max</code>.</td></tr>' +
+        '<tr><td>An empty frame is classified</td><td><b>Tighten</b>: raise <code>sign min %</code>, raise <code>max prob</code>, lower <code>entropy max</code>.</td></tr>' +
+        '</table></div></details>' +
+        '<p class="tm-tour-muted">These four <code>constexpr</code> values travel into the exported <code>model_settings.h</code>.</p>'
+    }},
+    {{
+      chapter: 1,
+      title: 'OCR Dataset Mixing &amp; Transfer Learning',
+      target: '#advOcrPanel',
+      fallback: ['#modalOcrSection', '#globalSettingsModal'],
+      placement: 'left',
+      /* Still inside the modal, and this panel is NOT behind the Advanced
+         disclosure: it sits in the modal's own Training Hyperparameters
+         group, so the ⚙ door is the only thing that has to be open. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#advOcrEmnist',
+      checkpoint: 'Decide how much EMNIST is mixed into your character set',
+      body: '<p>This is the OCR-only panel. It decides what the model trains on beyond your own crops:</p>' +
+        '<ul>' +
+        '<li><b>Mix EMNIST into every class</b> (<code>#advOcrEmnist</code>) — augments each character with public handwriting glyphs so a digit you captured 60 times is backed by thousands more.</li>' +
+        '<li><b>EMNIST split</b> (<code>#advOcrSplit</code>) — which corpus to sample from: <code>ByClass</code>, <code>ByMerge</code>, <code>Letters</code>, <code>Digits</code> or <code>MNIST</code>. Match your character set.</li>' +
+        '<li><b>Synthetic per class</b> (<code>#advOcrPerClass</code>) — how many extra EMNIST glyphs are added per character. <code>0</code> mirrors your own per-class count.</li>' +
+        '<li><b>Use <code>_background</code> noise class to replace OOD rejection</b> (<code>#settingsUseBackgroundOod</code>) — ON trains an extra synthetic <code>_background</code> class that becomes the only per-slot rejector; OFF keeps the target characters as the sole outputs and leans on the OOD gates.</li>' +
+        '<li><b>Background crops</b> (<code>#advOcrBackgroundN</code>) — how many noise crops train that rejector class; used only when the toggle above is ON.</li>' +
+        '<li><b>Fine-tune pre-trained backbone</b> (<code>#advOcrTransfer</code>) — keeps the EMNIST backbone and attaches a fresh head: the fastest route to a high score on a few hundred glyphs. The pre-train / head / fine-tune rows below it appear only while it is on.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Mixing only helps when the fonts agree. Hand-written glyphs next to a clean printed font can pull accuracy down — watch the per-character score.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Zero-Hardware EMNIST Auto-Fill',
+      target: '#settingsEmnistGroup',
+      fallback: ['#settingsAdvancedToggle', '#globalSettingsModal'],
+      placement: 'left',
+      /* This row lives under the collapsed ▸ Advanced Settings disclosure,
+         so `onEnter` unfolds it once the modal is on screen — and
+         `resolveStepTargets` re-unfolds on every re-place, so a chapter
+         pill jump cannot land on a `display:none` row either. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      onEnter: unfoldSettingsAdvanced,
+      advanceTarget: '#settingsAutoSeedEmnist',
+      advanceAlso: ['#settingsSeedEmnistNowBtn'],
+      checkpoint: 'Tick "Auto-fill empty classes", or click "Fill Empty Classes with EMNIST Samples Now"',
+      body: '<p><b>Advanced Settings</b> (<code>#settingsAdvancedToggle</code>) holds the frame sync word and this developer tool. It exists so the whole pipeline can be exercised <b>before any camera is wired up</b>:</p>' +
+        '<ul>' +
+        '<li><b>Auto-fill empty classes with EMNIST template samples</b> (<code>#settingsAutoSeedEmnist</code>) — the automatic version: every <b>empty</b> character class gets <b>24</b> dark-ink-on-light EMNIST captures, so <b>Train</b> unlocks with no hardware at all.</li>' +
+        '<li><b>Fill Empty Classes with EMNIST Samples Now</b> (<code>#settingsSeedEmnistNowBtn</code>) — runs the fill once, immediately, and leaves the auto-fill choice as it is.</li>' +
+        '<li>Classes that already hold real camera samples are <b>kept untouched</b> — the filler only touches the gaps.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧪</span><span>Useful for a first rehearsal of capture → preprocess → train → preview. Delete the synthetic samples again before you judge real accuracy.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Leave Input Settings',
+      target: '#settingsCancel',
+      fallback: ['#settingsSave', '.tm-settings-card'],
+      placement: 'left',
+      /* The EMNIST checkpoint left the modal open on purpose, so the exit is
+         the user's own press rather than the modal vanishing under them. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsCancel',
+      advanceAlso: ['#settingsSave'],
+      onLeave: closeSettingsModal,
+      checkpoint: 'Click "Cancel" (or "Save changes") to exit Settings and return to the workspace',
+      body: '<p><b>Save changes</b> keeps the EMNIST mix and the OOD gates for the next training run; <b>Cancel</b> leaves the previous values in place. Either closes the modal.</p>' +
+        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it as well — the tour follows you back out to the workspace.</p>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Organize &amp; Order Your Character Cards',
+      target: '.class-card',
+      fallback: ['.col-classes'],
+      placement: 'right',
+      /* Entering this chapter from a chapter pill would otherwise leave the
+         Edit ▾ dropdown or a character picker covering the class column. */
+      onEnter: closeCharOverlays,
+      body: '<p>Every character you picked is a class card. Every icon on its header does one thing:</p>' +
+        '<ul>' +
+        '<li><b>⠿</b> (drag handle) — drag the card to reorder. The top-to-bottom order <b>is</b> the class index the firmware reports.</li>' +
+        '<li><b>✏️</b> (<code>.tm-rename-btn</code>) — rename the class, e.g. <code>A</code>, <code>1</code>, <code>%</code>.</li>' +
+        '<li><b>🧹</b> (<code>.clear-samples</code>) — clear every glyph in that class without deleting the class itself.</li>' +
+        '<li><b>🗑</b> (<code>.tm-delete-class</code>) — delete the class, samples and all. This one cannot be undone.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔧</span><span>Reordering changes the on-device index mapping — re-export the model after you reorder.</span></div>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Add a Character Class',
+      target: '.addclass',
+      fallback: ['.col-classes'],
+      placement: 'right',
+      advanceTarget: '.addclass',
+      checkpoint: 'Click "+ Add a class" to add another character',
+      body: '<p><b>+ Add a class</b> at the foot of the column appends a label with an empty sample set — the way to add a character the picker did not offer.</p>' +
+        '<ul>' +
+        '<li>Rename it straight away with the <b>✏️</b> pencil, so the label matches the glyph it holds.</li>' +
+        '<li>A brand-new class arrives with zero samples, so <b>Train</b> stays disabled until every class has some.</li>' +
+        '</ul>'
+    }},
+    {{
       chapter: 2,
       title: 'Pick a Sample Source',
       target: '.tm-action-toolbar',
       fallback: ['.class-card'],
       placement: 'right',
-      /* Entering this chapter from a chapter pill would otherwise leave the
-         Edit ▾ dropdown or a character picker covering the class column. */
-      onEnter: closeCharOverlays,
       advanceTarget: '.tm-action-toolbar button.sample',
       checkpoint: 'Click "Webcam" to open the camera drawer',
       body: '<p>Three sources feed a character card:</p>' +
@@ -14424,6 +15480,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 2,
       title: 'Capture Character Samples',
+      live: 'samples',
       target: '[id^="sourceCapture-"]',
       fallback: ['.source-actions', '.source-panel'],
       placement: 'right',
@@ -14434,12 +15491,16 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseTarget: '.tm-action-toolbar button.sample',
       phaseName: 'the camera drawer',
       advanceTarget: '[id^="sourceCapture-"]',
+      /* Holding the button is the burst gesture, and Upload swaps the pair
+         for a file picker: all three finish the same checkpoint. */
+      advanceAlso: ['[id^="sourceHold-"]', '[id^="uploadPick-"]'],
       checkpoint: 'Click "Capture" for one glyph, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
       body: '<p>Capture <b>one character per class</b>. Vary the size, the stroke thickness and the lighting a little, but keep the character centred.</p>' +
         '<ul>' +
         '<li><b>Capture</b> files the current frame under this character.</li>' +
         '<li><b>Hold to Capture</b> — hold the button or <kbd>Space</kbd> for a burst while you move the sheet.</li>' +
         '<li><b>Upload</b> instead offers <b>Choose images from your files</b>.</li>' +
+        '<li>A <b>⚙</b> chip in the drawer head jumps straight to this class&rsquo;s settings without leaving the drawer.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Aim for <b>60–100+ samples per character</b>. Crops are auto-tightened later, so loose framing is fine here.</span></div>'
     }},
@@ -14472,11 +15533,12 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<li>The right pane shows the exact binarized <b>28×28</b> tensor the network will receive.</li>' +
         '<li>Use it to throw out a bad capture (<kbd>D</kbd>) or to nudge the crop (<kbd>Shift</kbd> + arrows).</li>' +
         '</ul>' +
-        '<p>The next two checkpoints walk the worktable and then close it again.</p>'
+        '<p>The next three checkpoints walk the worktable and then close it again.</p>'
     }},
     {{
       chapter: 3,
       title: 'Integer Otsu Binarization &amp; Vertical Projection',
+      live: 'thresholds',
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
@@ -14485,18 +15547,57 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseIf: function () {{ return !worktableOpen(); }},
       phaseTarget: '.class-preprocess-chip',
       phaseName: 'the Sample Worktable',
+      onEnter: openWorktable,
       advanceTarget: '#classPreprocessMode',
       checkpoint: 'Keep "Auto (glyph)", or pick "Manual ROI" and pin the crop box',
       body: '<ul>' +
         '<li><b>Auto (glyph)</b> — recomputes <b>Otsu&rsquo;s threshold</b> per sample with integer arithmetic, then centres the ink by <b>vertical projection</b>.</li>' +
-        '<li><b>Manual ROI</b> — drag a fixed crop box when every capture frames the character the same way.</li>' +
-        '<li><b>Dark Thr / Lum Thr</b> clamp the histogram before binarization, which tames a bright background or a shadowed page.</li>' +
+        '<li><b>Manual ROI</b> — drag a fixed crop box (<code>ROI X1, Y1, X2, Y2</code>) when every capture frames the character the same way.</li>' +
+        '<li><b>Dark Thr / Lum Thr</b> clamp the histogram before binarization, which tames a bright page or a shadowed one.</li>' +
         '</ul>' +
-        '<p>Click <b>Save Sample</b> (or Close <b>&times;</b>) to return to the workspace.</p>' +
+        '<p>The right-hand pane is the exact tensor the ESP32-P4 will infer on, so tune until it looks like a clean printed glyph.</p>' +
         '<details class="tm-tour-details"><summary>Deep dive · why integer arithmetic matters</summary><div class="tm-tour-details-body">' +
         '<p>Float Otsu on the host and float Otsu on the MCU disagree in the last bits, and a single flipped pixel rescales the whole 28×28 tensor. The pipeline therefore runs the <b>same fixed-point</b> implementation on both sides — what you see in the right-hand pane is literally the byte array the ESP32-P4 infers on.</p>' +
         '</div></details>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Press <kbd>S</kbd> (or <b>Save Sample</b>) after tuning — unsaved thresholds are discarded when the worktable closes.</span></div>'
+    }},
+    {{
+      chapter: 3,
+      title: 'Dark Thr, Lum Thr &amp; Save Sample',
+      live: 'thresholds',
+      target: '#classPreprocessDark',
+      fallback: ['.class-preprocess-right', '#classPreprocessModal'],
+      placement: 'left',
+      /* Still inside the worktable.  The guard covers the ways in that skip
+         the Open checkpoint. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      onEnter: openWorktable,
+      advanceTarget: '#classPreprocessDark',
+      /* Save Sample finishes this checkpoint too, and it is not a descendant
+         of the slider being spotlit, so it needs its own binding. */
+      advanceAlso: ['#classPreprocessSave'],
+      checkpoint: 'Drag "Dark Thr" / "Lum Thr" until the glyph is clean, then click "Save Sample"',
+      body: '<ul>' +
+        '<li><b>Dark Thr</b> — pixels darker than the threshold become <b>white (255)</b>, i.e. shadow.</li>' +
+        '<li><b>Lum Thr</b> — pixels brighter than the threshold become <b>white (255)</b>, i.e. page.</li>' +
+        '</ul>' +
+        '<p>Together they leave only the dark strokes of the glyph on a pure-white field. Tune both until the right-hand preview is mostly white with a crisp black character.</p>' +
+        '<ul>' +
+        '<li>The <b>thumbnail strip</b> (<code>.class-preprocess-thumb</code>) jumps between this class&rsquo;s samples.</li>' +
+        '<li><b>Delete Sample</b> (<code>#classPreprocessDeleteSample</code>) throws the current frame away for good — keep it for blur, glare or a hand in the way.</li>' +
+        '<li><b>Save Sample</b> (<code>#classPreprocessSave</code>) writes the crop and the thresholds onto this sample, then returns to the workspace.</li>' +
+        '</ul>' +
+        '<details class="tm-tour-details"><summary>Deep dive · worktable shortcuts</summary><div class="tm-tour-details-body">' +
+        '<table class="tm-tour-table">' +
+        '<tr><td><kbd>F1</kbd></td><td>Switch to Auto ROI</td></tr>' +
+        '<tr><td><kbd>F2</kbd></td><td>Switch to Manual ROI</td></tr>' +
+        '<tr><td><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd></td><td>Previous / next sample</td></tr>' +
+        '<tr><td><kbd>Shift</kbd> + arrows</td><td>Nudge the ROI box by one pixel</td></tr>' +
+        '<tr><td><kbd>D</kbd></td><td>Delete the current sample</td></tr>' +
+        '<tr><td><kbd>S</kbd></td><td>Save the sample</td></tr>' +
+        '</table></div></details>'
     }},
     {{
       chapter: 3,
@@ -14544,11 +15645,15 @@ mountReflowTimers.push(window.setTimeout(() => {{
       phaseTarget: '#advBtn',
       phaseName: 'the <b>Advanced</b> training options',
       advanceTarget: '#advInkPolarity',
+      /* Recommended / Reset / the inline numbers are the rest of the panel,
+         and touching any of them settles this checkpoint too. */
+      advanceAlso: ['#advUseRec', '#advReset', '#advEpochsInline', '#advBatchInline', '#advLrInline'],
       checkpoint: 'Set "Ink Polarity" to match how your glyphs are drawn',
       body: '<ul>' +
         '<li><b>Transfer learning</b> (on by default) keeps an EMNIST-pretrained backbone and attaches a fresh head for <i>your</i> character set — the fastest route to a high score on a few hundred crops.</li>' +
         '<li><b>Ink Polarity</b> says which way the ink sits: <code>dark on light</code> for camera captures, <code>light on dark</code> for MNIST/EMNIST-style images. Get it wrong and the model learns the inverse of your data.</li>' +
         '<li>The architecture rows are hidden while transfer learning is on: those numbers belong to the frozen backbone, not to your head.</li>' +
+        '<li><b>💡 Use recommended</b> fills the inline numbers in for roughly <b>800 gradient updates</b>; <b>Reset</b> puts the shipped defaults back.</li>' +
         '</ul>'
     }},
     {{
@@ -14558,48 +15663,10 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.train-card', '.col-train'],
       placement: 'left',
       advanceTarget: '#trainBtn',
+      live: 'train',
       checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
-      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>), then open the green accuracy pill for the per-character breakdown.</p>' +
+      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>), then open the green accuracy pill (<code>#trainStatus</code>) for the per-character breakdown.</p>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A character that lags behind the rest usually needs more samples — go back to <b>Edit</b> and re-train.</span></div>'
-    }},
-    {{
-      chapter: 4,
-      title: 'EMNIST Mixing &amp; the _background Class',
-      target: '#settingsEmnistGroup',
-      fallback: ['#globalSettingsModal'],
-      placement: 'left',
-      /* EMNIST mixing is a section of ⚙ Settings, so this step starts on
-         the ⚙ button in the top bar and follows the user in.  It also
-         lives under the modal's collapsed Advanced disclosure, which
-         `onResume` unfolds once the user is inside. */
-      phaseTarget: '#navSettings',
-      phaseName: 'the <b>EMNIST</b> mixing settings',
-      onResume: unfoldSettingsAdvanced,
-      checkpoint: 'Click the highlighted ⚙ Settings button to reach the EMNIST mix',
-      body: '<ul>' +
-        '<li><b>Synthesise from EMNIST</b> mixes the public handwriting corpus into your training set, so a character you captured 60 times is backed by thousands more.</li>' +
-        '<li><b>Split ratio</b> decides how much of each epoch is synthetic. 50 % is a good starting point; lower it if your real captures look nothing like EMNIST.</li>' +
-        '<li><b>Background crops</b> count how many <code>_background</code> samples are synthesised — the rejection class that absorbs empty frames.</li>' +
-        '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Mixing only helps when the fonts agree. Hand-written characters next to a clean printed font can pull accuracy down — watch the per-class score.</span></div>'
-    }},
-    {{
-      chapter: 4,
-      title: 'Close Input Settings',
-      target: '#settingsCancel',
-      fallback: ['#settingsSave', '.tm-settings-card'],
-      placement: 'left',
-      /* The EMNIST checkpoint left the modal open on purpose, so the exit is
-         the user's own press rather than the modal vanishing under them. */
-      phaseIf: function () {{ return !settingsOpen(); }},
-      phaseTarget: '#navSettings',
-      phaseName: 'Input Settings',
-      advanceTarget: '#settingsCancel',
-      advanceAlso: ['#settingsSave'],
-      onLeave: closeSettingsModal,
-      checkpoint: 'Click "Save changes" (or "Cancel") to close Settings',
-      body: '<p><b>Save changes</b> keeps the EMNIST mix for the next training run; <b>Cancel</b> leaves the previous values in place. Either closes the modal.</p>' +
-        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it as well — the tour follows you back out to the workspace.</p>'
     }},
     {{
       chapter: 5,
@@ -14610,9 +15677,21 @@ mountReflowTimers.push(window.setTimeout(() => {{
       body: '<ul>' +
         '<li>Toggle <b>Input</b> ON to push live frames through the quantized model.</li>' +
         '<li>Toggle <b>ROI</b> to draw the crop rectangle over the frame and <b>Orig</b> to see the full masked frame; with both on you get the cropped, masked tensor handed to the model.</li>' +
-        '<li>The confidence bars below the image are the top-<i>k</i> characters; a rejected frame reads <code>No Sign</code> instead.</li>' +
+        '<li>The row underneath (<code>#previewContextBar</code>) picks where the pane reads from — a <b>Webcam</b>, the <b>Device</b> port plus <b>Refresh</b>, or <b>📁 Upload Image…</b> — independently of the capture drawer.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>Preview runs the <b>same int8</b> graph on the host CPU the MCU will run, so what you score here is what the device scores.</span></div>'
+    }},
+    {{
+      chapter: 5,
+      title: 'Live Dark / Lum Sliders &amp; the Confidence Bars',
+      target: '.preview-card',
+      fallback: ['.col-preview'],
+      placement: 'left',
+      body: '<ul>' +
+        '<li>The live <b>Dark</b> / <b>Lum</b> sliders under the image (<code>#previewDarkSlider</code>, <code>#previewLumSlider</code>) re-tune the brightness mask while you watch — they should match the thresholds you saved in the worktable.</li>' +
+        '<li>The <b>confidence bars</b> in <code>#previewOutput</code> are the top-<i>k</i> characters for the frame on screen; a rejected frame reads <code>No Sign</code> instead.</li>' +
+        '</ul>' +
+        '<p class="tm-tour-muted">Sanity-check the preview before exporting: a mask that looks wrong here will look exactly as wrong on the device.</p>'
     }},
     {{
       chapter: 5,
@@ -14642,45 +15721,277 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<li>Transfer-learn from EMNIST, with the ink polarity matching your captures.</li>' +
         '<li>Preview a single glyph, then export the 5 files into <code>TFLite_OCR.ino</code>.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📖</span><span>Re-open this guide any time from <b>📖 Tutorial</b>. The road-sign workflow has its own tour.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📖</span><span>Re-open this guide any time from <b>📖 Tutorial</b>. The Car License workflow has its own tour.</span></div>'
     }}
   ];
 
-  /* ═══ Curriculum 3 · Road Sign, 3 characters (16 steps) ══════════════
-     A labelled SEQUENCE: find the sign, split it into three slots, read
-     each slot as a glyph, then verify the whole reading. */
+  /* ═══ Curriculum 3 · 🚗 Car License Project (29 steps) ═══════════════
+     A labelled SEQUENCE: find the plate, split it into three slots, read
+     each slot as a glyph, then verify the whole reading — against one or
+     more allowed plates. */
   var SIGN_OCR_STEPS = [
     {{
       chapter: 1,
-      title: 'Welcome to 3-Character Road Sign Verification',
+      title: 'Your 🚗 Car License Project, End to End',
+      /* Step 0 is the big picture rather than a lesson, so it carries
+         `overview` and a `stages` list instead of a spotlight: the card
+         floats centred over a dimmed workspace and its one button starts
+         the walkthrough. */
       target: null,
       fallback: [],
       placement: 'auto',
-      body: '<p>This workspace does not classify a whole sign. It <b>verifies a known target</b>, one character at a time:</p>' +
-        '<ol>' +
-        '<li>Locate the sign in the frame.</li>' +
-        '<li>Split it into the <b>3 character slots</b> you declared.</li>' +
-        '<li>Run glyph inference on each slot.</li>' +
-        '<li>Compare the three readings with the target and answer <b>🟢 YES (MATCH)</b> or <b>🔴 NO (NOT MATCH)</b>.</li>' +
-        '</ol>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Because the target is fixed, the model only ever has to learn the handful of characters that appear on it — a very small, very accurate classifier.</span></div>' +
-        '<p class="tm-tour-muted">Use <kbd>←</kbd> / <kbd>→</kbd> to step through, <kbd>Esc</kbd> to exit.</p>'
+      overview: true,
+      stages: [
+        {{ t: 'Set the Target Plate', d: 'Type the sign&rsquo;s three characters into the slots on the left — that target is what the model verifies, and 🪪 License List holds one or more allowed plates.' }},
+        {{ t: 'Collect &amp; Crop Samples', d: 'Capture one glyph per crop for each character, then open the Sample Worktable to set the ROI box and the Dark / Lum thresholds.' }},
+        {{ t: 'Isolate the Glyphs', d: 'Each class learns a single character; the 3-character plate is split into its slots at Preview time, never during training.' }},
+        {{ t: 'Order &amp; Train', d: 'Set the reading direction, train the tiny int8 classifier and read the per-character accuracy.' }},
+        {{ t: 'Verdict &amp; Export', d: 'Read the three slots and the 🟢 YES / 🔴 NO banner, then export the Car License firmware package.' }}
+      ],
+      body: '<p>The <b>🚗 Car License Project</b> does not classify a whole plate. It <b>verifies a known target</b>, one character at a time, and answers <b>🟢 YES (MATCH)</b> or <b>🔴 NO (NOT MATCH)</b>.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💡</span><span>Because the target is fixed, the model only ever has to learn the handful of characters that appear on it — a very small, very accurate classifier. The guide <b>points</b> at the real control for every step, and shrinks into a floating orb the moment you start working.</span></div>' +
+        '<p class="tm-tour-muted">The whole trip, in five stages:</p>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Save, Open &amp; Export from the File Menu',
+      target: '#menuFileBtn',
+      fallback: ['.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#menuFileBtn',
+      checkpoint: 'Click "File ▾" to see the project commands',
+      body: '<p><b>File ▾</b> holds everything that acts on the project as a whole — including the target sign you are about to declare:</p>' +
+        '<ul>' +
+        '<li><b>New project</b> (<kbd>⌘N</kbd>) — start a fresh, empty workspace.</li>' +
+        '<li><b>Open project</b> (<kbd>⌘O</kbd>) — load a saved <code>.tmproj</code> archive, its sign sequence, samples and thresholds included.</li>' +
+        '<li><b>Save</b> (<kbd>⌘S</kbd>) and <b>Save as</b> (<kbd>⇧⌘S</kbd>) — write the project to disk under a new name.</li>' +
+        '<li><b>Export dataset</b> — dump the raw sample images as files, for a backup or an offline experiment.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Save before every training run. A <code>.tmproj</code> keeps the three-character target, the crop boxes and the brightness thresholds — not just the character names.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Preferences &amp; Return Home',
+      target: '#navPreferences',
+      fallback: ['#navReturn', '.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navPreferences',
+      checkpoint: 'Click "Preferences" to see the display settings',
+      body: '<ul>' +
+        '<li><b>Preferences</b> opens a small modal whose one setting, <b>Max samples displayed per class</b> (<code>#prefMaxSamples</code>), caps how many sample thumbnails each character card caches and draws — 12 by default.</li>' +
+        '<li>Raise it while you are eyeballing a glyph set for bad captures; lower it on a slow machine or a project with thousands of samples.</li>' +
+        '<li><b>← Return Home</b> leaves the workspace for the start page. It is navigation, not a reset: the project on disk is untouched.</li>' +
+        '</ul>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Open Input Settings',
+      target: '#navSettings',
+      fallback: ['.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navSettings',
+      checkpoint: 'Click "⚙ Settings" in the top bar to open Input Settings',
+      body: '<p><b>⚙ Settings</b> is the single source of truth for the capture hardware — the webcam, the ESP32-P4 serial link and the frame geometry — applied to every character card at once. It also carries the sign-only options: the preview source, the OOD gates, the EMNIST mixing panel and the template auto-fill.</p>' +
+        '<ul>' +
+        '<li>MCU defaults: frame <b>96×96</b>, <b>Grayscale</b>, baud <b>115200</b> (or <b>921600</b>), sync header <b>AA 55 AA</b>.</li>' +
+        '<li>The next five checkpoints walk the modal from top to bottom, then close it again.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Close the Arduino IDE <b>Serial Monitor</b> before connecting — only one program can own the ESP32-P4 serial port.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Camera &amp; MCU Serial Fields',
+      target: '#settingsCameraGroup',
+      fallback: ['#settingsMcuGroup', '#settingsWebcam', '#globalSettingsModal'],
+      placement: 'left',
+      /* Inside the modal now.  The guard is only for the ways in that skip
+         the Open checkpoint — a chapter pill, or `Skip step →` — where the
+         modal may still be shut; there the step re-doors onto ⚙ instead of
+         spotlighting a group the modal is covering. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      checkpoint: 'Click the highlighted ⚙ Settings button to open Input Settings',
+      body: '<ul>' +
+        '<li><b>Webcam</b> — the capture device; <b>Capture FPS</b> throttles the live preview stream.</li>' +
+        '<li><b>Serial Device (port)</b> — the ESP32-P4 USB device. Re-scan after plugging it in.</li>' +
+        '<li><b>Frame side</b> (<code>#settingsFrameSide</code>) / <b>Channels</b> must match the firmware — <b>96×96</b> and <b>Grayscale</b> by default. Raise Frame side to <b>160×160</b> for the sharpest capture: it is the <b>camera&rsquo;s</b> resolution, not the model&rsquo;s.</li>' +
+        '<li><b>Image Size</b> is the model&rsquo;s own square, set in the middle column under ▸ <b>Advanced</b> (<code>#advImgSizeInline</code>) — <b>96</b>, or <b>28</b> for a single glyph. Capture high and train compact: the app scales every incoming frame down to the model&rsquo;s <code>img_size</code>, and the exported firmware carries that size in <code>model_settings.h</code>, so the device scales its camera frames the same way.</li>' +
+        '<li><b>Baud rate</b>: <b>115200</b> for reliability, <b>921600</b> for faster frame streaming.</li>' +
+        '</ul>' +
+        '<details class="tm-tour-details"><summary>Deep dive · what each serial field does</summary><div class="tm-tour-details-body">' +
+        '<table class="tm-tour-table"><tr><th>Field</th><th>Meaning</th></tr>' +
+        '<tr><td><code>Port</code></td><td>USB serial device of the ESP32-P4 (re-scan after plugging in).</td></tr>' +
+        '<tr><td><code>Frame side</code></td><td>Square frame the device streams; must match its firmware. It is separate from the model&rsquo;s <b>Image Size</b> — frames are scaled down to it.</td></tr>' +
+        '<tr><td><code>Channels</code></td><td><b>1</b> = grayscale (default), <b>3</b> = RGB colour.</td></tr>' +
+        '<tr><td><code>Baud</code></td><td>115200 for reliability, 921600 for faster frame streaming.</td></tr>' +
+        '<tr><td><code>Sync header</code></td><td>Byte pattern marking the start of a frame (AA 55 AA) — under <b>▸ Advanced Settings</b>.</td></tr>' +
+        '</table></div></details>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Preview Source &amp; the OOD Gates',
+      target: '#settingsOodGroup',
+      fallback: ['#settingsPreviewSource', '#globalSettingsModal'],
+      placement: 'left',
+      /* Still inside the modal.  A chapter pill can land here with the modal
+         shut, so the step re-doors onto ⚙ exactly like the group above. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsPreviewSource',
+      checkpoint: 'Pick the preview source, then check the four OOD gates',
+      body: '<ul>' +
+        '<li><b>Preview Image Input Source</b> (<code>#settingsPreviewSource</code>) decides what the preview pane reads: <b>Webcam</b>, <b>Device (MCU)</b> over serial, or a <b>Local Image File</b>. The preview card draws its own source row from this value — and the sign-only synth pills live in the <b>Local Image File</b> source.</li>' +
+        '<li><b>OOD sign min %</b> / <b>max %</b> — Layer 1, the share of dark target pixels. Below the min (empty scene) or above the max (covered lens) the frame is rejected <b>before inference</b>.</li>' +
+        '<li><b>OOD max prob</b> — Layer 2, the winning character must clear this floor.</li>' +
+        '<li><b>OOD entropy max</b> — Layer 3, the probabilities must not be spread too evenly, i.e. the model must not be guessing.</li>' +
+        '</ul>' +
+        '<details class="tm-tour-details"><summary>🎛️ Tuning cheat-sheet</summary><div class="tm-tour-details-body">' +
+        '<table class="tm-tour-table"><tr><th>Symptom</th><th>Fix</th></tr>' +
+        '<tr><td>Real signs are missed</td><td><b>Loosen</b>: lower <code>sign min %</code>, raise <code>sign max %</code>, lower <code>max prob</code>, raise <code>entropy max</code>.</td></tr>' +
+        '<tr><td>Empty wall is accepted</td><td><b>Tighten</b>: raise <code>sign min %</code>, lower <code>sign max %</code>, raise <code>max prob</code>, lower <code>entropy max</code>.</td></tr>' +
+        '</table></div></details>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>On the Car License path each slot also has its own confidence floor, and by default (<code>_background</code> OFF) the four gates above plus that floor are the whole rejector — so start permissive and tighten until a blank frame reliably reads red. The next checkpoint covers the optional <code>_background</code> class.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Dataset Mixing, _background &amp; Transfer Learning',
+      target: '#advOcrPanel',
+      fallback: ['#modalOcrSection', '#globalSettingsModal'],
+      placement: 'left',
+      /* Still inside the modal, and this panel is NOT behind the Advanced
+         disclosure: it sits in the modal's own Training Hyperparameters
+         group, so the ⚙ door is the only thing that has to be open. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#advOcrEmnist',
+      /* Flipping the `_background` toggle is this checkpoint's own
+         decision, so touching it counts as doing the step. */
+      advanceAlso: ['#settingsUseBackgroundOod'],
+      checkpoint: 'Decide how much EMNIST is mixed in, and whether the model trains a _background class',
+      body: '<p>This is the glyph-project panel. It decides what the model trains on beyond your own captures:</p>' +
+        '<ul>' +
+        '<li><b>Mix EMNIST into every class</b> (<code>#advOcrEmnist</code>) — augments each character with public handwriting glyphs, so a character you captured 60 times is backed by thousands more.</li>' +
+        '<li><b>EMNIST split</b> (<code>#advOcrSplit</code>) — which corpus to sample from: <code>ByClass</code>, <code>ByMerge</code>, <code>Letters</code>, <code>Digits</code> or <code>MNIST</code>. Match the characters on your sign.</li>' +
+        '<li><b>Synthetic per class</b> (<code>#advOcrPerClass</code>) — how many extra EMNIST glyphs are added per character. <code>0</code> mirrors your own per-class count.</li>' +
+        '<li><b>Use <code>_background</code> noise class to replace OOD rejection</b> (<code>#settingsUseBackgroundOod</code>) — OFF (the car-license default) trains only the target characters and rejects with the OOD gates plus the per-slot probability floor; ON trains an extra synthetic <code>_background</code> class that becomes the only per-slot rejector.</li>' +
+        '<li><b>Background crops</b> (<code>#advOcrBackgroundN</code>) — how many noise crops train that rejector class; used only when the toggle above is ON.</li>' +
+        '<li><b>Fine-tune pre-trained backbone</b> (<code>#advOcrTransfer</code>) — keeps the EMNIST backbone and attaches a fresh head: the fastest route to a high score on a few hundred glyphs. The pre-train / head / fine-tune rows below it appear only while it is on.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⚠️</span><span>Mixing only helps when the fonts agree. Hand-written glyphs next to a clean printed font can pull accuracy down — watch the per-character score.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Zero-Hardware EMNIST Auto-Fill',
+      target: '#settingsEmnistGroup',
+      fallback: ['#settingsAdvancedToggle', '#globalSettingsModal'],
+      placement: 'left',
+      /* This row lives under the collapsed ▸ Advanced Settings disclosure,
+         so `onEnter` unfolds it once the modal is on screen — and
+         `resolveStepTargets` re-unfolds on every re-place, so a chapter
+         pill jump cannot land on a `display:none` row either. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      onEnter: unfoldSettingsAdvanced,
+      advanceTarget: '#settingsAutoSeedEmnist',
+      advanceAlso: ['#settingsSeedEmnistNowBtn'],
+      checkpoint: 'Tick "Auto-fill empty classes", or click "Fill Empty Classes with EMNIST Samples Now"',
+      body: '<p><b>Advanced Settings</b> (<code>#settingsAdvancedToggle</code>) holds the frame sync word and this developer tool. It exists so the whole pipeline can be exercised <b>before any camera is wired up</b>:</p>' +
+        '<ul>' +
+        '<li><b>Auto-fill empty classes with EMNIST template samples</b> (<code>#settingsAutoSeedEmnist</code>) — the automatic version: every <b>empty</b> character class gets <b>24</b> dark-ink-on-light EMNIST captures, so <b>Train</b> unlocks with no hardware at all.</li>' +
+        '<li><b>Fill Empty Classes with EMNIST Samples Now</b> (<code>#settingsSeedEmnistNowBtn</code>) — runs the fill once, immediately, and leaves the auto-fill choice as it is.</li>' +
+        '<li>Classes that already hold real camera samples are <b>kept untouched</b> — the filler only touches the gaps.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧪</span><span>Useful for a first rehearsal of capture → preprocess → train → preview on a sign you have not photographed yet. Delete the synthetic samples again before you judge real accuracy.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Leave Input Settings',
+      target: '#settingsCancel',
+      fallback: ['#settingsSave', '.tm-settings-card'],
+      placement: 'left',
+      /* The EMNIST checkpoint left the modal open on purpose, so the exit is
+         the user's own press rather than the modal vanishing under them. */
+      phaseIf: function () {{ return !settingsOpen(); }},
+      phaseTarget: '#navSettings',
+      phaseName: 'Input Settings',
+      advanceTarget: '#settingsCancel',
+      advanceAlso: ['#settingsSave'],
+      onLeave: closeSettingsModal,
+      checkpoint: 'Click "Cancel" (or "Save changes") to exit Settings and return to the workspace',
+      body: '<p><b>Save changes</b> keeps the EMNIST mix, the preview source and the OOD gates for the next run and writes the gates into the exported <code>model_settings</code> constants; <b>Cancel</b> keeps the previous values. Either closes the modal.</p>' +
+        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it as well — the tour follows you back out to the workspace.</p>'
     }},
     {{
       chapter: 1,
       title: 'Set the 3 Target Sign Characters, in Order',
+      live: 'signseq',
       target: '#signSeqBar',
-      fallback: ['.col-classes', '.signseq-bar'],
+      fallback: ['.signseq-bar', '.col-classes'],
       placement: 'right',
       advanceTarget: '#signSeqSlot-0',
       checkpoint: 'Type each character into the three slots, left to right',
       body: '<ul>' +
-        '<li>Type the sign&rsquo;s characters into the <b>three slots</b>, left to right, exactly as they are printed.</li>' +
-        '<li>Each slot becomes the <b>class</b> the model must learn — a repeated character is trained once.</li>' +
-        '<li>The <b>left → right</b> / <b>right → left</b> tag above the row shows the reading direction in force.</li>' +
+        '<li>Type the sign&rsquo;s characters into the <b>three slots</b>, left to right, exactly as they are printed — for example <b>A ▸ 1 ▸ 2</b>.</li>' +
+        '<li>Each slot becomes a <b>class</b> the model must learn, so a repeated character (<b>A ▸ 1 ▸ A</b>) is trained once — its card carries a <b>Slots 1 &amp; 3</b> badge instead of a second card.</li>' +
+        '<li>The <b>left → right</b> / <b>right → left</b> tag in the bar echoes the reading direction in force.</li>' +
         '</ul>' +
         '<p>The three slots are the <b>single writer</b> of the target: change them and the class list, the training set and the preview verdict all follow.</p>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⌨️</span><span>Focus a slot and type — the tour advances once the bar has settled, so you can fill all three without leaving the step.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⌨️</span><span>Focus a slot and type, or <b>paste the whole sign</b> into the first slot to fill all three at once. The tour advances once the bar has settled, so you can fill the sign without leaving the step.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Allow More Than One Plate: the 🪪 License List',
+      target: '#navLicenseList',
+      fallback: ['#signSeqBar', '.topnav'],
+      placement: 'bottom',
+      advanceTarget: '#navLicenseList',
+      /* The whitelist is its own modal, and the next checkpoint lives on the
+         slot bar behind it — so leaving the step closes what it opened,
+         exactly like the Settings and drawer exits. */
+      onLeave: closeLicenseListModal,
+      checkpoint: 'Click "🪪 License List" beside ⚙ Settings to add a second valid plate',
+      body: '<p>Think of the gatekeeper at a car park, who is allowed to remember <b>several</b> cars rather than only one. <b>🪪 License List</b> (<code>#navLicenseList</code>) sits next to <b>⚙ Settings</b> and holds <b>one or more valid 3-character plates</b> — for example <b>A12</b> and <b>B18</b>.</p>' +
+        '<ul>' +
+        '<li>Every plate on the list is a reading the firmware accepts; a plate that is not listed stays <b>🔴 NO</b>.</li>' +
+        '<li><b>+ Add Allowed License Plate</b> (<code>#licenseListAdd</code>) appends another row, and <b>Save &amp; Sync Classes</b> merges the <b>unique characters of every plate</b> into the left-hand Character Cards — a character shared by two plates (such as <code>1</code>) has its samples collected <b>once</b> and serves both.</li>' +
+        '<li>The badge on the button (<code>#navLicenseCount</code>) counts the plates on the list, and the first plate is the one the slot bar above shows.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🅿️</span><span>A single plate — the default — is enough for this walkthrough. Add a second only when one camera has to recognise more than one car.</span></div>'
+    }},
+    {{
+      chapter: 1,
+      title: 'Swap the Slots with the ◀ ▶ Arrows',
+      target: '.signseq-move',
+      fallback: ['#signSeqBar', '.signseq-row'],
+      placement: 'right',
+      advanceTarget: '#signSeqRight-1',
+      checkpoint: 'Click the ▶ arrow to swap a character with its right-hand neighbour',
+      body: '<p>Each slot carries a tiny <b>◀ ▶</b> pair. They move that character one position left or right, which is the fast way to fix a sign you typed in the wrong order — far quicker than retyping it.</p>' +
+        '<ul>' +
+        '<li>The <b>left</b> arrow of slot 1 and the <b>right</b> arrow of slot 3 are disabled: there is nowhere to go.</li>' +
+        '<li>Swapping rewrites the <b>reading direction note</b> in the bar, so you can see immediately which end the firmware will call slot 1.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>A swap does not lose samples: they belong to the character, not to the position — the same class simply answers a different slot.</span></div>'
+    }},
+    {{
+      chapter: 2,
+      title: 'Your Character Cards &amp; Their Icons',
+      target: '.class-card',
+      fallback: ['.col-classes'],
+      placement: 'right',
+      body: '<p>Every character in the sign has one card. In a Car License project the cards follow the slots, so the header carries a different set of affordances from an image project:</p>' +
+        '<ul>' +
+        '<li><b>Slots 1 &amp; 3</b> (<code>.signslot-badge</code>) — which positions of the sign this character answers for. One class can serve several slots.</li>' +
+        '<li><b>Edit</b> (<code>.class-preprocess-chip</code>) — open the <b>Sample Worktable</b> for this character.</li>' +
+        '<li><b>🧹</b> (<code>.clear-samples</code>) — clear every sample in that class without deleting the class.</li>' +
+        '<li><b>🗑</b> (<code>.tm-delete-class</code>) — delete the class, samples and all. This one cannot be undone.</li>' +
+        '</ul>' +
+        '<p>There is no drag handle and no rename pencil here: the slots own the order and the names, and a manual edit would be undone by the next sync.</p>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Each card collects <b>single-character glyphs</b>. Splitting the 3-character plate into its slots happens in <b>Preview</b>, never during training — a whole plate filed under <code>A</code> would teach the model the plate, not the letter.</span></div>'
     }},
     {{
       chapter: 2,
@@ -14690,7 +16001,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       placement: 'right',
       advanceTarget: '.tm-action-toolbar button.sample',
       checkpoint: 'Click "Webcam" to open the camera drawer',
-      body: '<p>Each character card collects <b>single-character glyph samples</b>. Capture, upload or generate a frame where that character is the glyph the model should learn.</p>' +
+      body: '<p>Three sources feed a character card. Pick the one that matches your hardware:</p>' +
         '<ul>' +
         '<li><b>Webcam</b> — the laptop or an external USB camera.</li>' +
         '<li><b>Upload</b> — batch-import existing <code>.png</code> / <code>.jpg</code> glyphs.</li>' +
@@ -14700,21 +16011,29 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }},
     {{
       chapter: 2,
-      title: 'Capture Samples for the Character',
+      title: 'Capture Character Samples',
+      live: 'samples',
       target: '[id^="sourceCapture-"]',
       fallback: ['.source-actions', '.source-panel'],
       placement: 'right',
+      /* The capture controls only exist while the drawer is open.  Coming
+         in from the Open checkpoint they are already there; coming in from
+         a chapter pill the step re-doors onto the tile that opens them. */
       phaseIf: function () {{ return !drawerOpen(); }},
       phaseTarget: '.tm-action-toolbar button.sample',
       phaseName: 'the camera drawer',
       advanceTarget: '[id^="sourceCapture-"]',
-      checkpoint: 'Click "Capture" for one frame, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
-      body: '<ul>' +
+      /* Holding the button is the burst gesture, and Upload swaps the pair
+         for a file picker: all three finish the same checkpoint. */
+      advanceAlso: ['[id^="sourceHold-"]', '[id^="uploadPick-"]'],
+      checkpoint: 'Click "Capture" for one glyph, or hold "Hold to Capture" / <kbd>Space</kbd> to burst-capture',
+      body: '<p>Fill the frame with <b>one character</b> and capture it under that character&rsquo;s card, then switch cards for the next one.</p>' +
+        '<ul>' +
         '<li><b>Capture</b> files the current frame under this character.</li>' +
-        '<li><b>Hold to Capture</b> — hold the button (or <kbd>Space</kbd>) for a burst while you move the sign.</li>' +
-        '<li><b>Zero hardware:</b> <b>⚙ Settings → Advanced Settings → Auto-fill 24 EMNIST samples</b> fills every empty character class with 24 glyphs.</li>' +
+        '<li><b>Hold to Capture</b> — hold the button (or hold <kbd>Space</kbd>) to <b>burst-capture</b> while you move the sign, which is the quickest way to get fifty frames.</li>' +
+        '<li><b>Upload</b> instead offers <b>Choose images from your files</b>, and a <b>⚙</b> chip in the drawer head jumps to this class&rsquo;s settings.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>The full 3-character sign is split into <b>3 slots during Preview/device inference</b>, never during training. A whole sign filed under “A” trains A on the whole sign — crop the character or use Auto-Fill.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎯</span><span>Aim for <b>50–100+ samples per character</b>, varying distance, angle and lighting. The plate split happens later, in Preview.</span></div>'
     }},
     {{
       chapter: 2,
@@ -14729,7 +16048,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
       onLeave: closeSourceDrawer,
       checkpoint: 'Click "Close" (▴) to collapse the camera drawer',
       body: '<p>The <b>▴ Close</b> pill folds the drawer back into the class card, keeping the captured thumbnails in the summary strip.</p>' +
-        '<p class="tm-tour-muted">Press <kbd>Esc</kbd> to collapse the drawer instead of leaving the tour.</p>'
+        '<p class="tm-tour-muted">Press <kbd>Esc</kbd> to collapse the drawer instead of leaving the tour — an open drawer outranks the tour in the keyboard stack.</p>'
     }},
     {{
       chapter: 2,
@@ -14741,27 +16060,63 @@ mountReflowTimers.push(window.setTimeout(() => {{
       checkpoint: 'Click "Edit" to open the Sample Worktable',
       body: '<p>Click <b>Edit</b> on a character card to open the <b>Sample Worktable</b> for that character.</p>' +
         '<ul>' +
-        '<li>A road sign is a <b>fixed target</b>, so pinning this character&rsquo;s glyph with <b>Manual ROI</b> is often more reliable than auto-search.</li>' +
-        '<li><b>Dark Thr</b> / <b>Lum Thr</b> isolate the dark glyphs from the plate and the background.</li>' +
+        '<li>A license plate is a <b>fixed target</b>, so pinning this character&rsquo;s glyph with <b>Manual ROI</b> is often more reliable than auto-search.</li>' +
+        '<li><b>Dark Thr</b> / <b>Lum Thr</b> isolate the dark glyph from the plate and the background.</li>' +
         '</ul>' +
-        '<p>The next two checkpoints walk the worktable and then close it again.</p>'
+        '<p>The next three checkpoints walk the worktable and then close it again.</p>'
     }},
     {{
       chapter: 3,
       title: 'Isolate a Single Character in the Worktable',
+      live: 'thresholds',
       target: '.class-preprocess-mode-row',
       fallback: ['#classPreprocessMode', '.class-preprocess-shell'],
       placement: 'left',
-      /* Inside the worktable now. */
+      /* Inside the worktable now.  The guard only covers the ways in that
+         skip the Open checkpoint — a chapter pill, or `Skip step →`. */
       phaseIf: function () {{ return !worktableOpen(); }},
       phaseTarget: '.class-preprocess-chip',
       phaseName: 'the Sample Worktable',
+      onEnter: openWorktable,
       advanceTarget: '#classPreprocessMode',
       checkpoint: 'Pick "Manual ROI" to pin the glyph, or keep "Auto" and drag the box',
       body: '<ul>' +
-        '<li>The <b>Processed Preview</b> is the 28×28 glyph this class&rsquo;s sample becomes — the tensor the glyph model receives.</li>' +
-        '<li><b>Manual ROI</b> pins the character for this class so the glyph is isolated. The Preview&rsquo;s three-slot split is a separate inference step, not part of training.</li>' +
-        '<li>Check the <b>Processed Preview</b>: the glyph should be centred, black, and fill most of the frame with a clean margin.</li>' +
+        '<li><b>Original Sample (left)</b> — the raw frame with the green / blue <b>ROI</b> crop box drawn over it.</li>' +
+        '<li><b>Processed Preview (right)</b> — the exact filtered and resized glyph this character&rsquo;s sample becomes: the tensor the glyph model receives.</li>' +
+        '</ul>' +
+        '<p><b>Preprocess Mode</b>:</p>' +
+        '<ul>' +
+        '<li><code>Auto (find sign)</code> — searches for the darkest target region and crops it. The best default.</li>' +
+        '<li><code>Manual ROI</code> — drag on the original image to lock a fixed crop box (<code>ROI X1, Y1, X2, Y2</code>). Use it when the character is always in the same spot on the plate.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">⏱️</span><span>The 3-slot split is a separate <b>inference</b> step in Preview — it is never part of training. This worktable sees one character per crop.</span></div>'
+    }},
+    {{
+      chapter: 3,
+      title: 'Dark Thr, Lum Thr &amp; Save Sample',
+      live: 'thresholds',
+      target: '#classPreprocessDark',
+      fallback: ['.class-preprocess-right', '#classPreprocessModal'],
+      placement: 'left',
+      /* Save Sample finishes this step too, and it is not a descendant of
+         the slider being spotlit, so it needs its own binding.  Closing the
+         worktable is a checkpoint of its own, right after this one. */
+      phaseIf: function () {{ return !worktableOpen(); }},
+      phaseTarget: '.class-preprocess-chip',
+      phaseName: 'the Sample Worktable',
+      onEnter: openWorktable,
+      advanceTarget: '#classPreprocessDark',
+      advanceAlso: ['#classPreprocessSave'],
+      checkpoint: 'Drag "Dark Thr" / "Lum Thr" until the glyph is crisp, then click "Save Sample"',
+      body: '<ul>' +
+        '<li><b>Dark Thr</b> — pixels darker than the threshold become pure <b>white (255)</b>, i.e. shadow.</li>' +
+        '<li><b>Lum Thr</b> — pixels brighter than the threshold become pure <b>white (255)</b>, i.e. bright background.</li>' +
+        '</ul>' +
+        '<p>Together they keep the dark strokes of the character and erase everything else. Tune both until the right-hand preview is mostly white with a crisp black glyph.</p>' +
+        '<ul>' +
+        '<li>The <b>thumbnail strip</b> (<code>.class-preprocess-thumb</code>) jumps between this character&rsquo;s samples.</li>' +
+        '<li><b>Delete Sample</b> throws the current frame away for good — keep it for blur, glare or a hand in the way.</li>' +
+        '<li><b>Save Sample</b> writes the crop and the thresholds onto this sample, then returns to the workspace.</li>' +
         '</ul>' +
         '<details class="tm-tour-details"><summary>Deep dive · worktable shortcuts</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table">' +
@@ -14769,7 +16124,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Previous / next sample</td></tr>' +
         '<tr><td><kbd>Shift</kbd> + arrows</td><td>Nudge the ROI box by one pixel</td></tr>' +
         '<tr><td><kbd>D</kbd> / <kbd>S</kbd></td><td>Delete / save the sample</td></tr>' +
-        '</table></div></details>'
+        '</table></div></details>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">💾</span><span>Always click <b>Save Sample</b> (or press <kbd>S</kbd>) after tuning — otherwise your thresholds are discarded when the worktable closes.</span></div>'
     }},
     {{
       chapter: 3,
@@ -14777,8 +16133,9 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '#classPreprocessCloseTop',
       fallback: ['#classPreprocessCancel', '.class-preprocess-actions'],
       placement: 'left',
-      /* Save Sample finishes the previous checkpoint but leaves the
-         worktable open, so the exit is a checkpoint of its own. */
+      /* Still inside the worktable: Save Sample finishes the previous step
+         but leaves the worktable open, so the exit is its own checkpoint
+         rather than something the tour does behind the user's back. */
       phaseIf: function () {{ return !worktableOpen(); }},
       phaseTarget: '.class-preprocess-chip',
       phaseName: 'the Sample Worktable',
@@ -14786,8 +16143,13 @@ mountReflowTimers.push(window.setTimeout(() => {{
       advanceAlso: ['#classPreprocessCancel'],
       onLeave: closeWorktable,
       checkpoint: 'Click "Close" (×) to exit the Sample Worktable',
-      body: '<p><b>Close</b> (<b>×</b> in the worktable head, or the footer button) returns to the class column; the saved ROI stays on the sample.</p>' +
-        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it too, and so does clicking the dimmed backdrop.</p>'
+      body: '<p><b>Close</b> (<b>×</b> in the worktable head, or the <b>Close</b> button in the footer) returns to the three-column workspace. Everything you saved stays on its character card.</p>' +
+        '<ul>' +
+        '<li><b>Save Sample</b> writes the crop and the brightness thresholds onto that one sample.</li>' +
+        '<li><b>Close</b> is safe to press at any time — it only discards edits you have not saved.</li>' +
+        '<li><kbd>Esc</kbd> closes it too, and so does clicking the dimmed backdrop.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">➡️</span><span>With every character filtered, the middle column is next: order and train.</span></div>'
     }},
     {{
       chapter: 4,
@@ -14795,15 +16157,21 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: '.train-card',
       fallback: ['.col-train'],
       placement: 'left',
-      /* Reading order lives in the collapsed Advanced panel, so the step
-         asks the user to press Advanced rather than unfolding it for them. */
+      /* The Advanced panel starts collapsed on a fresh workspace, and the
+         reading order and ink polarity the next two checkpoints talk about
+         live inside it — so the step asks the user to press Advanced rather
+         than unfolding it for them. */
       phaseIf: function () {{ return !advancedOpen(); }},
       phaseTarget: '#advBtn',
       phaseName: 'the <b>Advanced</b> training options',
       advanceTarget: '#advBtn',
       checkpoint: 'Click "Advanced" to unfold the training options',
-      body: '<p>The middle column trains the tiny glyph classifier the verification loop uses. <b>Advanced</b> unfolds the reading order, and <b>Train Embedded Model</b> starts the run.</p>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧠</span><span>The sign itself is never the training input — each slot is read as a single character.</span></div>'
+      body: '<p>The middle column trains the tiny glyph classifier the verification loop uses. Two controls matter here:</p>' +
+        '<ul>' +
+        '<li><b>Advanced</b> unfolds the reading order, the ink polarity and the hyperparameters. It starts collapsed because the defaults already suit a small embedded model.</li>' +
+        '<li><b>Train Embedded Model</b> starts the run, and stays disabled until every character has samples.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧠</span><span>The sign itself is never the training input — each card trains on <b>single-character</b> glyphs.</span></div>'
     }},
     {{
       chapter: 4,
@@ -14819,9 +16187,30 @@ mountReflowTimers.push(window.setTimeout(() => {{
       advanceTarget: '#advReadingOrder',
       checkpoint: 'Set "Reading order" to match the way the sign is printed',
       body: '<ul>' +
-        '<li><b>Reading order</b> tells the verification which end of the sign is slot 1. <code>ltr</code> reads left to right, <code>rtl</code> right to left.</li>' +
+        '<li><b>Reading order</b> (<code>#advReadingOrder</code>) tells the verification which end of the sign is slot 1. <code>ltr</code> reads left to right, <code>rtl</code> right to left.</li>' +
         '<li>Set it to match the way the sign is printed — it decides the order of the three slots <i>and</i> the direction the preview reports.</li>' +
-        '<li><b>Ink polarity</b> (just above) selects dark-on-light or light-on-dark ink for the binarizer.</li>' +
+        '<li>The choice is echoed as a <b>left → right</b> / <b>right → left</b> tag on the target bar, so you can check it without re-opening this panel.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>If the preview reads your sign backwards, this row is the fix — not the slot values.</span></div>'
+    }},
+    {{
+      chapter: 4,
+      title: 'Global Ink Polarity &amp; Hyperparameters',
+      target: '#advInkPolarityRow',
+      fallback: ['#trainAdvPanel', '.train-card'],
+      placement: 'left',
+      phaseIf: function () {{ return !advancedOpen(); }},
+      phaseTarget: '#advBtn',
+      phaseName: 'the <b>Advanced</b> training options',
+      advanceTarget: '#advInkPolarity',
+      /* Recommended / Reset / the inline numbers are the rest of the panel,
+         and touching any of them settles this checkpoint too. */
+      advanceAlso: ['#advUseRec', '#advReset', '#advEpochsInline', '#advBatchInline', '#advLrInline'],
+      checkpoint: 'Set "Ink Polarity" to match how your glyphs are drawn',
+      body: '<ul>' +
+        '<li><b>Ink Polarity</b> (<code>#advInkPolarity</code>) says which way the glyphs sit: <code>dark on light</code> for camera captures, <code>light on dark</code> for MNIST/EMNIST-style images. Get it wrong and the model learns the inverse of your data.</li>' +
+        '<li><b>Transfer learning</b> keeps an EMNIST-pretrained backbone and attaches a fresh head for the characters on your sign — the fastest route to a high score on a few hundred crops. While it is on, the architecture rows are hidden: those numbers belong to the frozen backbone.</li>' +
+        '<li><b>💡 Use recommended</b> fills the inline numbers in for roughly <b>800 gradient updates</b>; <b>Reset</b> puts the shipped defaults back.</li>' +
         '</ul>'
     }},
     {{
@@ -14831,46 +16220,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.train-card', '.col-train'],
       placement: 'left',
       advanceTarget: '#trainBtn',
+      live: 'train',
       checkpoint: 'Click "Train Embedded Model" (or press ⌘/Ctrl + Enter) to start',
-      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd>) and check the per-character accuracy pill when the run ends.</p>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A slot that keeps coming back <code>_background</code> needs more of that character, or a tighter ROI.</span></div>'
-    }},
-    {{
-      chapter: 4,
-      title: 'OOD Gates &amp; Template Settings',
-      target: '#settingsOodGroup',
-      fallback: ['#globalSettingsModal'],
-      placement: 'left',
-      /* The OOD gates live in ⚙ Settings: point at the top-bar button
-         first, then follow the user into the modal they opened. */
-      phaseTarget: '#navSettings',
-      phaseName: 'the <b>OOD</b> gate settings',
-      checkpoint: 'Click the highlighted ⚙ Settings button to reach the OOD gates',
-      body: '<p>Verification has two failure modes to guard against: <b>no sign present</b>, and <b>wrong sign present</b>.</p>' +
+      body: '<p>Press <b>Train Embedded Model</b> (<kbd>⌘</kbd><kbd>Enter</kbd> / <kbd>Ctrl</kbd><kbd>Enter</kbd>). The run streams per-epoch progress into the card.</p>' +
         '<ul>' +
-        '<li><b>Layer 1 · Sign-pixel ratio</b> rejects a frame before inference when there is too little (or too much) dark target area — an empty street or a covered lens.</li>' +
-        '<li><b>Layer 2 · Top probability</b> rejects a slot whose winning character is not confident enough.</li>' +
-        '<li><b>Layer 3 · Normalized entropy</b> rejects a slot whose probabilities are spread too evenly, i.e. the model is guessing.</li>' +
+        '<li>When it finishes, the status pill (<code>#trainStatus</code>) turns into <b>Model Trained · tap for accuracy</b> — click it for the per-character breakdown.</li>' +
+        '<li>The pill is disabled until <b>every</b> character has at least one sample.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🎛️</span><span>On the sign path, Layer 1 is structurally inert and Layers 2/3 are opened; each slot&rsquo;s own <b>_background</b> class and the per-slot confidence floor do the rejecting. Start permissive, then tighten until a blank frame reliably reads red.</span></div>'
-    }},
-    {{
-      chapter: 4,
-      title: 'Close Input Settings',
-      target: '#settingsCancel',
-      fallback: ['#settingsSave', '.tm-settings-card'],
-      placement: 'left',
-      /* The OOD checkpoint left the modal open on purpose, so the exit is
-         the user's own press rather than the modal vanishing under them. */
-      phaseIf: function () {{ return !settingsOpen(); }},
-      phaseTarget: '#navSettings',
-      phaseName: 'Input Settings',
-      advanceTarget: '#settingsCancel',
-      advanceAlso: ['#settingsSave'],
-      onLeave: closeSettingsModal,
-      checkpoint: 'Click "Save changes" (or "Cancel") to close Settings',
-      body: '<p><b>Save changes</b> writes the new gates into the host preview and the exported <code>model_settings</code> constants; <b>Cancel</b> keeps the previous values. Either closes the modal.</p>' +
-        '<p class="tm-tour-muted"><kbd>Esc</kbd> closes it as well — the tour follows you back out to the workspace.</p>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📊</span><span>A character that keeps coming back as <code>_background</code> needs more of that character, or a tighter ROI.</span></div>'
     }},
     {{
       chapter: 5,
@@ -14879,15 +16236,49 @@ mountReflowTimers.push(window.setTimeout(() => {{
       fallback: ['.col-preview'],
       placement: 'left',
       body: '<ul>' +
-        '<li>Toggle <b>Input</b> ON and point the camera at the sign: the preview splits the frame into the three slots and reads each one.</li>' +
-        '<li>A <b>🟢 YES (MATCH)</b> banner means all three slots agreed with the target, each cleared the 0.60 confidence floor, and none came back as <code>_background</code>.</li>' +
-        '<li>A <b>🔴 NO (NOT MATCH)</b> banner names which slot disagreed and why: wrong character, <code>_background</code>, no glyph, or below the confidence floor.</li>' +
+        '<li>Toggle <b>Input</b> ON and point the camera at the plate: the preview splits the frame into the <b>three slots</b> and reads each one through the same int8 graph the MCU runs.</li>' +
+        '<li>A <b>🟢 YES — MATCH</b> banner (<code>.signmatch.yes</code>) means all three slots agreed with the target, each cleared its confidence floor, and none came back as <code>_background</code>.</li>' +
+        '<li>A <b>🔴 NO — NOT MATCH</b> banner names which slot disagreed and why: wrong character, <code>_background</code>, no glyph, or below the confidence floor.</li>' +
+        '<li>Under the banner, one card per slot (<code>.signmatch-slot</code>) shows <b>WANT</b>, the character that was <b>got</b>, the 28×28 glyph, and the <code>.prob</code> percentage.</li>' +
+        '<li>Toggle <b>ROI</b> to draw the crop rectangle and <b>Orig</b> to see the full masked frame.</li>' +
         '</ul>' +
-        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>The banner is computed from the <b>same int8</b> graph the MCU runs, so a green verdict here predicts a green verdict on the device.</span></div>'
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🔁</span><span>The banner is computed from the <b>same</b> quantized graph the MCU runs, so a green verdict here predicts a green verdict on the device.</span></div>'
     }},
     {{
       chapter: 5,
-      title: 'Export the Road-Sign Firmware Package',
+      title: 'Synth Quick-Test: Match · Reversed · Mismatch',
+      target: '#previewSynthMatchBtn',
+      fallback: ['#previewSynthRevBtn', '.preview-synth-group', '.preview-card'],
+      placement: 'left',
+      /* These pills live in the preview's Local Image File source, because
+         that is the input they replace. */
+      advanceTarget: '#previewSynthMatchBtn',
+      advanceAlso: ['#previewSynthRevBtn', '#previewSynthMismatchBtn'],
+      checkpoint: 'Click "🧪 Synth Match" to build a synthetic plate from your own samples',
+      body: '<p>No license plate on your desk? The three synth pills in the preview&rsquo;s <b>Local Image File</b> source build a plate out of the project&rsquo;s <b>own samples</b>, so the verdict is testable with no files on disk and no camera:</p>' +
+        '<ul>' +
+        '<li><b>🧪 Synth Match</b> (<code>#previewSynthMatchBtn</code>) — combine the three target characters into a plate the model should call <b>🟢 YES</b>.</li>' +
+        '<li><b>🔀 Synth Reversed</b> (<code>#previewSynthRevBtn</code>) — combine them in reverse order. If it also reads green, your <b>reading order</b> is set the wrong way round.</li>' +
+        '<li><b>❌ Synth Mismatch</b> (<code>#previewSynthMismatchBtn</code>) — swap in a wrong character, which must produce <b>🔴 NO</b> and name the slot that disagreed.</li>' +
+        '</ul>' +
+        '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">🧪</span><span>These pills are disabled until the sign is set and a model has been trained — they need a target and a verdict to test.</span></div>'
+    }},
+    {{
+      chapter: 5,
+      title: 'Live Dark / Lum Sliders &amp; the Slot Probabilities',
+      target: '.preview-card',
+      fallback: ['.col-preview'],
+      placement: 'left',
+      body: '<ul>' +
+        '<li>The live <b>Dark</b> / <b>Lum</b> sliders under the image (<code>#previewDarkSlider</code>, <code>#previewLumSlider</code>) re-tune the brightness mask while you watch — they should match the thresholds you saved in the worktable.</li>' +
+        '<li>Each <code>.signmatch-slot</code> shows the winning character&rsquo;s <code>.prob</code> percentage, so you can see <b>which</b> slot is marginal rather than only that the plate failed.</li>' +
+        '<li>The row above the image (<code>#previewContextBar</code>) picks where the pane reads from — a <b>Webcam</b>, the <b>Device</b> port plus <b>Refresh</b>, or <b>📁 Upload Image…</b> — independently of the capture drawer.</li>' +
+        '</ul>' +
+        '<p class="tm-tour-muted">Sanity-check the preview before exporting: a mask that looks wrong here will look exactly as wrong on the device.</p>'
+    }},
+    {{
+      chapter: 5,
+      title: 'Export the Car License Firmware Package',
       target: '#exportBtn',
       fallback: ['.preview-card'],
       placement: 'bottom',
@@ -14895,9 +16286,9 @@ mountReflowTimers.push(window.setTimeout(() => {{
       checkpoint: 'Click "Export Model" to build the 5-file deployment package',
       body: '<p>Click <b>Export Model</b>, then copy the <b>5 files</b> next to your <code>TFLite_Sign.ino</code> sketch:</p>' +
         '<ul>' +
-        '<li><code>tm_model_data.cpp</code> · <code>tm_model_data.h</code> — the quantized weights.</li>' +
+        '<li><code>tm_model_data.cpp</code> · <code>tm_model_data.h</code> — the quantized weights as a C array.</li>' +
         '<li><code>model_resolver.h</code> — the MicroInterpreter op resolver.</li>' +
-        '<li><code>model_settings.cpp</code> · <code>model_settings.h</code> — the labels, the geometry, the reading order and the OOD gates as <code>constexpr</code>.</li>' +
+        '<li><code>model_settings.cpp</code> · <code>model_settings.h</code> — the labels, the geometry, the <b>reading order</b>, the target sign and the OOD gates as <code>constexpr</code>.</li>' +
         '</ul>' +
         '<details class="tm-tour-details"><summary>🖥️ Serial-Monitor live tuning (no reflash)</summary><div class="tm-tour-details-body">' +
         '<table class="tm-tour-table">' +
@@ -14906,7 +16297,8 @@ mountReflowTimers.push(window.setTimeout(() => {{
         '<tr><td><code>get ood</code></td><td>Print the four OOD gates.</td></tr>' +
         '<tr><td><code>set ood &lt;spmin&gt; &lt;spmax&gt; &lt;mpmin&gt; &lt;ermax&gt;</code></td><td>Retune the OOD gate live.</td></tr>' +
         '<tr><td><code>mode infer</code> / <code>mode gray</code></td><td>Switch between inference and raw grayscale streaming.</td></tr>' +
-        '</table></div></details>'
+        '</table></div></details>' +
+        '<p class="tm-tour-muted">Re-export after any change to the target sign, the reading order or the thresholds.</p>'
     }},
     {{
       chapter: 5,
@@ -14914,11 +16306,11 @@ mountReflowTimers.push(window.setTimeout(() => {{
       target: null,
       fallback: [],
       placement: 'auto',
-      body: '<p>That is the whole <b>3-character road sign</b> loop:</p>' +
+      body: '<p>That is the whole <b>3-character car license</b> loop:</p>' +
         '<ul>' +
-        '<li>Declare the sign in the three slots, then collect samples of the sign as a whole.</li>' +
-        '<li>Pin the plate with a Manual ROI, isolate each slot, and train the tiny glyph classifier.</li>' +
-        '<li>Set the reading order, preview until the verdict is reliably green, then export.</li>' +
+        '<li>Declare the sign in the three slots, then capture <b>one glyph per crop</b> for each character.</li>' +
+        '<li>Pin the plate with a Manual ROI, threshold the noise away, and set the reading order.</li>' +
+        '<li>Train the tiny glyph classifier, preview until the verdict is reliably green, then export.</li>' +
         '</ul>' +
         '<div class="tm-tour-tip"><span class="tm-tour-tip-ico">📖</span><span>Re-open this guide any time from <b>📖 Tutorial</b>.</span></div>'
     }}
@@ -14983,19 +16375,56 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var tourIndex = 0;
   var uiBefore = null;
   var placeTimer = null;
+  /* The step the ring currently on screen belongs to.  Placement waits on
+     a frame, so this is the only way to tell a ring that has been
+     re-seated for the new step from the old one still sitting where the
+     last step left it — the headless walk reads it through `place()`. */
+  var placedIndex = -1;
   /* Click-to-advance state.  `advState` mirrors what the card should say
      about the spotlighted control: nothing, "click it", or "it is
      disabled — use Next". */
   var advState = 'off';
+  /* `advTarget` is the node the listeners sit on; `advControl` is the
+     control inside it that actually carries the affordance.  Both are kept
+     so `armTargetAdvance` can tell a binding that is still valid from one
+     `render()` has orphaned by replacing the card it lived in. */
   var advTarget = null;
+  var advControl = null;
   var advClick = null;
   var advChange = null;
+  var advPress = null;
   var advTimer = null;
   /* Further controls that also complete the step (see `advanceAlso`). */
   var advExtra = [];
   /* Geometry of the last `placeTour`, kept so the arrow and the beacon can
      be re-aimed without re-measuring the whole workspace. */
   var placeMark = null;
+  /* Phase B — "hands-on" mode.  `orbMode` means the card and the dim layer
+     are OFF screen and the floating orb is on: the user is working, and
+     from that moment on nothing in the workspace may move the tour.
+     `orbSnapshot` is what the live state looked like the moment they
+     started, so "you have done the step's own work" is a comparison
+     rather than a guess.  `orbFlash*` shows a short acknowledgement
+     ("🛠️ Hands-on mode") before the live badge takes over. */
+  var orbMode = false;
+  var orbSnapshot = null;
+  /* The hand-over froze nothing yet: the step's own screen is still shut,
+     so its live values are not on screen to be the baseline. */
+  var orbBaselineDue = false;
+  var orbWatch = null;
+  var orbSettle = null;
+  var orbFlashText = '';
+  var orbFlashUntil = 0;
+  var orbDragged = false;
+  var orbEventsBound = false;
+  /* Set the moment the user touches the control a step is about — pressing
+     it to hand the workspace over, or working it once the pill is on.  It
+     is what makes the pill turn green on steps whose work produces no
+     readable live value (a closed modal, a collapsed disclosure), so no
+     step can leave the user staring at a pill that never acknowledges
+     them.  `liveSignature` can only say "the numbers moved"; this says
+     "the user did the thing". */
+  var orbActionSatisfied = false;
 
   function autoskipOn() {{
     try {{ return window.localStorage.getItem(AUTOSKIP_KEY) === '1'; }} catch (err) {{ return false; }}
@@ -15030,48 +16459,81 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }}
   }}
 
-  /* ── Click-to-Advance ────────────────────────────────────────────────
-     A step that spotlights a real control should be satisfied by USING
-     that control, not only by pressing Next.  goStep() therefore arms a
-     one-shot listener on the spotlight target:
-       · a button / chip / toolbar keeps its native click — which opens
-         the drawer or modal it belongs to — and the tour advances on a
-         180 ms settle beat, so the two never fight over the layout;
-       · a field, select or slider advances on `change`, debounced
-         350 ms, because a text box fires an event per keystroke;
+  /* ── Explain & Point ─────────────────────────────────────────────────
+     Phase A of every step: the card spotlights one real control and says
+     what to do there.  Using that control is the answer to the card, so
+     goStep() arms a listener on the spotlight target — but the answer is
+     NOT "skip ahead":
+       · a button / chip / toolbar keeps its native click (which opens the
+         drawer or modal it belongs to) and, on a 180 ms settle beat, the
+         card COLLAPSES into the floating orb;
+       · a field, select or slider does the same on `change`, debounced
+         350 ms, because a text box fires an event per keystroke and the
+         user may keep dragging for a while;
        · a control that cannot be used YET (Train before samples, Export
          before training) says so in the card instead of silently
-         swallowing the click — a disabled button never dispatches one,
-         so nothing else could tell the user why it did nothing.
-     The listener is torn down on every step change and in endTour, so no
-     step can inherit the previous one's trigger. */
+         swallowing the click — a disabled button never dispatches one, so
+         nothing else could tell the user why it did nothing.
+     Nothing here moves the tour on.  The step is left when the user says
+     so — by clicking the orb — which is what keeps the tutorial from
+     teleporting out from under someone taking their twentieth photo. */
   var ADV_CLICK_SEL = 'button, [role="button"], a[href], input, select, textarea, ' +
     '.class-preprocess-chip, .chip, .tm-toolbar-btn, .tm-action-btn, .ocr-empty-cta';
+  /* Gestures that are a press rather than a click: the Hold-to-Capture
+     button captures on pointerdown, and the ROI box is dragged from one. */
+  var ADV_PRESS_SEL = '[id^="sourceHold-"], .roi-overlay, #classPreprocessStage';
   var ADV_SETTLE_MS = 180;
   var ADV_INPUT_MS = 350;
+  /* Beat between the orb being clicked and the next card appearing: long
+     enough to read the acknowledgement, short enough not to feel laggy. */
+  var ORB_ADVANCE_MS = 420;
 
   function unbindTargetAdvance() {{
     if (advTimer) {{ window.clearTimeout(advTimer); advTimer = null; }}
-    if (advTarget && advClick) {{
-      try {{ advTarget.removeEventListener('click', advClick, true); }} catch (err) {{}}
+    var drop = function (el, fn, type) {{
+      if (!el || !fn) return;
+      try {{ el.removeEventListener(type, fn, true); }} catch (err) {{}}
+    }};
+    if (advClick) drop(advTarget, advClick, 'click');
+    if (advChange) {{
+      drop(advTarget, advChange, 'change');
+      drop(advTarget, advChange, 'input');
     }}
-    if (advTarget && advChange) {{
-      try {{ advTarget.removeEventListener('change', advChange, true); }} catch (err) {{}}
-      try {{ advTarget.removeEventListener('input', advChange, true); }} catch (err) {{}}
+    if (advPress) {{
+      drop(advTarget, advPress, 'pointerdown');
+      drop(advTarget, advPress, 'mousedown');
     }}
     for (var i = 0; i < advExtra.length; i++) {{
-      try {{ advExtra[i].el.removeEventListener('click', advExtra[i].fn, true); }} catch (err) {{}}
+      var binding = advExtra[i];
+      drop(binding.el, binding.fn, binding.type || 'click');
     }}
     advExtra = [];
-    advTarget = null; advClick = null; advChange = null;
+    advTarget = null; advControl = null;
+    advClick = null; advChange = null; advPress = null;
   }}
 
+  /* The user just used the control the card was pointing at.  That is the
+     answer to "explain and point": stop explaining, get the card and the
+     dim layer off the screen, and start carrying the live state instead.
+     The settle beat lets the control finish its own job — opening a
+     drawer, committing a value — before the orb reads the result. */
+  function collapseIntent(delay) {{
+    if (!tourOpen || orbMode) return;
+    /* The user just used the control the card pointed at.  That is the step
+       done as far as the pill is concerned, whatever the step's live value
+       happens to be — record it before the hand-over so the pill can say so
+       the moment it appears. */
+    orbActionSatisfied = true;
+    if (advTimer) window.clearTimeout(advTimer);
+    advTimer = window.setTimeout(function () {{ advTimer = null; enterOrbMode(); }}, delay || ADV_SETTLE_MS);
+  }}
+
+  /* The one way a step is ever left.  Called from the orb, from Next →,
+     from Skip step →, from a chapter chip and from the arrow keys — never
+     from a workspace event. */
   function advanceLater(delay) {{
     if (advTimer) window.clearTimeout(advTimer);
-    /* Acknowledge the press before the card changes: the user did exactly
-       what the checkpoint asked, and the tour should say so rather than
-       silently swapping the slide out from under their cursor. */
-    flashCheckpointPassed();
+    flashOrb('✅ Moving on&hellip;');
     advTimer = window.setTimeout(function () {{
       advTimer = null;
       if (!tourOpen) return;
@@ -15090,10 +16552,16 @@ mountReflowTimers.push(window.setTimeout(() => {{
      closed modal, a collapsed panel (`phaseTarget`, optionally with
      `phaseIf`).  Nothing is forced open in that case: the step points at
      the control that opens the screen, and the click carries the user in
-     (see `resumeStep`).  Same step index, two phases, no teleporting. */
+     and then hands the workspace over (see `collapseIntent`).  Same step
+     index, two phases, no teleporting. */
   function resolveStepTargets(step) {{
     var out = {{ target: null, control: null, phase: false }};
     if (!step) return out;
+    /* A step that documents something inside Settings' collapsed Advanced
+       disclosure must unfold it before anything is measured — this runs on
+       every arm and every re-place, so a re-render cannot leave the group
+       shut while the card points into it. */
+    ensureStepDisclosure(step);
     var shut = (typeof step.phaseIf === 'function') && !!step.phaseIf();
     var el = shut ? null : firstVisible([step.target].concat(step.fallback || []));
     if (!el && step.phaseTarget) {{
@@ -15112,68 +16580,429 @@ mountReflowTimers.push(window.setTimeout(() => {{
     return out;
   }}
 
-  /* Phase two of a `phaseTarget` step.  The user pressed the control that
-     opens the screen — a closed Settings modal, a collapsed Advanced
-     panel — so the step re-seats the spotlight and the arrow onto what
-     they just opened, without moving to a new step.  If the click did not
-     actually open anything the step simply stays in its trigger phase. */
-  function resumeStep() {{
-    if (!tourOpen) return;
+  /* ── Phase B · the floating orb ("hands-on" mode) ─────────────────────
+     The card above explains a step and points at one control.  The moment
+     the user touches it, this takes over.  Three things it exists for:
+       · the dim layer and the card come OFF screen, so every button,
+         slider and modal is reachable while the guide is still running;
+       · the pill carries the LIVE state of the job — sample counts,
+         thresholds, the target sign, training — instead of a static
+         sentence the user has already read;
+       · it never advances anything by itself.  Clicking it is the user
+         saying "done", and `?` brings the card back to re-read.
+     Live state is read through two channels, because the workspace
+     changes in two ways: DOM events for what the user does (input,
+     change, click), and a poll for what the backend pushes back
+     (STATE.counts after a capture, a finished training run) which arrives
+     with no event at all. */
+  var ORB_READY_BADGE = '✅ Step Ready!';
+  var LIVE_SEL = '#classPreprocessDark, #classPreprocessDarkNum, #classPreprocessLum, ' +
+    '#classPreprocessLumNum, #classPreprocessMode, #signSeqSlot-0, #signSeqSlot-1, ' +
+    '#signSeqSlot-2, #advReadingOrder, #advInkPolarity, #previewDarkSlider, ' +
+    '#previewDarkNum, #previewLumSlider, #previewLumNum';
+
+  function orbNode() {{ return byId('tmTourOrb'); }}
+
+  function orbEsc(s) {{
+    return String(s === undefined || s === null ? '' : s).replace(/[&<>"]/g, function (c) {{
+      return {{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }}[c];
+    }});
+  }}
+
+  /* Every class's sample count in one number.  The rejection class the
+     export adds is not something the user collects, so it never shows up
+     in the count the orb reads back to them. */
+  function samplesTotal() {{
+    var total = 0;
+    try {{
+      var counts = (STATE && STATE.counts) || {{}};
+      Object.keys(counts).forEach(function (k) {{
+        if (k === '{BACKGROUND_CLASS_NAME}') return;
+        total += Number(counts[k]) || 0;
+      }});
+    }} catch (err) {{}}
+    return total;
+  }}
+
+  function trainDone() {{
+    var el = byId('trainStatus');
+    if (el && /Model Trained/.test(String(el.textContent || ''))) return true;
+    return !!(STATE && STATE.trainClassAccuracies);
+  }}
+
+  /* The values a step of kind `thresholds` / `signseq` is about, as one
+     comparable string — every slider, select and slot the tour watches. */
+  function liveValues() {{
+    var out = [];
+    try {{
+      Array.prototype.forEach.call(document.querySelectorAll(LIVE_SEL), function (el) {{
+        out.push(String(el.id || el.className || '?') + '=' + String(el.value === undefined ? '' : el.value));
+      }});
+    }} catch (err) {{}}
+    return out.join('|');
+  }}
+
+  /* What "this step's own work" looks like as a value.  A step opts in by
+     declaring `live`: `samples` (its sample count), `train` (whether a run
+     has finished), `thresholds` (every slider / select the worktable and
+     the preview own) or `signseq` (the three target-sign slots).  Only
+     those kinds can flip the badge green — that is what stops an unrelated
+     click from congratulating the user. */
+  function liveSignature(step) {{
+    var kind = (step && step.live) || '';
+    if (kind === 'samples') return 'n=' + samplesTotal();
+    if (kind === 'train') {{
+      /* A model that already exists reads "Model Trained" the moment the
+         workspace loads, so the status line alone cannot say whether the
+         run the user just started has finished — the per-class accuracies
+         the backend pushes at the end of a run can. */
+      var accs = (STATE && STATE.trainClassAccuracies) || null;
+      return 'trained=' + (trainDone() ? '1' : '0') + ';acc=' +
+        (accs ? JSON.stringify(accs) : '');
+    }}
+    if (kind === 'thresholds' || kind === 'signseq') return liveValues();
+    return '';
+  }}
+
+  /* What "the user has done nothing yet" looked like when the workspace
+     was handed over.  A step whose screen is still shut cannot be frozen
+     yet: the card presses its door on the next tick, and the panel's own
+     arrival would otherwise read as the user's work — a green badge
+     before a single slider has been touched.  So the baseline waits for
+     the screen the step documents, and takes its values then. */
+  function armOrbBaseline() {{
+    var step = STEPS[tourIndex] || {{}};
+    if (typeof step.phaseIf === 'function') {{
+      var open = true;
+      try {{ open = !step.phaseIf(); }} catch (err) {{ open = true; }}
+      if (!open) {{ orbBaselineDue = true; return; }}
+    }}
+    orbBaselineDue = false;
+    orbSnapshot = liveSignature(step);
+  }}
+
+  /* The step's live headline plus whether its own work looks done.
+     "Done" has two independent sources, and either is enough: the user
+     touched the control the step is about (`orbActionSatisfied`), or the
+     step's live values moved off the baseline frozen at hand-over.  Steps
+     whose work leaves no readable value — opening a modal, unfolding a
+     disclosure — have no signature at all, so without the first source
+     their pill could never turn green. */
+  function orbState() {{
+    var step = STEPS[tourIndex] || {{}};
+    var kind = step.live || '';
+    var out = {{ text: '', ready: false }};
+    var sig = liveSignature(step);
+    var moved = !!sig && orbSnapshot !== null && sig !== orbSnapshot;
+    out.ready = orbActionSatisfied || moved;
+    if (kind === 'samples') {{
+      var counts = (STATE && STATE.counts) || {{}};
+      var parts = [];
+      Object.keys(counts).forEach(function (k) {{
+        if (k === '{BACKGROUND_CLASS_NAME}') return;
+        parts.push(orbEsc(k) + ': ' + (Number(counts[k]) || 0));
+      }});
+      out.text = 'Collecting Samples' + (parts.length ? ' (' + parts.join(', ') + ')' : '');
+    }} else if (kind === 'thresholds') {{
+      out.text = 'Adjusting ROI &amp; Thresholds';
+    }} else if (kind === 'signseq') {{
+      var seq = [];
+      for (var i = 0; i < 3; i++) {{
+        var slot = byId('signSeqSlot-' + i);
+        if (slot) seq.push(orbEsc(slot.value || '·'));
+      }}
+      out.text = 'Target Sign: ' + (seq.join(' ') || 'not set');
+    }} else if (kind === 'train') {{
+      out.text = trainDone() ? 'Model Trained' : 'Train Your Model';
+    }} else {{
+      out.text = orbEsc(stripTourTags(step.title || 'This step'));
+    }}
+    return out;
+  }}
+
+  function stripTourTags(html) {{
+    return String(html).replace(/<[^>]*>/g, '').replace(/&amp;/g, '&');
+  }}
+
+  /* Steps that document a screen — Settings, the drawer, the worktable —
+     keep that screen open while the user works, so the pill has to say so
+     instead of pretending the step is over. */
+  function orbScreenHint(step) {{
+    if (!step || typeof step.phaseIf !== 'function') return '';
+    var open = false;
+    try {{ open = !step.phaseIf(); }} catch (err) {{ open = false; }}
+    if (!open) return '';
+    var name = stripTourTags(step.phaseName || 'the panel');
+    return 'Close ' + orbEsc(name) + ' &amp; click here for Next Step &rarr;';
+  }}
+
+  /* A short-lived acknowledgement (hands-on mode, moving on).  It wins
+     over the live badge for a moment, then gets out of the way — the pill
+     must not be a place where text piles up. */
+  function flashOrb(text) {{
+    orbFlashText = String(text || '');
+    orbFlashUntil = orbFlashText ? (Date.now() + 1800) : 0;
+    renderOrb();
+  }}
+
+  function renderOrb() {{
+    var orb = orbNode();
+    if (!orb) return;
+    if (!tourOpen || !orbMode) {{
+      orb.classList.remove('on', 'ready', 'dragging');
+      return;
+    }}
+    var step = STEPS[tourIndex] || {{}};
+    /* A baseline that was still waiting for its screen now has one. */
+    if (orbBaselineDue) armOrbBaseline();
+    var st = orbState();
+    var flashing = !!orbFlashText && Date.now() < orbFlashUntil;
+    var textNode = byId('tmTourOrbText');
+    var goNode = byId('tmTourOrbGo');
+    if (textNode) {{
+      if (flashing) {{
+        textNode.innerHTML = orbFlashText;
+      }} else {{
+        var hint = st.ready ? 'click here to continue &rarr;' : (orbScreenHint(step) || 'Click here for Next Step &rarr;');
+        textNode.innerHTML = (st.ready ? ORB_READY_BADGE + ' ' : '') +
+          '<b>Step ' + (tourIndex + 1) + '/' + STEPS.length + ':</b> ' + st.text + ' · ' + hint;
+      }}
+    }}
+    if (goNode) goNode.innerHTML = st.ready ? '&#9989; Done &mdash; Next Step &rarr;' : 'Next Step &rarr;';
+    orb.classList.add('on');
+    orb.classList.toggle('ready', !!st.ready && !flashing);
+  }}
+
+  /* Does this event target belong to the control the current step is
+     about?  Every selector the step mentions counts — the spotlight, its
+     fallbacks, the named inner control and the `advanceAlso` group — so
+     "the user worked the thing this step documents" is decided the same
+     way the Phase-A binding decided it. */
+  function matchesStepControl(target) {{
+    if (!target || !target.closest) return false;
+    var step = STEPS[tourIndex] || {{}};
+    var sels = [];
+    if (step.target) sels.push(step.target);
+    (step.fallback || []).forEach(function (s) {{ sels.push(s); }});
+    if (step.advanceTarget) sels.push(step.advanceTarget);
+    (step.advanceAlso || []).forEach(function (s) {{ sels.push(s); }});
+    for (var i = 0; i < sels.length; i++) {{
+      try {{ if (target.closest(sels[i])) return true; }} catch (err) {{}}
+    }}
+    return false;
+  }}
+
+  function orbEventHook(ev) {{
+    if (!orbMode) return;
+    var t = ev && ev.target;
+    /* The pill's own buttons are not workspace adjustments. */
+    if (t && t.closest && t.closest('#tmTourOrb')) return;
+    /* Working the control the step is about is the step being done, even
+       when the work produces no live value to compare against. */
+    if (matchesStepControl(t)) orbActionSatisfied = true;
+    /* Let the workspace finish reacting to the event first (opening the
+       drawer, re-rendering the worktable) — then read the result. */
+    if (orbSettle) window.clearTimeout(orbSettle);
+    orbSettle = window.setTimeout(function () {{ orbSettle = null; renderOrb(); }}, 150);
+  }}
+
+  function startOrbWatch() {{
+    if (!orbEventsBound) {{
+      orbEventsBound = true;
+      document.addEventListener('input', orbEventHook, true);
+      document.addEventListener('change', orbEventHook, true);
+      document.addEventListener('click', orbEventHook, true);
+    }}
+    if (!orbWatch) {{
+      orbWatch = window.setInterval(function () {{
+        if (!orbMode) {{ stopOrbWatch(); return; }}
+        renderOrb();
+      }}, 900);
+    }}
+  }}
+
+  function stopOrbWatch() {{
+    if (orbWatch) {{ window.clearInterval(orbWatch); orbWatch = null; }}
+    if (orbSettle) {{ window.clearTimeout(orbSettle); orbSettle = null; }}
+    if (orbEventsBound) {{
+      orbEventsBound = false;
+      document.removeEventListener('input', orbEventHook, true);
+      document.removeEventListener('change', orbEventHook, true);
+      document.removeEventListener('click', orbEventHook, true);
+    }}
+  }}
+
+  /* Every step begins in Phase A — card and ring on, pill off — so leaving
+     a step's hands-on mode is a hard reset rather than a style toggle. */
+  function resetOrb() {{
+    orbMode = false;
+    orbSnapshot = null;
+    orbBaselineDue = false;
+    orbActionSatisfied = false;
+    orbFlashText = '';
+    orbFlashUntil = 0;
+    orbDragged = false;
+    stopOrbWatch();
+    var orb = orbNode();
+    if (orb) {{
+      orb.classList.remove('on', 'ready', 'dragging');
+      orb.style.left = '';
+      orb.style.top = '';
+      orb.style.right = '';
+      orb.style.bottom = '';
+    }}
+  }}
+
+  function enterOrbMode() {{
+    if (!tourOpen || orbMode) return;
+    orbMode = true;
+    /* From here on nothing in the workspace may move the tour: the user is
+       working, and only the pill has a say. */
     unbindTargetAdvance();
     advState = 'off';
-    var step = STEPS[tourIndex];
-    /* Some screens open in two stages — the Settings modal opens, but the
-       EMNIST group inside it is still folded away.  `onResume` is where a
-       step reveals that inner content, so the spotlight lands on the row
-       the step actually talks about instead of the whole modal. */
-    runHook(step && step.onResume, 'onResume');
-    placeTour(step);
+    hideTourMarks();
+    var card = byId('tmTourCard');
+    var spot = byId('tmTourSpotlight');
+    if (card) card.classList.remove('on');
+    if (spot) spot.classList.remove('on', 'dim');
+    armOrbBaseline();
+    flashOrb('🛠️ Hands-on mode — the card is out of your way. Work at your own pace.');
+    startOrbWatch();
+    if (typeof syncFrameHeight === 'function') {{
+      try {{ syncFrameHeight(); }} catch (err) {{}}
+    }}
+  }}
+
+  /* `?` on the pill: back to Phase A for the SAME step, card and all. */
+  function leaveOrbMode() {{
+    if (!tourOpen || !orbMode) return;
+    orbMode = false;
+    stopOrbWatch();
+    orbFlashText = '';
+    orbFlashUntil = 0;
+    var orb = orbNode();
+    if (orb) orb.classList.remove('on', 'ready', 'dragging');
+    var card = byId('tmTourCard');
+    if (card) card.classList.add('on');
     armTargetAdvance(true);
+    schedulePlace();
+  }}
+
+  /* Bound once: the pill's own controls, and dragging it out of the way.
+     The whole pill advances the tour, so a stray click can never do
+     anything else. */
+  function bindOrb() {{
+    var orb = orbNode();
+    if (!orb || orb.__tmOrbBound) return;
+    orb.__tmOrbBound = true;
+    orb.addEventListener('click', function (ev) {{
+      if (orbDragged) {{ orbDragged = false; return; }}
+      var t = ev && ev.target;
+      if (t && t.closest && t.closest('#tmTourOrbHelp')) {{ leaveOrbMode(); return; }}
+      advanceLater(ORB_ADVANCE_MS);
+    }});
+    var drag = null;
+    orb.addEventListener('pointerdown', function (ev) {{
+      if (ev.button !== 0) return;
+      var t = ev.target;
+      if (t && t.closest && t.closest('button')) return;
+      var r = orb.getBoundingClientRect();
+      drag = {{ x: ev.clientX, y: ev.clientY, left: r.left, top: r.top }};
+      try {{ orb.setPointerCapture(ev.pointerId); }} catch (err) {{}}
+    }});
+    orb.addEventListener('pointermove', function (ev) {{
+      if (!drag) return;
+      var dx = ev.clientX - drag.x;
+      var dy = ev.clientY - drag.y;
+      if (!orbDragged && (Math.abs(dx) + Math.abs(dy)) < 5) return;
+      orbDragged = true;
+      orb.classList.add('dragging');
+      var r = orb.getBoundingClientRect();
+      var m = 8;
+      var left = Math.max(m, Math.min(window.innerWidth - r.width - m, drag.left + dx));
+      var top = Math.max(m, Math.min(window.innerHeight - r.height - m, drag.top + dy));
+      orb.style.left = Math.round(left) + 'px';
+      orb.style.top = Math.round(top) + 'px';
+      orb.style.right = 'auto';
+      orb.style.bottom = 'auto';
+    }});
+    var endDrag = function (ev) {{
+      if (!drag) return;
+      drag = null;
+      orb.classList.remove('dragging');
+      try {{ orb.releasePointerCapture(ev.pointerId); }} catch (err) {{}}
+    }};
+    orb.addEventListener('pointerup', endDrag);
+    orb.addEventListener('pointercancel', endDrag);
   }}
 
   function armTargetAdvance(force) {{
+    var step = STEPS[tourIndex];
     if (!force) {{
       /* Already armed, or an advance is already on the settle beat:
          re-arming would drop the user's click on the floor. */
       if (advTimer) return;
-      if (advTarget) return;
+      if (advTarget) {{
+        /* `render()` rebuilds the class column from scratch
+           (`#classes.innerHTML = ''`), which replaces the very node the
+           listeners sit on — so a binding that still looks armed is in fact
+           dead.  A detached node, or one that no longer matches what the
+           step resolves to now, is stale: fall through and bind the fresh
+           node instead of returning. */
+        var now = resolveStepTargets(step);
+        if (advTarget.isConnected && now.target === advTarget && now.control === advControl) return;
+      }}
+      if (!step) return;
     }}
     unbindTargetAdvance();
-    if (!tourOpen) {{ setAdvState('off'); return; }}
-    var step = STEPS[tourIndex];
+    /* Hands-on mode owns the tour from here: the card is off screen, so
+       there is nothing left to arm. */
+    if (!tourOpen || orbMode) {{ setAdvState('off'); return; }}
     if (!step) {{ setAdvState('off'); return; }}
     var found = resolveStepTargets(step);
     var el = found.target;
     if (!el) {{ setAdvState('off'); return; }}
     var control = found.control;
+    var tag = String(control.tagName || '').toUpperCase();
 
     advTarget = el;
+    advControl = control;
     if (control.disabled) {{ setAdvState('disabled'); return; }}
 
     advChange = function (ev) {{
       var t = ev && ev.target;
       if (t && t.disabled) return;
-      advanceLater(ADV_INPUT_MS);
+      collapseIntent(ADV_INPUT_MS);
     }};
     advClick = function (ev) {{
       var t = ev && ev.target;
       var hit = (t && t.closest) ? t.closest(ADV_CLICK_SEL) : null;
       /* Only a real control counts: a click on label text or on the
-         card's padding is not an instruction to move on. */
+         card's padding is not an instruction to start working. */
       if (!hit || hit.disabled) return;
-      advanceLater(ADV_SETTLE_MS);
+      collapseIntent(ADV_SETTLE_MS);
+    }};
+    /* Manual ROI drag and Hold-to-Capture never fire a click: the gesture
+       that means "I am working in here" is the press. */
+    advPress = function (ev) {{
+      var t = ev && ev.target;
+      if (!t || !t.closest) return;
+      var hit = t.closest(ADV_PRESS_SEL);
+      if (!hit || hit.disabled) return;
+      collapseIntent(ADV_SETTLE_MS);
     }};
 
     if (found.phase) {{
       /* The screen this step documents is still shut.  Landing on the
-         control that opens it and pressing it is the lesson, so the click
-         re-seats the step inside rather than skipping past it. */
+         control that opens it and pressing it is the lesson: the press
+         opens the screen and the card collapses onto the pill, leaving
+         the user inside the screen they just opened — same step, no
+         teleport, and nothing to read while they work. */
       var door = function (ev) {{
         var t = ev && ev.target;
         var hit = (t && t.closest) ? t.closest(ADV_CLICK_SEL) : null;
         if (!hit || hit.disabled) return;
-        if (advTimer) window.clearTimeout(advTimer);
-        advTimer = window.setTimeout(function () {{ advTimer = null; resumeStep(); }}, ADV_SETTLE_MS);
+        collapseIntent(ADV_SETTLE_MS);
       }};
       el.addEventListener('click', door, true);
       advClick = door;
@@ -15181,26 +17010,39 @@ mountReflowTimers.push(window.setTimeout(() => {{
       return;
     }}
 
-    var tag = String(control.tagName || '').toUpperCase();
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {{
-      el.addEventListener('change', advChange, true);
-      el.addEventListener('input', advChange, true);
-      setAdvState('input');
-    }} else {{
-      el.addEventListener('click', advClick, true);
-      setAdvState('click');
-    }}
+    /* Bind click AND input/change on the spotlighted node whatever it is.
+       The spotlight is usually a container (`#settingsCameraGroup`,
+       `.class-preprocess-mode-row`, `.tm-action-toolbar`) whose real control
+       is a descendant, so gating on `control.tagName` left every one of
+       those silent; the cue still reads as "input" for a real form field,
+       which is the only place the distinction is visible to the user. */
+    el.addEventListener('click', advClick, true);
+    el.addEventListener('input', advChange, true);
+    el.addEventListener('change', advChange, true);
+    el.addEventListener('pointerdown', advPress, true);
+    el.addEventListener('mousedown', advPress, true);
+    setAdvState((tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') ? 'input' : 'click');
 
-    /* A step may name further controls that also mean "done with this
-       screen" — the worktable's Save Sample and Close both leave it, and
-       neither is a descendant of the threshold slider the step
-       spotlights, so each needs its own binding. */
+    /* A step may name further controls that also mean "working inside this
+       screen" — the worktable's Save Sample and Close, or a drawer's three
+       capture affordances.  Each entry is a selector, possibly a
+       comma-separated group (`'[id^="sourceCapture-"], [id^="uploadPick-"]'`),
+       so every match is bound rather than only the first. */
     (step.advanceAlso || []).forEach(function (sel) {{
-      var extra = null;
-      try {{ extra = document.querySelector(sel); }} catch (err) {{ extra = null; }}
-      if (!extra || extra.disabled || !isVisibleNode(extra)) return;
-      try {{ extra.addEventListener('click', advClick, true); }} catch (err) {{ return; }}
-      advExtra.push({{ el: extra, fn: advClick }});
+      var nodes = [];
+      try {{ nodes = Array.prototype.slice.call(document.querySelectorAll(sel)); }}
+      catch (err) {{ nodes = []; }}
+      nodes.forEach(function (extra) {{
+        if (!extra || extra.disabled || !isVisibleNode(extra)) return;
+        try {{
+          extra.addEventListener('click', advClick, true);
+          extra.addEventListener('input', advChange, true);
+          extra.addEventListener('change', advChange, true);
+          advExtra.push({{ el: extra, fn: advClick, type: 'click' }});
+          advExtra.push({{ el: extra, fn: advChange, type: 'input' }});
+          advExtra.push({{ el: extra, fn: advChange, type: 'change' }});
+        }} catch (err) {{ return; }}
+      }});
     }});
   }}
 
@@ -15282,12 +17124,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
     beacon.classList.add('on');
   }}
 
-  /* The card carries the cue rather than a floating pill: the user is
-     already reading the card, and a badge there cannot be mistaken for
-     part of the controls it is describing. */
+  /* Phase A's cue lives on the card rather than on a floating pill: the
+     user is already reading the card, and a badge there cannot be mistaken
+     for part of the controls it is describing.  Phase B has no card, so the
+     same call keeps the pill's live badge in step with the state. */
   function updateTourCue() {{
     var box = byId('tmTourCue');
     paintTourMarks();
+    renderOrb();
     if (!box) return;
     if (advState === 'off') {{
       box.className = 'tm-tour-cue';
@@ -15315,23 +17159,19 @@ mountReflowTimers.push(window.setTimeout(() => {{
     box.style.display = 'flex';
   }}
 
-  /* The checkpoint the user was just asked to satisfy has been satisfied.
-     Shown in the settle beat between their own press and the next card, so
-     the tour visibly answers the click it received instead of silently
-     swapping the slide underneath it.  Guarded against the debounced
-     `input` path, which would otherwise re-flash on every keystroke. */
-  function flashCheckpointPassed() {{
-    var box = byId('tmTourCue');
-    if (!box || box.classList.contains('pass')) return;
-    box.className = 'tm-tour-cue pass';
-    box.innerHTML = '<span class="tm-tour-cue-ico">✅</span><span><b>Checkpoint Passed!</b> Moving on&hellip;</span>';
-    box.style.display = 'flex';
-  }}
-
   function placeTour(step) {{
     var spot = byId('tmTourSpotlight');
     var card = byId('tmTourCard');
+    /* A placement is queued on the next frame, so one can still be in
+       flight when the guide closes: re-seating here would put the ring
+       back on screen over a workspace nobody is being guided through. */
+    if (!tourOpen) return;
     if (!spot || !card || !step) return;
+    /* Hands-on mode: the dim layer, the ring and the card are deliberately
+       OFF screen so every control is reachable.  There is nothing to place
+       — and re-placing would put the card back in front of the user. */
+    if (orbMode) return;
+    placedIndex = tourIndex;
     var vw = window.innerWidth || document.documentElement.clientWidth || 0;
     var vh = window.innerHeight || document.documentElement.clientHeight || 0;
     var margin = 14;
@@ -15428,10 +17268,26 @@ mountReflowTimers.push(window.setTimeout(() => {{
        a second chance to bind, in case its target only became visible
        when the panel finished opening. */
     placeTimer = window.setTimeout(function () {{
-      if (!tourOpen) return;
+      if (!tourOpen || orbMode) return;
       placeTour(STEPS[tourIndex]);
+      /* The workspace may have replaced the spotlighted card with a fresh
+         one since this step was armed (`render()` rebuilds the column).
+         `armTargetAdvance()` unbinds and re-binds whenever the armed node
+         no longer matches what the step resolves to now, so the new card
+         is just as clickable as the old one. */
       armTargetAdvance();
     }}, 280);
+  }}
+
+  /* Press a door on the beat AFTER the click that asked for it.  The
+     workspace closes its toolbar menus from a document-level click
+     listener, and a nested click fired from inside the card's own button
+     would be undone by that listener the moment the outer event finished
+     bubbling — leaving the user in hands-on mode in front of the very
+     panel the card promised to open. */
+  function pressDoor(el) {{
+    if (!el) return;
+    window.setTimeout(function () {{ try {{ el.click(); }} catch (err) {{}} }}, 0);
   }}
 
   function bindTourCard() {{
@@ -15448,6 +17304,17 @@ mountReflowTimers.push(window.setTimeout(() => {{
     if (skipBtn) skipBtn.onclick = function () {{ goStep(tourIndex + 1); }};
     var backBtn = byId('tmTourBack');
     if (backBtn) backBtn.onclick = function () {{ goStep(tourIndex - 1); }};
+    var startBtn = byId('tmTourStart');
+    if (startBtn) startBtn.onclick = function () {{
+      /* "Start Doing This" is the same intent as touching the spotlighted
+         control, expressed in words.  A step that lives in a shut screen
+         (Settings, the drawer, the worktable) opens its own door first, so
+         the user is not dropped into hands-on mode staring at a closed
+         panel the card never mentioned. */
+      var door = resolveStepTargets(STEPS[tourIndex]);
+      if (door.phase && door.target) pressDoor(door.target);
+      enterOrbMode();
+    }};
     var nextBtn = byId('tmTourNext');
     if (nextBtn) nextBtn.onclick = function () {{
       var step = STEPS[tourIndex];
@@ -15455,17 +17322,16 @@ mountReflowTimers.push(window.setTimeout(() => {{
       if (res.phase && res.target) {{
         /* The step's own screen is still shut and the card is pointing at
            the button that opens it.  Next → must not walk past that door,
-           so it presses it for the user and re-seats the SAME step inside
-           — which is what the welcome slide promises.  Only if the door
-           refuses to open does it fall through to a plain advance, so the
-           user can never get stuck on this step. */
-        try {{ res.target.click(); }} catch (err) {{}}
-        resumeStep();
-        if (resolveStepTargets(STEPS[tourIndex]).phase) goStep(tourIndex + 1);
+           so it presses it for the user and hands the workspace over —
+           which is what the card promises.  Only if the door refuses to
+           open does the next press advance for real, so the user can never
+           get stuck on this step. */
+        pressDoor(res.target);
+        collapseIntent(ADV_SETTLE_MS);
         return;
       }}
       if (tourIndex >= STEPS.length - 1) endTour('finish');
-      else goStep(tourIndex + 1);
+      else advanceLater(ORB_ADVANCE_MS);
     }};
     var auto = byId('tmTourAutoskip');
     if (auto) auto.onchange = function () {{
@@ -15503,15 +17369,44 @@ mountReflowTimers.push(window.setTimeout(() => {{
     html += '</div>';
     html += '<div class="tm-tour-cue" id="tmTourCue" style="display:none"></div>';
     html += '<div class="tm-tour-body">' + step.body + '</div>';
+    if (step.overview && step.stages && step.stages.length) {{
+      /* Step 0 is the map: the whole trip as numbered stages, so the user
+         knows where the guide is taking them before it starts pointing. */
+      html += '<ol class="tm-tour-stages">';
+      step.stages.forEach(function (s, i) {{
+        html += '<li><span class="tm-tour-stage-num">' + (i + 1) + '</span>' +
+          '<span class="tm-tour-stage-txt"><span class="tm-tour-stage-t">' + s.t + '</span>' +
+          '<span class="tm-tour-stage-d">' + s.d + '</span></span></li>';
+      }});
+      html += '</ol>';
+    }}
     html += '<div class="tm-tour-foot">';
     html += '<div class="tm-tour-chapters">' + chips + '</div>';
     html += '<label class="tm-tour-autoskip"><input type="checkbox" id="tmTourAutoskip"' + (autoskipOn() ? ' checked' : '') + '/><span>Don&rsquo;t show automatically on startup</span></label>';
-    html += '<div class="tm-tour-actions">';
-    html += '<button type="button" class="tm-tour-btn ghost" id="tmTourSkip"' + (last ? ' disabled' : '') + '>Skip step &rarr;</button>';
-    html += '<span class="tm-tour-spacer"></span>';
-    html += '<button type="button" class="tm-tour-btn" id="tmTourBack"' + (tourIndex === 0 ? ' disabled' : '') + '>&larr; Back</button>';
-    html += '<button type="button" class="tm-tour-btn primary" id="tmTourNext">' + (last ? 'Finish &#127881;' : 'Next &rarr;') + '</button>';
-    html += '</div>';
+    if (step.overview) {{
+      /* One door out of the overview: start the guide. */
+      html += '<div class="tm-tour-actions">';
+      html += '<button type="button" class="tm-tour-btn primary wide" id="tmTourNext">Start Step-by-Step Guide &rarr;</button>';
+      html += '</div>';
+    }} else {{
+      /* Phase A.  The wide button below the prose is the point of the whole
+         redesign: it is how the user says "let me work" and gets the card
+         and the dim layer out of the way.  Next Step → shares the row with
+         Skip / Back for the user who has already done this step.  A step
+         with nothing to point at (the closing slide) has no hands-on mode
+         to offer, so it keeps the plain row. */
+      if (step.target || step.phaseTarget) {{
+        html += '<div class="tm-tour-actions">';
+        html += '<button type="button" class="tm-tour-btn primary wide" id="tmTourStart">🛠️ Start Doing This (Minimize to Orb)</button>';
+        html += '</div>';
+      }}
+      html += '<div class="tm-tour-actions">';
+      html += '<button type="button" class="tm-tour-btn ghost" id="tmTourSkip"' + (last ? ' disabled' : '') + '>Skip step &rarr;</button>';
+      html += '<span class="tm-tour-spacer"></span>';
+      html += '<button type="button" class="tm-tour-btn" id="tmTourBack"' + (tourIndex === 0 ? ' disabled' : '') + '>&larr; Back</button>';
+      html += '<button type="button" class="tm-tour-btn" id="tmTourNext">' + (last ? 'Finish &#127881;' : 'Next Step &rarr;') + '</button>';
+      html += '</div>';
+    }}
     html += '</div>';
     card.innerHTML = html;
     bindTourCard();
@@ -15529,7 +17424,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
        to a slide the user has already left. */
     unbindTargetAdvance();
     advState = 'off';
+    resetOrb();
     runHook(STEPS[tourIndex].onEnter, 'onEnter');
+    /* Every step starts in Phase A.  Coming out of hands-on mode the card
+       was taken off screen, so the next step's card has to be put back —
+       otherwise the pill would move the user on to a step nothing
+       explains. */
+    var card = byId('tmTourCard');
+    if (card) card.classList.add('on');
     renderTourCard();
     armTargetAdvance(true);
     schedulePlace();
@@ -15552,6 +17454,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     if (card) card.classList.add('on');
     unbindTargetAdvance();
     advState = 'off';
+    resetOrb();
     runHook(STEPS[0].onEnter, 'onEnter');
     renderTourCard();
     armTargetAdvance(true);
@@ -15565,6 +17468,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
     tourOpen = false;
     unbindTargetAdvance();
     advState = 'off';
+    resetOrb();
     if (placeTimer) {{ window.clearTimeout(placeTimer); placeTimer = null; }}
     restoreUi(uiBefore);
     uiBefore = null;
@@ -15582,21 +17486,33 @@ mountReflowTimers.push(window.setTimeout(() => {{
   }}
 
   /* Registered at parse time, so this runs before the workspace keyboard
-     router (which binds on `load`): Escape and the arrow keys therefore
-     belong to the tour whenever it is open, and the router never sees
-     them.  stopImmediatePropagation keeps the two from double-acting. */
+     router (which binds on `load`): that is what lets the tour keep the
+     arrows to itself while it is open.  Escape is different, though — the
+     workspace owns an Escape priority stack, and while a menu, modal or
+     the source drawer is open the TOPMOST layer is that layer, not the
+     guide.  So Escape is handed back (`return` with no preventDefault)
+     whenever a workspace layer is up, and only acts on the tour once
+     nothing is covering it. */
   window.addEventListener('keydown', function (e) {{
     if (!tourOpen) return;
     var key = String(e.key || '');
     if (key === 'Escape' || key === 'Esc') {{
+      if (workspaceLayerOpen()) return;
       e.preventDefault();
       e.stopImmediatePropagation();
+      /* First Escape folds the card into the pill (the user is working,
+         not leaving); a second one, from the pill, ends the guide. */
+      if (!orbMode) {{ enterOrbMode(); return; }}
       endTour('escape');
       return;
     }}
     var el = document.activeElement;
     var tag = el ? String(el.tagName || '').toUpperCase() : '';
     if (el && (el.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT')) return;
+    /* Hands-on mode hands the workspace over completely: the arrows belong
+       to the slider or the carousel the user is working, never to a step
+       they cannot see.  Only the pill leaves a step from here. */
+    if (orbMode) return;
     if (key === 'ArrowRight') {{
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -15629,6 +17545,44 @@ mountReflowTimers.push(window.setTimeout(() => {{
     select: function () {{ return selectCurriculum(); }},
     /* What the card is telling the user about the spotlighted control. */
     cue: function () {{ return advState; }},
+    /* Phase A, for the headless test: placement waits on a frame, so this
+       says which step the ring on screen was measured for, and whether it
+       is a cut-out ring (`dim` is false) or the whole viewport dimmed. */
+    place: function () {{
+      var spot = byId('tmTourSpotlight');
+      return {{
+        index: placedIndex,
+        on: !!(spot && spot.classList.contains('on')),
+        dim: !!(spot && spot.classList.contains('dim'))
+      }};
+    }},
+    /* Phase B, for the headless test: whether the floating orb has taken
+       over, whether the step's own work looks done (the green badge), and
+       what the pill is currently saying. */
+    orb: function () {{
+      var node = orbNode();
+      var card = byId('tmTourCard');
+      var spot = byId('tmTourSpotlight');
+      var text = byId('tmTourOrbText');
+      return {{
+        on: !!orbMode,
+        ready: !!(node && node.classList.contains('ready')),
+        live: orbState(),
+        text: text ? String(text.textContent || '') : '',
+        goText: (function () {{ var g = byId('tmTourOrbGo'); return g ? String(g.textContent || '') : ''; }})(),
+        visible: !!isVisibleNode(node),
+        cardOn: !!(card && card.classList.contains('on')),
+        spotOn: !!(spot && spot.classList.contains('on'))
+      }};
+    }},
+    /* Same intent as the wide button on the card. */
+    handsOn: function () {{ enterOrbMode(); }},
+    /* Click the pill, exactly as a user would. */
+    clickOrb: function () {{ var n = orbNode(); if (n) n.click(); }},
+    /* `?` on the pill: bring the instruction card back for the same step. */
+    askOrb: function () {{ var n = byId('tmTourOrbHelp'); if (n) n.click(); }},
+    stages: function () {{ return (STEPS[0] && STEPS[0].stages) ? STEPS[0].stages.length : 0; }},
+    overview: function () {{ return !!(STEPS[0] && STEPS[0].overview); }},
     /* The directional marks, for the headless test: whether the arrow is
        aimed at the ring and whether the click beacon is on it. */
     marks: function () {{
@@ -15641,12 +17595,21 @@ mountReflowTimers.push(window.setTimeout(() => {{
         angle: arrow ? String(arrow.style.transform || '') : ''
       }};
     }},
-    seen: function () {{ try {{ return window.localStorage.getItem(SEEN_KEY) === '1'; }} catch (err) {{ return false; }} }}
+    seen: function () {{ try {{ return window.localStorage.getItem(SEEN_KEY) === '1'; }} catch (err) {{ return false; }} }},
+    /* Called by the workspace at the end of `render()`.  That function
+       rebuilds the class column (`#classes.innerHTML = ''`), so the node
+       the ring was measured against and the node the click binding sat on
+       are both gone; re-seating and re-arming here is what keeps the guide
+       pointing at something that exists. */
+    sync: function () {{ if (tourOpen && !orbMode) schedulePlace(); }}
   }};
 
   function bootTour() {{
     var btn = byId('navTutorial');
     if (btn) btn.onclick = function () {{ startTour(true); }};
+    /* The pill is bound once for the page's lifetime: it comes and goes by
+       class, so re-binding it on every step would only stack listeners. */
+    bindOrb();
     /* Pick the curriculum before touching the seen flag: each project
        type keeps its own, so the answer here depends on which guide
        this workspace would show. */
@@ -16070,7 +18033,7 @@ def _render_ocr_project_page() -> None:
 
 
 def _render_sign_ocr_project_page() -> None:
-    """Road Signal (3-character) workspace.
+    """Car License (3-character) workspace.
 
     The third glyph project, and structurally the second one: the same 28x28
     character front-end, the same per-character class cards, the same
@@ -16084,12 +18047,13 @@ def _render_sign_ocr_project_page() -> None:
     st.markdown(
         '''
         <div class="tm-start-panel" style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;">
-            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🛑🏷️ Road Sign Project (3-Char)</h1>
+            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🚗 Car License Project</h1>
             <p class="tm-start-panel-sub" style="margin:0;max-width:860px;line-height:1.6;color:#475569;font-size:15px;">
-                A sign is one frame holding three characters in a fixed reading order.
-                Set the target sequence, train one class per CHARACTER — a repeated
-                character is one class, not two — then point a camera at a sign and the
-                preview splits it into three slots and answers 🟢 YES or 🔴 NO.
+                A license plate is one frame holding three characters in a fixed
+                reading order. Set the target sequence, train one class per CHARACTER
+                — a repeated character is one class, not two — then point a camera at
+                the plate and the preview splits it into three slots and answers
+                🟢 YES or 🔴 NO.
             </p>
         </div>
         ''',
@@ -16749,10 +18713,79 @@ def _render_tm_preview_export_panel() -> None:
         st.success(f"Exported to: {export_dir}")
 
 
+def _tm_eula_flag_path() -> Path:
+    """Persistent first-launch acceptance flag (app-data, not the repo)."""
+    try:
+        from dataset_io import app_data_dir
+
+        return Path(app_data_dir()) / "eula_accepted.flag"
+    except Exception:
+        return Path(tempfile.gettempdir()) / "TFLiteTraining_eula_accepted.flag"
+
+
+def _tm_eula_accepted() -> bool:
+    if bool(st.session_state.get("tm_eula_accepted")):
+        return True
+    try:
+        if _tm_eula_flag_path().exists():
+            st.session_state.tm_eula_accepted = True
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _render_eula_gate() -> None:
+    """First-launch license gate: the EULA must be accepted before the app
+    runs.  Acceptance is persisted so it is asked exactly once per machine."""
+    inject_teachable_style()
+    st.markdown("## End User License Agreement")
+    st.markdown(
+        "Please read the license agreement below. You must accept it to use this software."
+    )
+    try:
+        _eula_path = os.path.join(os.path.dirname(__file__) or ".", "EULA.md")
+        if os.path.exists(_eula_path):
+            with open(_eula_path, encoding="utf-8") as _efh:
+                st.markdown(_efh.read())
+        else:
+            st.warning("EULA.md not found in this build.")
+    except Exception:
+        pass
+    _col_ok, _col_no = st.columns(2)
+    with _col_ok:
+        if st.button("I Agree", key="tm_eula_agree", type="primary", use_container_width=True):
+            try:
+                _tm_eula_flag_path().parent.mkdir(parents=True, exist_ok=True)
+                _tm_eula_flag_path().write_text("1", encoding="utf-8")
+            except Exception:
+                pass
+            st.session_state.tm_eula_accepted = True
+            st.rerun()
+    with _col_no:
+        if st.button("I Disagree", key="tm_eula_disagree", type="secondary", use_container_width=True):
+            st.session_state.tm_eula_declined = True
+            st.rerun()
+
+
 def main() -> None:
     _persist_session_id()
     st.set_page_config(page_title="TF Lite Training", layout="wide", page_icon="AIoScouts.png")
     _init_session()
+
+    # ── First-launch license gate ────────────────────────────────────────
+    # The EULA is part of the commercial distribution contract: without a
+    # recorded acceptance the app must not run (and must not let a user
+    # drift into the workspace through a stale URL either).
+    if st.session_state.get("tm_eula_declined"):
+        st.warning(
+            "You declined the license agreement, so the application cannot "
+            "run. Restart the application to review the agreement again."
+        )
+        st.stop()
+    if not _tm_eula_accepted():
+        _render_eula_gate()
+        st.stop()
 
     if st.session_state.project_type is None:
         _render_new_project()

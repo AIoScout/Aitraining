@@ -44,6 +44,17 @@ GLYPH_SIZE = 28  # model input side (both axes)
 _GLYPH_CANON_FIT = 20
 _GLYPH_CANON_OFFSET = (GLYPH_SIZE - _GLYPH_CANON_FIT) // 2  # 4
 
+# A camera-segmented '1' is often a 1-2 px vertical stroke.  Scaled to the
+# 28x28 canvas under NORM_CANON (longer side -> 20 px) it stays 1-2 px,
+# while the EMNIST '1' samples the model trains on are 3-4 px wide.  That
+# distribution gap made a clean stroke read as `_background`.  Glyphs whose
+# ink bbox is narrower than 35 % of its height get their source stroke
+# widened (polarity-aware horizontal min/max) to at least
+# _GLYPH_TARGET_STROKE output pixels before the nearest-neighbour resize.
+_GLYPH_NARROW_ASPECT_PCT = 35
+_GLYPH_TARGET_STROKE = 3
+_GLYPH_MAX_STROKE_RADIUS = 4
+
 # ── Ink polarity ────────────────────────────────────────────────────────
 # Otsu splits the histogram into a low class [0 .. t] and a high class
 # [t+1 .. 255].  Polarity says WHICH of those two classes is the character.
@@ -435,6 +446,59 @@ def normalize_sign_sequence(value: Any, length: int = SIGN_SEQUENCE_LEN) -> List
     return chars
 
 
+def normalize_sign_sequences(
+    value: Any, length: int = SIGN_SEQUENCE_LEN
+) -> List[str]:
+    """Coerce a whitelist of allowed plates into unique, complete sequences.
+
+    Accepts:
+      * one sequence as a string ("A12") or a list of characters
+        (["A", "1", "2"]) — the legacy single-target form;
+      * a list of sequences (["A12", "B18"], [["A","1","2"], ...]).
+
+    Every plate is uppercased, padded/truncated by normalize_sign_sequence,
+    and kept only when all `length` characters are real 0-9/A-Z (a plate with
+    a '?' pad is incomplete and is not a valid target).  Duplicates are
+    removed in first-appearance order.  Returns [] for no usable plate; the
+    caller decides whether that is an error.
+    """
+    try:
+        n = max(1, int(length))
+    except Exception:
+        n = SIGN_SEQUENCE_LEN
+    items: List[Any]
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        # A bare character list is the legacy single sequence, not a list of
+        # one-character plates.
+        if len(value) == n and all(
+            not isinstance(v, (list, tuple)) and len(str(v).strip()) <= 1
+            for v in value
+        ):
+            items = [value]
+        else:
+            items = list(value)
+    else:
+        return []
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        if item is None or item == "":
+            continue
+        if not isinstance(item, (str, list, tuple)):
+            continue
+        seq = normalize_sign_sequence(item, length=n)
+        if len(seq) != n or any(c == SIGN_SEQUENCE_PAD for c in seq):
+            continue
+        text = "".join(seq)
+        if text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
+
+
 def _union_box(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
     """Exclusive-ended bbox covering both inputs."""
     return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
@@ -661,8 +725,121 @@ def _scale_to_fit(crop: np.ndarray, target: int) -> np.ndarray:
     return nn_resize_u8(crop, nw, nh)
 
 
+def _canon_fit(out_size: int) -> int:
+    """NORM_CANON's long-side target for this canvas (20 at 28x28)."""
+    return _GLYPH_CANON_FIT if out_size == GLYPH_SIZE else max(
+        1, (out_size * _GLYPH_CANON_FIT) // GLYPH_SIZE
+    )
+
+
+def _narrow_stroke_radius(
+    ink: np.ndarray,
+    crop_w: int,
+    crop_h: int,
+    out_size: int,
+    convention: str,
+) -> int:
+    """Horizontal dilation radius for a thin single-stroke glyph, else 0.
+
+    A segmented camera '1' is frequently a 1-2 px bar.  Its ink bbox is
+    therefore much narrower than it is tall (w/h < 0.35), whereas the
+    EMNIST '1' samples used for training are 3-4 px strokes.  After
+    NORM_CANON shrinks the long side to 20 px, that camera stroke can end
+    up 1 px wide — visually a hairline, and the model's `_background`
+    class (built from noisy residuals) is a plausible reading for it.
+
+    This measures the stroke BEFORE the resize and returns the radius of
+    a horizontal min/max filter applied to the SOURCE crop, before the
+    long-side fit.  Widening after the resize would be too late: nearest-
+    neighbour downsampling can skip a 1 px source column entirely (a
+    20/35 scale samples source columns 0, 2, 4, 6, 8, 10, ...), so a
+    hairline can disappear instead of merely staying thin.  The target
+    source width is the width that leaves _GLYPH_TARGET_STROKE pixels
+    after the fit: `ceil(3 * long_side / fit)`.  The estimate is
+    `total_ink / ink_height` — exact for a vertical bar and still the
+    stroke width for a '1' with a small base.  NORM_STRETCH is excluded:
+    it stretches the crop to both axes, so a narrow glyph is already a
+    wide block and needs no help (and its aspect distortion is the
+    convention's defining behaviour).
+
+    Returns 0 for wide glyphs and for strokes already wide enough.
+    Integer arithmetic only; the C mirror (sign_glyph.c) computes the
+    same value.
+    """
+    if convention != NORM_CANON:
+        return 0
+    arr = np.asarray(ink, dtype=bool)
+    if arr.ndim != 2 or arr.size == 0:
+        return 0
+    cols = np.flatnonzero(arr.any(axis=0))
+    rows = np.flatnonzero(arr.any(axis=1))
+    if cols.size == 0 or rows.size == 0:
+        return 0
+    bw = int(cols[-1] - cols[0] + 1)
+    bh = int(rows[-1] - rows[0] + 1)
+    if bw <= 0 or bh <= 0:
+        return 0
+    if bw * 100 > _GLYPH_NARROW_ASPECT_PCT * bh:
+        return 0
+    total = int(arr[int(rows[0]):int(rows[-1]) + 1,
+                    int(cols[0]):int(cols[-1]) + 1].sum())
+    if total <= 0:
+        return 0
+    # Round-half-up mean ink pixels per ink row = stroke width (integer).
+    stroke = max(1, (2 * total + bh) // (2 * bh))
+    long_side = max(int(crop_w), int(crop_h))
+    if long_side <= 0:
+        return 0
+    fit = _canon_fit(int(out_size))
+    # Source width that leaves at least 3 px after the long-side fit.
+    target_src = (_GLYPH_TARGET_STROKE * long_side + fit - 1) // fit
+    if stroke >= target_src:
+        return 0
+    return min(
+        _GLYPH_MAX_STROKE_RADIUS,
+        (target_src - stroke + 1) // 2,
+    )
+
+
+def _thicken_narrow_stroke(
+    crop: np.ndarray, radius: int, polarity: int
+) -> np.ndarray:
+    """Widen a glyph's stroke horizontally by `radius` pixels each side.
+
+    A 1-D min filter (INK_DARK: dark ink grows into the bright plate) or
+    max filter (INK_BRIGHT: bright ink grows into the dark page).  The
+    columns added on either side are filled with the plate tone (255 for
+    dark ink, 0 for bright ink) so the filter has background to grow into;
+    without them a tight crop would clip the expansion at its own edge.
+    Only the horizontal axis is filtered — the glyph's height (and the
+    CANON centre-of-mass shift) must stay unchanged.
+
+    Integer comparisons only; sign_glyph.c mirrors this loop exactly.
+    """
+    r = int(radius)
+    if r <= 0 or crop.size == 0:
+        return crop
+    arr = np.asarray(crop, dtype=np.uint8)
+    h, w = arr.shape
+    fill = 255 if int(polarity) != INK_BRIGHT else 0
+    padded = np.full((h, w + 2 * r), fill, dtype=np.uint8)
+    padded[:, r:r + w] = arr
+    out = np.empty_like(padded)
+    for x in range(padded.shape[1]):
+        lo = max(0, x - r)
+        hi = min(padded.shape[1], x + r + 1)
+        window = padded[:, lo:hi]
+        if int(polarity) == INK_BRIGHT:
+            out[:, x] = window.max(axis=1)
+        else:
+            out[:, x] = window.min(axis=1)
+    return out
+
+
 def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
-                    convention: str = NORM_STRETCH) -> np.ndarray:
+                    convention: str = NORM_STRETCH, *,
+                    narrow_radius: int = 0,
+                    polarity: int = INK_DARK) -> np.ndarray:
     """Fit an ink crop into an out_size x out_size canvas.
 
     NORM_STRETCH — bbox stretched onto the full grid (one factor per axis).
@@ -678,6 +855,15 @@ def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
         integer translation.  This is the ONLY convention that can be
         applied to EMNIST samples as they ship, and it is what makes the
         EMNIST-mixing strategy work at all.
+
+    narrow_radius / polarity — before the CANON resize, thicken the
+        source crop with `_thicken_narrow_stroke`, so a hairline camera
+        '1' reaches the 3-4 px stroke width of its EMNIST counterparts
+        (and cannot be skipped by the nearest-neighbour downscale).
+        `preprocess_glyph` computes the radius from the ink mask (see
+        `_narrow_stroke_radius`); callers that paste a mask for display
+        pass the default 0 and are unchanged.  Ignored under NORM_STRETCH,
+        where the anisotropic scale already widens a narrow glyph.
     """
     arr = np.asarray(crop)
     if arr.size == 0:
@@ -688,7 +874,12 @@ def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
     if convention != NORM_CANON:
         raise ValueError(f"unknown glyph convention: {convention!r}")
 
-    fit = _GLYPH_CANON_FIT if out_size == GLYPH_SIZE else max(1, (out_size * _GLYPH_CANON_FIT) // GLYPH_SIZE)
+    fit = _canon_fit(out_size)
+    # Widen BEFORE the resize.  Nearest-neighbour downsampling samples
+    # every ~long_side/fit-th source column, so a 1 px stroke can be
+    # skipped entirely; a 3-4 px source stroke always survives.
+    if int(narrow_radius) > 0:
+        arr = _thicken_narrow_stroke(arr, int(narrow_radius), int(polarity))
     scaled = _scale_to_fit(arr, fit)
     canvas = _paste_centred(scaled, out_size)
 
@@ -718,10 +909,78 @@ def normalise_glyph(crop: np.ndarray, out_size: int = GLYPH_SIZE,
 
 
 def _round_half_up(num: int, den: int) -> int:
-    """Integer round-half-up division for positive and negative `num`."""
-    if num >= 0:
-        return (2 * num + den) // (2 * den)
-    return -((-2 * num + den) // (2 * den))
+    """Integer round-half-up division on the real line: floor(num/den + 0.5).
+
+    Python's floor division makes the one expression correct for negative
+    numerators too.  The old negative branch rounded half AWAY FROM ZERO; at
+    exactly -0.5 that shifted a symmetrically pasted glyph one pixel LEFT,
+    leaving a narrow '1' at x=11..13 instead of 12..14.  sign_glyph.c and
+    ocr_glyph.c mirror this exact expression.
+    """
+    return (2 * num + den) // (2 * den)
+
+
+def strip_border_specks(ink: np.ndarray) -> np.ndarray:
+    """Drop small disconnected specks touching the crop boundary.
+
+    A Manual ROI drawn around one glyph can clip a neighbouring character's
+    foot into a corner.  If that speck survives, it stretches the ink bbox
+    and shifts the real stroke: a centred '1' ends up at the right edge of
+    the 28x28 canvas, where it reads as 'A'.
+
+    Keep the dominant component and any other component that is
+      * large (more than 20 % of the dominant area), or
+      * not touching the crop boundary, or
+      * overlapping the dominant bbox in BOTH axes
+        (a detached fragment of a broken '1' shares the stem's columns).
+    Everything else — the border-corner stray bar — is removed.
+
+    Mirrored bit-for-bit by `strip_border_specks_c()` in sign_glyph.c.
+    """
+    arr = np.asarray(ink, dtype=bool)
+    if arr.ndim != 2 or arr.size == 0 or not bool(arr.any()):
+        return arr
+    cv2 = _cv2_module()
+    if cv2 is None:
+        return arr
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    try:
+        n, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            arr.astype(np.uint8), 8
+        )
+    except Exception:
+        return arr
+    if n <= 2:
+        return arr  # background + at most one component
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    dominant = 1 + int(np.argmax(areas))
+    dx = int(stats[dominant, cv2.CC_STAT_LEFT])
+    dy = int(stats[dominant, cv2.CC_STAT_TOP])
+    dw = int(stats[dominant, cv2.CC_STAT_WIDTH])
+    dh = int(stats[dominant, cv2.CC_STAT_HEIGHT])
+    da = int(areas[dominant - 1])
+    keep = labels == dominant
+    for i in range(1, n):
+        if i == dominant:
+            continue
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        cw = int(stats[i, cv2.CC_STAT_WIDTH])
+        ch = int(stats[i, cv2.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area * 100 > 20 * da:
+            keep |= labels == i
+            continue
+        touches = (x == 0 or y == 0 or x + cw == w or y + ch == h)
+        if not touches:
+            keep |= labels == i
+            continue
+        x_overlap = not (x + cw <= dx or x >= dx + dw)
+        y_overlap = not (y + ch <= dy or y >= dy + dh)
+        if x_overlap and y_overlap:
+            keep |= labels == i
+        # else: border-corner speck, disconnected from the glyph columns
+    return keep
 
 
 def preprocess_glyph(
@@ -733,6 +992,7 @@ def preprocess_glyph(
     thresh: Optional[int] = None,
     convention: str = NORM_STRETCH,
     dark_thr: int = 0,
+    strip_specks: bool = False,
 ) -> Dict[str, Any]:
     """Full glyph transform.  Returns a dict (never raises on bad input).
 
@@ -799,6 +1059,18 @@ def preprocess_glyph(
         # stays bit-identical to that port.
         if dark_thr > 0:
             ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+        if strip_specks:
+            # A Manual ROI can clip a neighbouring glyph's foot into a
+            # corner; keeping it stretches the bbox and shifts the real
+            # stroke (the '1' -> 'A' failure).  Remove the speck from the
+            # mask AND whiten it in the grayscale crop so it cannot bias
+            # the intensity centring either.
+            before = ink
+            ink = strip_border_specks(ink)
+            removed = before & ~ink
+            if bool(removed.any()):
+                gray = gray.copy()
+                gray[removed] = np.uint8(255 if polarity == INK_DARK else 0)
         out["ink"] = ink
 
         if not bool(ink.any()):
@@ -829,7 +1101,22 @@ def preprocess_glyph(
             out["glyph"] = np.zeros((out_size, out_size), dtype=np.uint8)
             return out
 
-        glyph = normalise_glyph(np.ascontiguousarray(crop), out_size=out_size, convention=convention)
+        # A narrow single-stroke glyph ('1') keeps its 1-2 px stroke through
+        # NORM_CANON while the EMNIST '1' samples are 3-4 px.  Measure the
+        # ink inside THIS crop and pass a horizontal dilation radius so the
+        # model sees the stroke width it was trained on.
+        ink_crop = ink[y1:y2, x1:x2]
+        narrow_radius = _narrow_stroke_radius(
+            ink_crop, int(x2) - int(x1), int(y2) - int(y1),
+            int(out_size), convention,
+        )
+        glyph = normalise_glyph(
+            np.ascontiguousarray(crop),
+            out_size=out_size,
+            convention=convention,
+            narrow_radius=narrow_radius,
+            polarity=polarity,
+        )
         out["glyph"] = glyph
         out["ok"] = True
         out["empty"] = False
@@ -861,12 +1148,774 @@ def preprocess_glyph_capture(src: np.ndarray, out_size: int = GLYPH_SIZE,
     return preprocess_glyph(
         src, out_size=out_size, polarity=polarity,
         apply_segmentation=True, convention=convention,
+        strip_specks=True,
     )
 
 
 # ════════════════════════════════════════════════════════════════════════
 # 7. Sign sequences — the multi-glyph front-end
 # ════════════════════════════════════════════════════════════════════════
+def _manual_roi_pixels(roi: Any, h: int, w: int) -> Optional[Tuple[int, int, int, int]]:
+    """Normalize the editor's 0..1 ROI (or an explicit pixel box)."""
+    try:
+        vals = [float(v) for v in roi]
+    except Exception:
+        return None
+    if len(vals) != 4:
+        return None
+    if all(0.0 <= v <= 1.0 for v in vals):
+        x1, y1, x2, y2 = (
+            int(round(vals[0] * w)),
+            int(round(vals[1] * h)),
+            int(round(vals[2] * w)),
+            int(round(vals[3] * h)),
+        )
+    else:
+        x1, y1, x2, y2 = [int(round(v)) for v in vals]
+    x1 = max(0, min(w - 1, x1))
+    y1 = max(0, min(h - 1, y1))
+    x2 = max(x1 + 1, min(w, x2))
+    y2 = max(y1 + 1, min(h, y2))
+    return (x1, y1, x2, y2)
+
+
+def _cv2_module():
+    """OpenCV is used only for the host-side sign-board locator.
+
+    The integer glyph/split path does not depend on it; importing lazily keeps
+    the parity tests and the device mirror free of an OpenCV dependency.
+    """
+    try:
+        import cv2  # type: ignore
+        return cv2
+    except Exception:
+        return None
+
+
+def _ink_cluster_roi(
+    gray: np.ndarray,
+    dark_thr: int,
+    lum_thr: int,
+) -> Optional[Dict[str, Any]]:
+    """Find the three interior character blobs at the user's Dark/Lum window.
+
+    This is the hardware path: the user tunes Dark/Lum until the sign's ink
+    stands alone, then the frame still contains fingers, the plastic frame,
+    and background clutter.  We take the threshold window they chose, drop
+    components touching the outer frame / too large to be a glyph / too
+    small to be ink, and look for a horizontal row of three similarly sized
+    interior blobs.  The union of that row is the ROI; the 3-way split then
+    runs only inside it.
+    """
+    cv2 = _cv2_module()
+    if cv2 is None:
+        return None
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    dark = max(0, min(255, int(dark_thr)))
+    lum = max(0, min(255, int(lum_thr)))
+    if lum < dark:
+        dark, lum = lum, dark
+    ink = ((gray >= dark) & (gray <= lum)).astype(np.uint8)
+    try:
+        n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(ink, 8)
+    except Exception:
+        return None
+    # Strip the plastic frame / holder border and frame-thickness corner
+    # debris, but NOT a character that merely sits close to the frame edge:
+    # the old unconditional 6 % margin drop removed 'A' in tight plate
+    # captures and left the trio without its first character.  See
+    # _is_outer_frame_debris for the exact (C-mirrored) rule.
+    margin = max(2, int(round(min(h, w) * 0.06)))
+    # A thin '1' can be only ~35-60 px in a 160 frame; the old 0.15 %
+    # floor (38 px) dropped it and left only two candidates.  Keep the
+    # floor low enough for a real stroke, high enough for specks.
+    min_area = max(6, int(round(h * w * 0.0004)))
+    min_height = max(3, int(round(h * 0.10)))
+    candidates: List[Dict[str, float]] = []
+    for i in range(1, n):
+        x, y, cw, ch, area = (int(v) for v in stats[i])
+        if area < min_area or cw < 2 or ch < min_height:
+            continue
+        if _is_outer_frame_debris(x, y, cw, ch, w, h, margin):
+            continue
+        if cw > 0.60 * w or ch > 0.60 * h:
+            continue
+        if area > 0.40 * w * h:
+            continue
+        # Narrow does NOT mean noise: a vertical '1' stroke is legitimately
+        # 2-4 px wide, while the old 0.15 floor discarded exactly that
+        # component and left the trio without its middle character.
+        aspect = float(cw) / float(max(1, ch))
+        if aspect < 0.03 or aspect > 6.0:
+            continue
+        fill = float(area) / float(max(1, cw * ch))
+        if fill < 0.08:
+            continue
+        candidates.append({
+            "x": x, "y": y, "w": cw, "h": ch, "area": area,
+            "cx": x + cw / 2.0, "cy": y + ch / 2.0,
+        })
+    if not candidates:
+        return None
+    # Keep the most substantial blobs; clutter tends to be small.  16 gives
+    # a hairline '1' room even when several noise blobs outrank it by area.
+    candidates.sort(key=lambda c: -c["area"])
+    candidates = candidates[:16]
+    candidates.sort(key=lambda c: c["cx"])
+
+    best = None
+    for i in range(len(candidates) - 2):
+        for j in range(i + 1, len(candidates) - 1):
+            for k in range(j + 1, len(candidates)):
+                trio = (candidates[i], candidates[j], candidates[k])
+                gaps = [
+                    trio[1]["x"] - (trio[0]["x"] + trio[0]["w"]),
+                    trio[2]["x"] - (trio[1]["x"] + trio[1]["w"]),
+                ]
+                if min(gaps) < 0:
+                    continue
+                heights = sorted(c["h"] for c in trio)
+                med_h = heights[1]
+                if max(c["cy"] for c in trio) - min(c["cy"] for c in trio) > max(7, 0.55 * med_h):
+                    continue
+                if heights[2] > 2.2 * max(1, heights[0]):
+                    continue
+                # Do NOT compare widths: the middle character of "A12" is a
+                # legitimately narrow stroke.  Width is only bounded against
+                # the row height (a huge blob is not a character) and gaps
+                # are measured against the height, which all three share.
+                widths = [c["w"] for c in trio]
+                if max(widths) > 3.0 * max(1, med_h):
+                    continue
+                if max(gaps) > 2.0 * max(1, med_h):
+                    continue
+                x1 = min(c["x"] for c in trio)
+                y1 = min(c["y"] for c in trio)
+                x2 = max(c["x"] + c["w"] for c in trio)
+                y2 = max(c["y"] + c["h"] for c in trio)
+                if (x2 - x1) < 0.22 * w or (y2 - y1) < 0.12 * h:
+                    continue
+                if (x2 - x1) > 0.92 * w:
+                    continue
+                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                dist = float(np.hypot(cx - w / 2.0, cy - h / 2.0))
+                center = max(0.0, 1.0 - 0.5 * dist / max(1.0, 0.5 * np.hypot(w, h)))
+                score = float(sum(c["area"] for c in trio)) * center
+                if best is None or score > best["score"]:
+                    best = {
+                        "score": score,
+                        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+                        "med_h": float(med_h),
+                    }
+    if best is None:
+        return None
+    # Use ONLY the three selected character blobs.  The old extra sweep over
+    # "anything in the same band" pulled in bottom-left clutter and made the
+    # box lopsided.  Then apply one uniform pad (10 % of the cluster's longer
+    # side, equal on all four edges) so the box is symmetric and leaves a
+    # little board margin around the glyphs without clipping '2' on the right.
+    x1, y1, x2, y2 = best["x1"], best["y1"], best["x2"], best["y2"]
+    cw = max(1, int(x2) - int(x1))
+    ch = max(1, int(y2) - int(y1))
+    pad = max(3, int(round(0.10 * max(cw, ch))))
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(w, x2 + pad)
+    y2 = min(h, y2 + pad)
+    return {
+        "box": [int(x1), int(y1), int(x2), int(y2)],
+        "method": "ink_cluster",
+        "score": float(best["score"]),
+        "threshold": int(lum),
+        "area_frac": float((x2 - x1) * (y2 - y1)) / float(max(1, h * w)),
+    }
+
+
+# ── Interior ink ROI (sign search, mirrored by sign_glyph.c) ────────────
+# The device cannot run OpenCV or the full three-blob heuristic.  This is a
+# deterministic component search both sides can reproduce: 8-connected
+# components, a 6 % outer margin and huge-frame filters, then the horizontal
+# band with the most components (the row of characters).  The union of that
+# band plus one uniform 10 % pad is the ROI.  `preprocess_sign_sequence(...,
+# find_roi=True)` and `TFLite_Sign/sign_glyph.c` use it before the split.
+_INTERIOR_MARGIN_PCT = 6
+_INTERIOR_MAX_COMPONENTS = 256
+
+
+def _is_outer_frame_debris(x: int, y: int, cw: int, ch: int,
+                           w: int, h: int, margin: int) -> bool:
+    """True only for frame-scale / outer-surround components.
+
+    A character may legitimately sit within a few pixels of the frame edge
+    (a tight plate capture), so the old unconditional outer-margin drop is
+    gone: it erased `'A'` while leaving the plate.  What is still removed is
+    the plastic frame / holder border — a line that is thin in one axis and
+    spans most of the frame — plus corner debris that is thin in BOTH axes
+    and touches the outer margin.  A thin `'1'` stroke (tall but less than
+    70 % of the frame) and a detached bottom fragment (wide enough in one
+    axis) both survive.
+
+    Mirrored bit-for-bit by `is_outer_frame_debris()` in sign_glyph.c.
+    """
+    if w <= 0 or h <= 0:
+        return False
+    thin_w = max(4, (w * 6 + 50) // 100)
+    thin_h = max(4, (h * 6 + 50) // 100)
+    # Frame lines: thin in one axis, spanning >= 70 % of the other.
+    if ch <= thin_h and cw * 100 >= 70 * w:
+        return True
+    if cw <= thin_w and ch * 100 >= 70 * h:
+        return True
+    touches_outer = (
+        x <= margin or y <= margin
+        or x + cw >= w - margin or y + ch >= h - margin
+    )
+    # Corner / frame-thickness debris at the outer edge.
+    if touches_outer and cw <= thin_w and ch <= thin_h:
+        return True
+    return False
+
+
+_PINNED_MIN_INTERIOR_INK = 6
+_PLATE_BRIGHT_MIN = 128
+
+
+def _interior_ink_count(ink: np.ndarray) -> int:
+    """Ink pixels inside the interior search region (the frame inset by the
+    shared interior margin).  Mirrored in sign_glyph.c (pinned_ink_fallback)."""
+    h, w = int(ink.shape[0]), int(ink.shape[1])
+    if h <= 0 or w <= 0:
+        return 0
+    margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
+    if h <= 2 * margin or w <= 2 * margin:
+        return int(ink.sum())
+    return int(ink[margin:h - margin, margin:w - margin].sum())
+
+
+def _pinned_ink_with_otsu_fallback(
+    gray: np.ndarray, t: int, polarity: int, dark_thr: int
+) -> Tuple[int, np.ndarray]:
+    """Binarise with a pinned threshold; fall back to interior Otsu.
+
+    The 160->96 box-average dilutes a 3 px camera stroke into the
+    110..145 range.  A pinned luminance window (Lum 50..105) then leaves
+    near-zero ink, so the ROI search would find nothing on a frame that
+    visibly holds a sign.  When the pinned binarisation keeps fewer than
+    _PINNED_MIN_INTERIOR_INK ink pixels inside the interior region, re-cut
+    with Otsu computed ON that interior region and drop the dark floor —
+    the diluted stroke must count as ink again.
+
+    Mirrored bit-for-bit in sign_glyph.c (pinned_ink_fallback).
+    """
+    ink = binarize_ink(gray, t, polarity=polarity)
+    if dark_thr > 0:
+        ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+    if _interior_ink_count(ink) >= _PINNED_MIN_INTERIOR_INK:
+        return t, ink
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
+    if h > 2 * margin and w > 2 * margin:
+        interior = gray[margin:h - margin, margin:w - margin]
+        t2 = int(otsu_threshold_u8(interior))
+        if t2 != 0:
+            return t2, binarize_ink(gray, t2, polarity=polarity)
+    return t, ink
+
+
+def _bright_margin(
+    gray: np.ndarray, x: int, y: int, cw: int, ch: int, margin: int, polarity: int
+) -> bool:
+    """True when the component bbox's surrounding ring is mostly plate.
+
+    A character sits on the white sign plate; room clutter sits on the
+    dark surround.  The dilation ring of the bbox (the shared interior
+    margin, clamped to the frame, minus the bbox itself) must be majority
+    plate: bright (>= _PLATE_BRIGHT_MIN) for dark ink, dark
+    (< _PLATE_BRIGHT_MIN) for bright ink.  Mirrored in sign_glyph.c
+    (bright_margin).
+    """
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    x1 = max(0, x - margin)
+    y1 = max(0, y - margin)
+    x2 = min(w, x + cw + margin)
+    y2 = min(h, y + ch + margin)
+    if x2 <= x1 or y2 <= y1:
+        return False
+    ring = gray[y1:y2, x1:x2]
+    interior = np.zeros(ring.shape, dtype=bool)
+    interior[y - y1:y - y1 + ch, x - x1:x - x1 + cw] = True
+    outside = ~interior
+    total = int(outside.sum())
+    if total <= 0:
+        return False
+    if polarity == INK_DARK:
+        plate = int(((ring >= _PLATE_BRIGHT_MIN) & outside).sum())
+    else:
+        plate = int(((ring < _PLATE_BRIGHT_MIN) & outside).sum())
+    return 2 * plate >= total
+
+
+def _interior_ink_components(
+    ink: np.ndarray, gray: np.ndarray, polarity: int = INK_DARK
+) -> List[Dict[str, int]]:
+    """Character-candidate ink components, in raster-scan label order.
+
+    The clutter filter (RC2): a component is a character candidate only if
+    it is not a 1-2 px noise speck, does not touch the outer frame border,
+    is not a huge background blob (wider than 45 % or taller than 75 % of
+    the frame), is between 6 % and 65 % of the frame height, and sits in a
+    majority-plate neighbourhood (the bright sign board for dark ink, the
+    dark surround for bright ink).  The dark room clutter that used to
+    drag the ROI out to 0..96 fails these and is discarded on BOTH sides.
+    """
+    cv2 = _cv2_module()
+    arr = np.asarray(ink, dtype=bool)
+    if cv2 is None or arr.ndim != 2 or arr.size == 0:
+        return []
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    margin = max(2, (min(h, w) * _INTERIOR_MARGIN_PCT + 50) // 100)
+    try:
+        n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            arr.astype(np.uint8), 8
+        )
+    except Exception:
+        return []
+    out: List[Dict[str, int]] = []
+    for i in range(1, n):
+        x, y, cw, ch, area = (int(v) for v in stats[i])
+        if area <= 2:
+            continue
+        if x == 0 or y == 0 or x + cw == w or y + ch == h:
+            continue
+        if cw * 100 > 45 * w or ch * 100 > 75 * h:
+            continue
+        if ch * 100 < 6 * h or ch * 100 > 65 * h:
+            continue
+        if not _bright_margin(gray, x, y, cw, ch, margin, polarity):
+            continue
+        out.append({
+            "x": x, "y": y, "w": cw, "h": ch, "area": area,
+        })
+        if len(out) >= _INTERIOR_MAX_COMPONENTS:
+            break
+    return out
+
+
+def _choose_sign_cluster(
+    candidates: List[Dict[str, int]], w: int, h: int
+) -> Optional[Tuple[Tuple[int, int, int, int], Tuple[int, int, int, int]]]:
+    """(padded ROI, tight band) around the horizontal character cluster.
+
+    A compact cluster is 2-4 vertically overlapping candidates whose union
+    sits near the centre / lower-centre of the frame (the sign plate is
+    what the camera is aimed at).  Groups are scored by (component count,
+    total ink area); ties go to the earlier raster component, so the answer
+    is deterministic and the C port can reproduce it exactly.  A group that
+    fails the count or position rules means no lockable cluster exists ->
+    None, and the caller keeps the whole frame.  The tight band is what
+    survives to the split (the pad must stay white); the padded ROI is the
+    box the UI draws and the OOD sign_pct measures.
+    """
+    if not candidates:
+        return None
+    best_idx = 0
+    best_key: Optional[Tuple[int, int]] = None
+    for i, anchor in enumerate(candidates):
+        ay1 = int(anchor["y"])
+        ay2 = ay1 + int(anchor["h"])
+        count = 0
+        total = 0
+        for c in candidates:
+            cy1 = int(c["y"])
+            cy2 = cy1 + int(c["h"])
+            if ay1 < cy2 and ay2 > cy1:
+                count += 1
+                total += int(c["area"])
+        key = (count, total)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_idx = i
+    anchor = candidates[best_idx]
+    ay1 = int(anchor["y"])
+    ay2 = ay1 + int(anchor["h"])
+    x1 = y1 = 1 << 30
+    x2 = y2 = -1
+    for c in candidates:
+        cy1 = int(c["y"])
+        cy2 = cy1 + int(c["h"])
+        if not (ay1 < cy2 and ay2 > cy1):
+            continue
+        x1 = min(x1, int(c["x"]))
+        y1 = min(y1, cy1)
+        x2 = max(x2, int(c["x"]) + int(c["w"]))
+        y2 = max(y2, cy2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    if not (2 <= int(best_key[0]) <= 4):
+        return None
+    # Compact cluster: centred in the middle half of the frame, in the
+    # lower two thirds.
+    if 2 * (x1 + x2) < w or 2 * (x1 + x2) > 3 * w:
+        return None
+    if 3 * (y1 + y2) < 2 * h:
+        return None
+    cw = x2 - x1
+    ch = y2 - y1
+    pad = max(2, (max(cw, ch) * 10 + 50) // 100)
+    tight = (int(x1), int(y1), int(x2), int(y2))
+    roi = (
+        max(0, x1 - pad),
+        max(0, y1 - pad),
+        min(int(w), x2 + pad),
+        min(int(h), y2 + pad),
+    )
+    return roi, tight
+
+
+def find_interior_ink_roi(
+    src: np.ndarray,
+    *,
+    thresh: Optional[int] = None,
+    dark_thr: int = 0,
+    polarity: int = INK_DARK,
+) -> Dict[str, Any]:
+    """Tight interior ROI around the character row, for the Edit worktable.
+
+    Applies the same binarisation the glyph front-end uses (explicit
+    `thresh`, else exact Otsu), optionally the Dark Thr floor, then the
+    component/band search above.  Returns `{box, method, sign_pct, threshold}`;
+    an empty result reports the full frame and method "none" so callers can
+    fall back rather than drawing a bogus one-pixel box.
+    """
+    gray = rgb_to_lum_u8(src)
+    if gray.ndim != 2 or gray.size == 0:
+        return {"box": [0, 0, 1, 1], "method": "empty",
+                "sign_pct": 0.0, "threshold": 0}
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+    if thresh is None:
+        t = int(otsu_threshold_u8(gray))
+        if t <= 0:
+            ink = np.zeros(gray.shape, dtype=bool)
+        else:
+            ink = binarize_ink(gray, t, polarity=polarity)
+            if int(dark_thr) > 0:
+                ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+    else:
+        # Pinned threshold (the Lum slider): a pinned window can wipe ALL
+        # ink after 160->96 dilution; fall back to interior Otsu so a
+        # visible character is never lost (RC2).
+        t, ink = _pinned_ink_with_otsu_fallback(
+            gray, int(thresh), polarity=polarity, dark_thr=int(dark_thr)
+        )
+    band = _choose_sign_cluster(_interior_ink_components(ink, gray, polarity), w, h)
+    if band is None:
+        return {"box": [0, 0, w, h], "tight_box": None, "method": "none",
+                "ink": ink, "sign_pct": float(ink.mean() * 100.0) if ink.size else 0.0,
+                "threshold": int(t)}
+    (x1, y1, x2, y2), (tx1, ty1, tx2, ty2) = band
+    # Keep only the selected character band; the pad around it must stay
+    # pure white in the user-facing crop (a frame line crossing the pad used
+    # to leave a black corner there).
+    selected = np.zeros_like(ink)
+    selected[ty1:ty2, tx1:tx2] = ink[ty1:ty2, tx1:tx2]
+    roi_ink = selected[y1:y2, x1:x2]
+    pct = float(roi_ink.mean() * 100.0) if roi_ink.size else 0.0
+    return {"box": [int(x1), int(y1), int(x2), int(y2)],
+            "tight_box": [int(tx1), int(ty1), int(tx2), int(ty2)],
+            "method": "interior_ink", "ink": selected, "sign_pct": pct,
+            "threshold": int(t)}
+
+
+def _clamp_box_to_bright_plate(gray: np.ndarray, box: Any) -> Optional[List[int]]:
+    """Shrink a character-cluster box to the bright plate that contains it.
+
+    The ink-cluster ROI is the union of the three character blobs plus a
+    10 % pad.  When a character sits close to the plate edge, that pad can
+    cross the white plate and pull the dark plastic frame / holder border
+    into the box.  The split then sees a vertical line as a fourth run and
+    merges it into slot 1 (`|A`), and the ROI view differs from the white
+    board the user sees.
+
+    This finds the bright connected component under the box (the white sign
+    plate) and returns its bounding box, inset by 1 px to step inside the
+    blurred plate edge.  The characters are dark holes inside that component,
+    so the bbox still contains all of them.  Returns None when no bright
+    component covers at least half the box and its centre — the caller then
+    keeps the original box rather than guessing.
+    """
+    cv2 = _cv2_module()
+    arr = np.asarray(gray)
+    if cv2 is None or arr.ndim != 2 or arr.size == 0:
+        return None
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    try:
+        bx1, by1, bx2, by2 = (int(v) for v in box)
+    except Exception:
+        return None
+    bx1 = max(0, min(w - 1, bx1)); by1 = max(0, min(h - 1, by1))
+    bx2 = max(bx1 + 1, min(w, bx2)); by2 = max(by1 + 1, min(h, by2))
+    area_box = max(1, (bx2 - bx1) * (by2 - by1))
+    cx, cy = (bx1 + bx2) // 2, (by1 + by2) // 2
+    try:
+        blur = cv2.GaussianBlur(arr, (5, 5), 0)
+        t, _ = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        t = int(t)
+        if t < 16:
+            t = int(np.percentile(blur, 70))
+        if t > 245:
+            t = int(np.percentile(blur, 55))
+        bright = (blur >= t).astype(np.uint8) * 255
+        k = max(3, int(round(min(h, w) * 0.02)))
+        if k % 2 == 0:
+            k += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        closed = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel, iterations=1)
+        cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN,
+                                   np.ones((3, 3), np.uint8), iterations=1)
+        n, _labels, stats, _centroids = cv2.connectedComponentsWithStats(cleaned, 8)
+    except Exception:
+        return None
+    candidates = []
+    for i in range(1, n):
+        x, y, cw, ch, _area = (int(v) for v in stats[i])
+        if cw <= 2 or ch <= 2:
+            continue
+        if not (x <= cx < x + cw and y <= cy < y + ch):
+            continue
+        ix1, iy1 = max(x, bx1), max(y, by1)
+        ix2, iy2 = min(x + cw, bx2), min(y + ch, by2)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        if inter * 2 < area_box:
+            continue
+        # Prefer the SMALLEST bright component containing the centre: the
+        # white plate is enclosed by the dark frame, while the desk/background
+        # outside it is a much larger bright component whose bbox also
+        # contains everything.
+        candidates.append((cw * ch, x, y, cw, ch))
+    if not candidates:
+        return None
+    _, x, y, cw, ch = min(candidates, key=lambda c: c[0])
+    inset = 1 if (cw > 4 and ch > 4) else 0
+
+    def _bright_frac(line: np.ndarray) -> float:
+        # Test the ORIGINAL gray, not the morphology-eroded bright mask: the
+        # Gaussian blur makes the first few white-plate pixels fail the mask,
+        # and trimming based on that shaved white margin off an ROI that was
+        # already inside the plate (breaking its symmetry).
+        return float((line >= t).mean()) if line.size else 1.0
+
+    # Trim ONLY sides whose border is actually dark surround.  Intersecting
+    # every side with the bright component's bbox used to shave a few white
+    # pixels off an already-inside ROI.
+    px1, py1, px2, py2 = bx1, by1, bx2, by2
+    changed = False
+    if _bright_frac(arr[py1:py2, px1]) < 0.5:
+        px1 = max(px1, x + inset)
+        changed = True
+    if _bright_frac(arr[py1:py2, px2 - 1]) < 0.5:
+        px2 = min(px2, x + cw - inset)
+        changed = True
+    if _bright_frac(arr[py1, px1:px2]) < 0.5:
+        py1 = max(py1, y + inset)
+        changed = True
+    if _bright_frac(arr[py2 - 1, px1:px2]) < 0.5:
+        py2 = min(py2, y + ch - inset)
+        changed = True
+    if not changed:
+        return None   # every edge is already white plate: keep the tight ROI
+    if px2 <= px1 or py2 <= py1:
+        return None
+    return [int(px1), int(py1), int(px2), int(py2)]
+
+
+def find_sign_roi(
+    src: np.ndarray,
+    manual_roi: Any = None,
+    *,
+    dark_thr: Optional[int] = None,
+    lum_thr: Optional[int] = None,
+    min_area_frac: float = 0.015,
+) -> Dict[str, Any]:
+    """Locate the bright road-sign plate inside a clutter frame.
+
+    The device frame is a whole scene: a bright sign plate on a dark plastic
+    frame, with wheels/sensors/desk clutter around it.  Running Otsu plus a
+    vertical projection over that whole frame finds the *frame edge* and the
+    clutter, not the three characters.  This first stage finds the inner
+    bright plate; the caller crops it before the projection split.
+
+    Returns a dict with:
+      box        [x1, y1, x2, y2] in source pixels (exclusive end)
+      method     "manual" | "ink_cluster" | "bright_plate" | "center_fallback"
+      score      candidate score (0 for manual/fallback)
+      threshold  bright-mask threshold used (unused for manual)
+      area_frac  plate area / frame area for a detected plate
+    """
+    gray = rgb_to_lum_u8(src)
+    if gray.ndim != 2 or gray.shape[0] < 1 or gray.shape[1] < 1:
+        return {"box": [0, 0, 1, 1], "method": "empty", "score": 0.0,
+                "threshold": 0, "area_frac": 0.0}
+    h, w = int(gray.shape[0]), int(gray.shape[1])
+
+    if manual_roi is not None:
+        box = _manual_roi_pixels(manual_roi, h, w)
+        if box is not None:
+            return {"box": [int(v) for v in box], "method": "manual", "score": 1.0,
+                    "threshold": 0, "area_frac": float((box[2] - box[0]) * (box[3] - box[1])) / float(max(1, h * w))}
+
+    # Hardware path: when the user has tuned Dark/Lum, those two sliders are
+    # the best description of "ink".  Find the three interior character blobs
+    # at that window before falling back to the bright-plate heuristic.
+    if dark_thr is not None and lum_thr is not None:
+        ink_roi = _ink_cluster_roi(gray, int(dark_thr), int(lum_thr))
+        if ink_roi is not None:
+            # The trio pad may cross the white plate when a glyph sits near
+            # its edge; clamp to the plate interior so the crop cannot carry
+            # the dark surround / holder border into the split.
+            clamped = _clamp_box_to_bright_plate(gray, ink_roi["box"])
+            if clamped is not None:
+                ink_roi["box"] = [int(v) for v in clamped]
+                ink_roi["area_frac"] = float(
+                    (clamped[2] - clamped[0]) * (clamped[3] - clamped[1])
+                ) / float(max(1, h * w))
+            return ink_roi
+
+    cv2 = _cv2_module()
+    if cv2 is not None:
+        try:
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            t, _ = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            t = int(t)
+            # A flat frame or a weird Otsu split: fall back to a high
+            # percentile so "bright plate" still means something.
+            if t < 16:
+                t = int(np.percentile(blur, 70))
+            if t > 245:
+                t = int(np.percentile(blur, 55))
+            bright = (blur >= t).astype(np.uint8) * 255
+            # Small closing only: a kernel wide enough to bridge an 8 px
+            # dark sign frame would merge the plate with the desk behind it.
+            k = max(3, int(round(min(h, w) * 0.02)))
+            if k % 2 == 0:
+                k += 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+            closed = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel, iterations=1)
+            cleaned = cv2.morphologyEx(closed, cv2.MORPH_OPEN,
+                                       np.ones((3, 3), np.uint8), iterations=1)
+            n, _labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, 8)
+            best = None
+            for i in range(1, n):
+                x, y, cw, ch, area = (int(v) for v in stats[i])
+                if cw <= 0 or ch <= 0:
+                    continue
+                area_frac = float(area) / float(max(1, h * w))
+                if area_frac < min_area_frac:
+                    continue
+                if cw < max(8, int(round(0.10 * w))) or ch < max(8, int(round(0.10 * h))):
+                    continue
+                aspect = float(cw) / float(max(1, ch))
+                if aspect < 0.20 or aspect > 5.0:
+                    continue
+                fill = float(area) / float(max(1, cw * ch))
+                if fill < 0.25:
+                    continue
+                cx, cy = float(centroids[i][0]), float(centroids[i][1])
+                dist = float(np.hypot(cx - w / 2.0, cy - h / 2.0))
+                center = max(0.0, 1.0 - 0.5 * dist / max(1.0, 0.5 * np.hypot(w, h)))
+                border = x <= 0 or y <= 0 or x + cw >= w or y + ch >= h
+                # A tight capture (the 96x96 template sign) is one bright
+                # plate covering the whole frame; a cluttered scene's desk
+                # is also border-touching but is split by the dark sign
+                # frame / clutter.  Accept a border component only when it
+                # really is the frame-filling plate; otherwise prefer the
+                # enclosed candidate and fall back to the centre box.
+                if border and area_frac < 0.80:
+                    continue
+                score = area_frac * (0.40 + 0.60 * fill) * center
+                if border:
+                    score *= 0.90
+                if area_frac > 0.90:
+                    score *= 0.95
+                if best is None or score > best["score"]:
+                    # Step INSIDE the white plate.  The connected component
+                    # IS the bright interior; padding outward used to pull
+                    # the dark plastic frame / holder border into the ROI,
+                    # which then bled into slot 1 as `|A`.  A 1 px inset
+                    # removes the blurred plate edge without touching ink.
+                    inset = 1 if (cw > 4 and ch > 4) else 0
+                    x1 = x + inset
+                    y1 = y + inset
+                    x2 = x + cw - inset
+                    y2 = y + ch - inset
+                    best = {
+                        "box": [x1, y1, x2, y2],
+                        "method": "bright_plate",
+                        "score": float(score),
+                        "threshold": t,
+                        "area_frac": area_frac,
+                    }
+            if best is not None:
+                return best
+        except Exception:
+            pass
+
+    # Deterministic fallback: the sign is normally centred; a 70 % centre
+    # box beats returning [0, 0, 1, 1] and feeding the projection the desk.
+    x1 = int(round(0.15 * w))
+    y1 = int(round(0.15 * h))
+    x2 = int(round(0.85 * w))
+    y2 = int(round(0.85 * h))
+    return {"box": [x1, y1, x2, y2], "method": "center_fallback", "score": 0.0,
+            "threshold": 0, "area_frac": float((x2 - x1) * (y2 - y1)) / float(max(1, h * w))}
+
+
+def clean_sign_ink(
+    ink: np.ndarray,
+    *,
+    margin: Optional[int] = None,
+    min_area: Optional[int] = None,
+) -> np.ndarray:
+    """Remove frame-scale border lines and tiny specks from a sign ROI.
+
+    Only the plastic frame / holder border (a line spanning most of the ROI
+    in one axis) and frame-thickness corner debris are removed.  A character
+    that merely sits close to the ROI edge — or a detached fragment of a
+    broken `'1'` — is kept: erasing those was the bug that deleted `'A'`
+    from the ROI view.  See `_is_outer_frame_debris` for the shared rule.
+
+    If the cleanup would remove ALL ink (a genuinely tight sign crop), the
+    original mask is returned: an empty slot is worse than a noisy one.
+    """
+    arr = np.asarray(ink, dtype=bool)
+    if arr.ndim != 2 or arr.size == 0:
+        return arr
+    h, w = arr.shape
+    if margin is None:
+        margin = max(1, int(round(min(h, w) * 0.02)))
+    if min_area is None:
+        min_area = max(4, int(round(h * w * 0.0005)))
+    cv2 = _cv2_module()
+    if cv2 is None:
+        # No component labelling available: do NOT wipe a margin band (that
+        # erases characters).  Leaving the mask untouched is the safe answer.
+        return arr.copy()
+    try:
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(arr.astype(np.uint8), 8)
+        keep = np.zeros_like(arr, dtype=bool)
+        for i in range(1, n):
+            x, y, cw, ch, area = (int(v) for v in stats[i])
+            if area < min_area:
+                continue
+            if _is_outer_frame_debris(x, y, cw, ch, w, h, margin):
+                continue
+            keep |= (labels == i)
+        if not keep.any():
+            return arr
+        return keep
+    except Exception:
+        return arr
+
+
 def preprocess_sign_sequence(
     src: np.ndarray,
     sign_sequence: Any = None,
@@ -877,6 +1926,9 @@ def preprocess_sign_sequence(
     convention: str = NORM_CANON,
     thresh: Optional[int] = None,
     dark_thr: int = 0,
+    clean_border: bool = False,
+    border_margin: Optional[int] = None,
+    find_roi: bool = False,
 ) -> Dict[str, Any]:
     """One sign frame -> one 28x28 glyph PER CHARACTER of the label.
 
@@ -917,6 +1969,9 @@ def preprocess_sign_sequence(
         "glyphs": [blank_glyph.copy() for _ in range(n)],
         "sign_box": None,
         "sign_box_norm": None,
+        "roi_box": None,
+        "roi_method": "input",
+        "sign_pct": 0.0,
         "ink": None,
         "thresh": 0,
         "ok": False,
@@ -930,17 +1985,64 @@ def preprocess_sign_sequence(
             return out
         h, w = int(gray.shape[0]), int(gray.shape[1])
 
-        t = int(otsu_threshold_u8(gray)) if thresh is None else int(thresh)
-        out["thresh"] = t
-        if t == 0 and thresh is None:
-            # No valid split existed (flat frame).  Same answer as the
-            # single-glyph path: there is no ink, so there is nothing to
-            # segment — report the frame split geometrically and stop.
-            ink = np.zeros(gray.shape, dtype=bool)
+        if thresh is None:
+            t = int(otsu_threshold_u8(gray))
+            out["thresh"] = t
+            if t == 0:
+                # No valid split existed (flat frame).  Same answer as the
+                # single-glyph path: there is no ink, so there is nothing to
+                # segment — report the frame split geometrically and stop.
+                ink = np.zeros(gray.shape, dtype=bool)
+            else:
+                ink = binarize_ink(gray, t, polarity=polarity)
+                if dark_thr > 0:
+                    ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+                # The component ROI search below IS the border cleanup when it is
+                # enabled; running the OpenCV component filter as well would make
+                # the Python side differ from the C port (which cannot run cv2).
+                if clean_border and not find_roi:
+                    ink = clean_sign_ink(ink, margin=border_margin)
         else:
-            ink = binarize_ink(gray, t, polarity=polarity)
-            if dark_thr > 0:
-                ink = ink & (gray >= np.uint8(min(255, int(dark_thr))))
+            # Pinned threshold (the Lum slider).  A pinned window can wipe
+            # ALL ink after 160->96 dilution; fall back to interior Otsu so
+            # the search never loses visible characters (RC2).
+            t, ink = _pinned_ink_with_otsu_fallback(
+                gray, int(thresh), polarity=polarity, dark_thr=dark_thr
+            )
+            out["thresh"] = t
+            # The component ROI search below IS the border cleanup when it is
+            # enabled; running the OpenCV component filter as well would make
+            # the Python side differ from the C port (which cannot run cv2).
+            if clean_border and not find_roi:
+                ink = clean_sign_ink(ink, margin=border_margin)
+
+        if find_roi and apply_segmentation:
+            # The RC2 clutter filter + cluster lock: only a compact 2-4
+            # component character cluster near the centre / lower-centre of
+            # the frame becomes the ROI.  Room clutter fails the component
+            # filter, and a single component (a tight capture, or touching
+            # characters) falls back to the whole frame.
+            components = _interior_ink_components(ink, gray, polarity)
+            band = _choose_sign_cluster(components, w, h)
+            if band is not None:
+                roi, tight = band
+                rx1, ry1, rx2, ry2 = roi
+                tx1, ty1, tx2, ty2 = tight
+                # Keep only the selected character components; the padded
+                # ROI is white around them so a frame line crossing the pad
+                # cannot become a fourth projection run.
+                band_ink = np.zeros_like(ink)
+                band_ink[ty1:ty2, tx1:tx2] = ink[ty1:ty2, tx1:tx2]
+                ink = band_ink
+                out["roi_box"] = [int(rx1), int(ry1), int(rx2), int(ry2)]
+                out["roi_method"] = "interior_ink"
+        if out["roi_box"] is None:
+            out["roi_box"] = [0, 0, int(w), int(h)]
+        rx1, ry1, rx2, ry2 = (int(v) for v in out["roi_box"])
+        roi_ink = ink[ry1:ry2, rx1:rx2]
+        out["sign_pct"] = (
+            float(roi_ink.mean() * 100.0) if roi_ink.size else 0.0
+        )
         out["ink"] = ink
 
         boxes: List[Tuple[int, int, int, int]]
@@ -958,37 +2060,71 @@ def preprocess_sign_sequence(
             boxes = list(reversed(boxes))
 
         for idx, (x1, y1, x2, y2) in enumerate(boxes):
-            crop = np.ascontiguousarray(gray[y1:y2, x1:x2])
+            # Give every glyph a little board context.  A thin '1' segmented
+            # to its stroke-only bbox (2-3 px wide) loses the light plate
+            # around it, and the resulting mostly-black tensor can score as
+            # `_background`; a 2 px margin restores the context the model
+            # saw during training.  The margin stays inside the ROI and the
+            # gap between characters is normally wider than 4 px.
+            bw = max(1, int(x2) - int(x1))
+            bh = max(1, int(y2) - int(y1))
+            pad = max(2, (min(bw, bh) * 8 + 50) // 100)
+            px1 = max(0, int(x1) - pad)
+            py1 = max(0, int(y1) - pad)
+            px2 = min(w, int(x2) + pad)
+            py2 = min(h, int(y2) + pad)
+            crop = np.ascontiguousarray(gray[py1:py2, px1:px2])
             if crop.size == 0:
                 res: Dict[str, Any] = {"glyph": blank_glyph.copy(), "ok": False, "empty": True}
             else:
-                # Segmentation is OFF for the slot: the box already IS one
-                # glyph, and re-running the projection inside it could only
-                # re-find the same run — or, on a slot whose ink is a
-                # fragment, drop it below `min_run` and blank the slot.
+                # Segmentation is OFF for the slot: the padded box already
+                # contains one glyph plus its plate context; re-running the
+                # projection inside it could only re-find the same run — or,
+                # on a slot whose ink is a fragment, drop it below `min_run`
+                # and blank the slot.
                 res = preprocess_glyph(
                     crop,
                     out_size=int(out_size),
                     polarity=polarity,
                     apply_segmentation=False,
                     convention=convention,
-                    thresh=thresh,
+                    # The EFFECTIVE frame threshold: when the pinned window
+                    # wiped the frame's ink and the interior-Otsu fallback
+                    # re-cut it, the slot crops must use that same
+                    # threshold — a slot crop is mostly glyph and its own
+                    # Otsu is unimodal, so it cannot recover on its own.
+                    thresh=(None if thresh is None else t),
                     dark_thr=dark_thr,
+                    # A slot crop can carry a corner of the neighbouring
+                    # glyph; strip it before the bbox/centring.
+                    strip_specks=True,
                 )
             glyph = np.asarray(res["glyph"], dtype=np.uint8)
             out["glyphs"][idx] = glyph
+            # User-facing thumbnail: BLACK ink on a PURE WHITE 28x28 canvas.
+            # The model input (`glyph`) keeps its training polarity/padding;
+            # this display variant is only what the Preview slot chip shows.
+            slot_ink = res.get("ink")
+            if slot_ink is not None and np.asarray(slot_ink).size:
+                mask = (np.asarray(slot_ink, dtype=np.uint8) * 255)
+                display_mask = normalise_glyph(mask, out_size=int(out_size), convention=convention)
+                display = (255 - display_mask).astype(np.uint8)
+            else:
+                display = np.full((int(out_size), int(out_size)), 255, dtype=np.uint8)
             out["slots"].append(
                 {
                     "char": str(seq[idx]),
                     "glyph": glyph,
+                    "display": display,
                     "ink": res.get("ink"),
-                    "box": [int(x1), int(y1), int(x2), int(y2)],
+                    "box": [int(px1), int(py1), int(px2), int(py2)],
                     "box_norm": [
-                        float(x1) / float(w),
-                        float(y1) / float(h),
-                        float(x2) / float(w),
-                        float(y2) / float(h),
+                        float(px1) / float(w),
+                        float(py1) / float(h),
+                        float(px2) / float(w),
+                        float(py2) / float(h),
                     ],
+                    "ink_box": [int(x1), int(y1), int(x2), int(y2)],
                     "ok": bool(res.get("ok")),
                     "empty": bool(res.get("empty", True)),
                 }

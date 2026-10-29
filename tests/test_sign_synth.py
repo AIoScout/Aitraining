@@ -136,7 +136,7 @@ def test_synth_variants_answer_yes_no_and_direction():
             )
             assert yes.get("ok") == "1", yes
             assert yes.get("match") is True, yes
-            assert yes.get("match_text") == record_controller.SIGN_MATCH_TEXT, yes
+            assert str(yes.get("match_text") or "").startswith(record_controller.SIGN_MATCH_TEXT), yes
             assert [s["label"] for s in yes["slots"]] == SEQUENCE, yes["slots"]
             assert yes.get("synth_variant") == "match", yes
             assert yes.get("synth_chars") == SEQUENCE, yes.get("synth_chars")

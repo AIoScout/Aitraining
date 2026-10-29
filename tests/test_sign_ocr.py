@@ -315,11 +315,18 @@ class FakeController:
         return np.asarray(raw, dtype=np.int32)
 
 
-def _raw_for(index, best=200, rest=10):
+MULTI_LABELS = ["A", "1", "2", "B", "8", "_background"]
+
+
+def _raw_for(index, best=200, rest=10, n_classes=None):
     """A raw int8-mirror tensor whose argmax is `index`."""
-    out = [rest] * len(LABELS)
+    out = [rest] * int(n_classes or len(LABELS))
     out[index] = best
     return out
+
+
+def _raw_for_multi(index, best=200, rest=10):
+    return _raw_for(index, best=best, rest=rest, n_classes=len(MULTI_LABELS))
 
 
 def _predict(controller, sequence="A1A", order="ltr", **kw):
@@ -345,7 +352,7 @@ def test_predictor_says_yes_only_when_all_three_match():
     pred = _predict(ctrl)
     assert pred["sign_ocr"] is True
     assert pred["match"] is True
-    assert pred["top_label"] == record_controller.SIGN_MATCH_TEXT
+    assert pred["top_label"].startswith(record_controller.SIGN_MATCH_TEXT)
     assert [s["char"] for s in pred["slots"]] == ["A", "1", "A"]
     assert [s["label"] for s in pred["slots"]] == ["A", "1", "A"]
     assert all(s["match"] for s in pred["slots"])
@@ -371,7 +378,7 @@ def test_predictor_treats_the_reject_class_as_a_miss():
 
 
 def test_predictor_requires_each_slot_to_clear_the_confidence_floor():
-    # argmax is right, but only 60 of 180 total -> 0.33, below the 0.60 floor.
+    # argmax is right, but only 60 of 180 total -> 0.33, below the 0.40 floor.
     weak = _raw_for(0, best=60, rest=40)
     ctrl = FakeController([weak, _raw_for(1), _raw_for(0)])
     pred = _predict(ctrl)
@@ -382,6 +389,41 @@ def test_predictor_requires_each_slot_to_clear_the_confidence_floor():
     # decides, and it is applied per slot.
     ctrl2 = FakeController([weak, _raw_for(1), _raw_for(0)])
     assert _predict(ctrl2, match_min_prob=0.30)["match"] is True
+
+
+def test_predictor_accepts_any_allowed_plate():
+    # Slot readings A,1,2 -> the first plate in the whitelist.
+    ctrl = FakeController([_raw_for_multi(0), _raw_for_multi(1), _raw_for_multi(2)], labels=MULTI_LABELS)
+    pred = _predict(ctrl, sequence="A12", sign_sequences=["A12", "B18"])
+    assert pred["match"] is True, pred
+    assert pred["matched_sequence"] == "A12"
+    assert pred["matched_index"] == 0
+    assert pred["plate_count"] == 2
+    assert "Plate #1 (A12)" in pred["match_text"], pred["match_text"]
+    assert [s["char"] for s in pred["slots"]] == ["A", "1", "2"]
+    assert all(s["match"] for s in pred["slots"])
+
+    # Slot readings B,1,8 -> the second plate.
+    ctrl = FakeController([_raw_for_multi(3), _raw_for_multi(1), _raw_for_multi(4)], labels=MULTI_LABELS)
+    pred = _predict(ctrl, sequence="A12", sign_sequences=["A12", "B18"])
+    assert pred["match"] is True, pred
+    assert pred["matched_sequence"] == "B18"
+    assert pred["matched_index"] == 1
+    assert "Plate #2 (B18)" in pred["match_text"], pred["match_text"]
+    assert [s["char"] for s in pred["slots"]] == ["B", "1", "8"]
+
+
+def test_predictor_reports_the_closest_plate_when_none_match():
+    # A,1,8 is two slots of A12 and two of B18 (tie -> first).  The returned
+    # slot headers must follow the closest plate so the failing slot is
+    # explainable; the verdict is still NO.
+    ctrl = FakeController([_raw_for_multi(0), _raw_for_multi(1), _raw_for_multi(4)], labels=MULTI_LABELS)
+    pred = _predict(ctrl, sequence="A12", sign_sequences=["A12", "B18"])
+    assert pred["match"] is False, pred
+    assert pred["closest_sequence"] == "A12", pred
+    assert pred["matched_sequence"] == ""
+    assert [s["char"] for s in pred["slots"]] == ["A", "1", "2"]
+    assert [s["match"] for s in pred["slots"]] == [True, True, False]
 
 
 def test_predictor_reports_no_match_without_a_trained_model():
@@ -410,13 +452,14 @@ def test_predictor_keeps_labels_in_reading_order_under_rtl():
 def test_predictor_boxes_are_full_frame_even_under_manual_roi():
     # With a Manual ROI the reading is taken on a sub-image; the boxes the SPA
     # draws must be in FULL-frame pixels or the overlay lands in the wrong
-    # place.  The ROI here is the whole frame, so the boxes must still match
-    # what the same frame gives with no ROI at all.
+    # place.  Pin the manual ROI to the auto ROI's own pixels: the same crop
+    # must produce the same full-frame slot boxes.
     ctrl = FakeController([_raw_for(0), _raw_for(1), _raw_for(0)])
     plain = _predict(ctrl)
     ctrl2 = FakeController([_raw_for(0), _raw_for(1), _raw_for(0)])
-    ctrl2._preview_load_model = _with_roi(ctrl2, (0.0, 0.0, 1.0, 1.0))
+    ctrl2._preview_load_model = _with_roi(ctrl2, tuple(plain["roi_box_norm"]))
     roi = _predict(ctrl2)
+    assert roi["roi_box"] == plain["roi_box"], (roi["roi_box"], plain["roi_box"])
     assert [s["box"] for s in roi["slots"]] == [s["box"] for s in plain["slots"]]
     assert roi["crop"] == plain["crop"]
 
