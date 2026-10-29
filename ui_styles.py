@@ -323,6 +323,40 @@ def inject_teachable_style() -> None:
   /* ── Compact centered Image Project card (CTA lives inside) ── */
   [data-testid="stContainer"]:has(> div > .tm-start-card),
   [data-testid="stContainer"]:has(.tm-start-card),
+  /* equal-height project type cards: stretch the streamlit columns so a
+     shorter card still ends where its row neighbour ends */
+  [data-testid="stHorizontalBlock"]:has(.tm-start-card) {
+    align-items: stretch;
+  }
+  /* equal-height project type cards: stretch the streamlit columns so a
+     shorter card ends where its row neighbour ends */
+  [data-testid="stHorizontalBlock"]:has(.tm-start-card) {
+    align-items: stretch;
+  }
+  [data-testid="stColumn"]:has(.tm-start-card) {
+    display: flex;
+    flex-direction: column;
+  }
+  [data-testid="stColumn"]:has(.tm-start-card) .tm-start-card {
+    flex: 1;
+  }
+  [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stVerticalBlock"] {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  [data-testid="stColumn"]:has(.tm-start-card) {
+    display: flex;
+    flex-direction: column;
+  }
+  [data-testid="stColumn"]:has(.tm-start-card) .tm-start-card {
+    flex: 1;
+  }
+  [data-testid="stColumn"]:has(.tm-start-card) [data-testid="stVerticalBlock"] {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
   [data-testid="stColumn"]:has(.tm-start-card) {
     width: 100% !important;
     max-width: none !important;
@@ -486,7 +520,7 @@ def inject_teachable_style() -> None:
     justify-content: center;
     width: 26px;
     height: 26px;
-    border-radius: 999px;
+    border-radius: 0;
     background: rgba(49, 105, 255, 0.10);
     color: var(--tm-primary-strong);
     font-size: 12px;
@@ -614,7 +648,7 @@ def inject_teachable_style() -> None:
     display: inline-block;
     font-size: 12px;
     padding: 4px 10px;
-    border-radius: 999px;
+    border-radius: 0;
     background: rgba(16, 35, 63, 0.06);
     color: var(--tm-muted);
     margin-left: 8px;
@@ -847,7 +881,7 @@ def inject_teachable_style() -> None:
     justify-content: center;
     min-height: 34px;
     padding: 0 12px;
-    border-radius: 999px;
+    border-radius: 0;
     background: color-mix(in srgb, var(--tm-primary) 5%, var(--tm-surface));
     color: var(--tm-muted);
     font-size: 12px;
@@ -1174,7 +1208,7 @@ def inject_teachable_style() -> None:
     display: inline-flex;
     align-items: center;
     padding: 6px 10px;
-    border-radius: 999px;
+    border-radius: 0;
     font-size: 12px;
     font-weight: 700;
   }
@@ -1323,7 +1357,7 @@ def inject_teachable_style() -> None:
   }
 
   .stTabs [data-baseweb="tab"] {
-    border-radius: 999px;
+    border-radius: 0;
     background: rgba(255,255,255,0.78);
     padding: 10px 16px;
   }
@@ -1519,6 +1553,33 @@ def inject_teachable_style() -> None:
   }
 
 </style>
-        """,
+        """ + _AIOSCOUT_POLISH_CSS,
         unsafe_allow_html=True,
     )
+
+
+_AIOSCOUT_POLISH_CSS = """
+  <style>
+  /* Project-type cards: equal bottoms per row. Streamlit's nested emotion
+     layers ignore per-level flex-grow here, so normalize the card itself:
+     the tallest card (Road Sign, 3 button rows) sets the band height and
+     every column's buttons then start at the same y. */
+  .tm-start-card {
+    min-height: 198px;
+    display: flex;
+    flex-direction: column;
+  }
+  .tm-start-card-head {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  @media (max-width: 640px) {
+    .tm-start-hero-title {
+      font-size: 24px !important;
+      letter-spacing: -0.3px !important;
+    }
+  }
+  </style>
+"""

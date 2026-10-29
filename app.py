@@ -1450,8 +1450,8 @@ def _render_new_project() -> None:
         _tw_dedent_helper.dedent('''
         <div class="tm-start-hero" style="background-color:#f9f9f8;border:1px solid #e2e2e2;border-radius:16px;padding:40px;margin-bottom:2rem;display:flex;flex-direction:row;justify-content:space-between;align-items:center;gap:40px;position:relative;overflow:hidden;">
         <div style="flex:1;min-width:500px;z-index:2;">
-        <h2 class="tm-start-hero-eyebrow" style="margin:0 0 8px 0;font-size:14px;font-weight:700;color:#8f8f8a;text-transform:uppercase;letter-spacing:1.5px;">Desktop AI Training</h2>
-        <h1 class="tm-start-hero-title" style="margin:0 0 16px 0;font-size:2.8rem;font-weight:800;color:#1a1c1c;letter-spacing:-1px;line-height:1.1;">TFLite Training</h1>
+        <h2 class="tm-start-hero-eyebrow" style="margin:0 0 8px 0;font-size:15px;font-weight:600;color:#525252;">Desktop AI training</h2>
+        <h1 class="tm-start-hero-title" style="margin:0 0 16px 0;font-size:32px;font-weight:800;color:#1a1c1c;letter-spacing:-0.5px;line-height:1.15;">TFLite Training</h1>
         <p class="tm-start-hero-sub" style="margin:0 0 28px 0;max-width:540px;line-height:1.6;color:#525252;font-size:15px;">Build classroom-friendly image models without touching code. Inspired by Google Teachable Machine, with a desktop-first workflow for importing data, training, and exporting TFLite + C sources.</p>
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:40px;">
         <span class="tm-chip">Import local images</span>
@@ -1460,15 +1460,15 @@ def _render_new_project() -> None:
         <span class="tm-chip">Export .tflite + model.cpp</span>
         </div>
         <div class="tm-start-hero-workflow" style="border-top:1px solid #e2e2e2;padding-top:32px;display:flex;flex-direction:column;align-items:flex-start;">
-        <div class="tm-start-hero-workflow-label" style="font-size:11px !important;text-transform:uppercase;letter-spacing:1.5px;color:#8f8f8a;font-weight:700;margin-bottom:16px;line-height:1;">Recommended Workflow</div>
+        <div class="tm-start-hero-workflow-label" style="font-size:13px !important;color:#5e5e5e;font-weight:600;margin-bottom:16px;line-height:1.2;">Recommended workflow</div>
         <div style="display:flex;flex-direction:row;align-items:center;gap:14px;">
-        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">1</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Collect</span></div>
-        <span class="tm-start-hero-arrow" style="display:flex;align-items:center;color:#d8d9d8;font-size:14px;line-height:1;margin-top:-1px;">➔</span>
-        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">2</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Label</span></div>
-        <span class="tm-start-hero-arrow" style="display:flex;align-items:center;color:#d8d9d8;font-size:14px;line-height:1;margin-top:-1px;">➔</span>
-        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">3</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Train</span></div>
-        <span class="tm-start-hero-arrow" style="display:flex;align-items:center;color:#d8d9d8;font-size:14px;line-height:1;margin-top:-1px;">➔</span>
-        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:50%;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">4</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Export</span></div>
+        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:0;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">1</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Collect</span></div>
+        <span class="tm-start-hero-arrow" style="display:flex;align-items:center;color:#d8d9d8;font-size:14px;line-height:1;margin-top:-1px;">→</span>
+        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:0;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">2</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Label</span></div>
+        <span class="tm-start-hero-arrow" style="display:flex;align-items:center;color:#d8d9d8;font-size:14px;line-height:1;margin-top:-1px;">→</span>
+        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:0;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">3</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Train</span></div>
+        <span class="tm-start-hero-arrow" style="display:flex;align-items:center;color:#d8d9d8;font-size:14px;line-height:1;margin-top:-1px;">→</span>
+        <div style="display:flex;align-items:center;gap:8px;"><span class="tm-start-hero-step-num" style="background:rgba(91,91,168,0.12);color:#5b5ba8;border-radius:0;width:24px;height:24px;display:flex;justify-content:center;align-items:center;font-size:12px;font-weight:800;line-height:1;flex-shrink:0;text-align:center;padding:0;margin:0;letter-spacing:normal;">4</span><span class="tm-start-hero-step-label" style="font-weight:600;font-size:14px;color:#1a1c1c;line-height:1;">Export</span></div>
         </div>
         </div>
         </div>
@@ -1485,7 +1485,7 @@ def _render_new_project() -> None:
         '''
         <div style="margin-top:1rem;margin-bottom:1.5rem;display:flex;align-items:center;gap:8px;">
             <h3 class="tm-start-section-title" style="margin:0;font-size:20px;font-weight:700;color:#1a1c1c;letter-spacing:-0.5px;">
-                ✨ Choose a project type
+                Choose a project type
             </h3>
         </div>
         ''',
@@ -1508,7 +1508,7 @@ def _render_new_project() -> None:
             <div class="tm-start-card-head">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
             <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">Image Project</h3>
-            <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
+            <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:3px 8px;border-radius:0;font-size:12px;font-weight:600;letter-spacing:0;">Ready now</span>
             </div>
             <p>Build an image classification model from images, webcam, or ESP32-P4 device stream. Great for classroom demos and local training for tinyML MCU deployment.</p>
             </div>
@@ -1545,8 +1545,8 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">🔠 OCR / Character Project</h3>
-            <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">OCR / Character Project</h3>
+            <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:3px 8px;border-radius:0;font-size:12px;font-weight:600;letter-spacing:0;">Ready now</span>
             </div>
             <p>Train a highly optimized INT8 character recognition model for ESP32. Features EMNIST dataset mixing, bit-exact Vertical Projection, and OOD rejection.</p>
             </div>
@@ -1570,8 +1570,8 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">🛑 Road Sign (3-Char)</h3>
-            <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:22px;font-weight:800;">Road Sign (3-Char)</h3>
+            <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:3px 8px;border-radius:0;font-size:12px;font-weight:600;letter-spacing:0;">Ready now</span>
             </div>
             <p>Train a 3-character road-sign reader. The same INT8 character model as the OCR project, plus a target sequence, automatic 3-way glyph splitting and a MATCH / NOT MATCH preview against the sign in view.</p>
             </div>
@@ -2559,7 +2559,7 @@ def _render_tm_old_frontend_html(
       align-items: center;
       gap: 6px;
       padding: 4px 9px;
-      border-radius: 999px;
+      border-radius: 0;
       background: rgba(0,0,0,0.04);
       color: var(--text);
       font-size: 11.5px;
@@ -2867,7 +2867,7 @@ def _render_tm_old_frontend_html(
     .preview-synth-pill {{
       flex: 0 0 auto;
       padding: 6px 10px;
-      border-radius: 999px;
+      border-radius: 0;
       border: 1px solid var(--line, #e2e2e2);
       background: var(--surface, #fff);
       color: var(--text, #1a1c1c);
@@ -2979,7 +2979,7 @@ def _render_tm_old_frontend_html(
     }}
     .out-bar {{
       height: 10px;
-      border-radius: 999px;
+      border-radius: 0;
       background: rgba(0,0,0,0.08);
       overflow: hidden;
       position: relative;
@@ -2988,7 +2988,7 @@ def _render_tm_old_frontend_html(
       height: 100%;
       width: 0%;
       background: rgba(26,115,232,0.55);
-      border-radius: 999px;
+      border-radius: 0;
       transition: width 120ms linear;
     }}
     .out-toggle {{
@@ -3229,6 +3229,8 @@ def _render_tm_old_frontend_html(
     .glyph-empty {{ font-family: inherit; font-size: 13px; color: #525252; padding: 10px 0; }}
     .train-card, .preview-card {{ padding: 16px 18px 18px 18px; position: relative; }}
     .card-head {{
+      flex-wrap: wrap;
+      row-gap: 6px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -3419,7 +3421,7 @@ def _render_tm_old_frontend_html(
     .train-progress-bar {{
       width: 100%;
       height: 8px;
-      border-radius: 999px;
+      border-radius: 0;
       background: rgba(0,0,0,0.08);
       overflow: hidden;
     }}
@@ -3427,7 +3429,7 @@ def _render_tm_old_frontend_html(
       height: 100%;
       width: 0%;
       background: rgba(26,115,232,0.55);
-      border-radius: 999px;
+      border-radius: 0;
       transition: width 120ms linear;
     }}
     .train-progress-text {{
@@ -3599,11 +3601,11 @@ def _render_tm_old_frontend_html(
       color: white;
     }}
     .btn-primary:hover {{
-      background: #1669d4;
+      background: #f58331;
     }}
     .preprocess-chip {{
       border: 0;
-      border-radius: 999px;
+      border-radius: 0;
       background: rgba(26,115,232,0.10);
       color: var(--blue);
       padding: 6px 10px;
@@ -3731,12 +3733,12 @@ def _render_tm_old_frontend_html(
       border: 0;
       border-radius: 0;
       padding: 4px;
-      background: rgba(26,115,232,0.08);
+      background: rgba(245,131,49,0.10);
       cursor: pointer;
     }}
     .class-preprocess-thumb.active {{
-      background: rgba(26,115,232,0.20);
-      box-shadow: 0 0 0 2px rgba(26,115,232,0.22) inset;
+      background: rgba(245,131,49,0.28);
+      box-shadow: 0 0 0 2px rgba(245,131,49,0.30) inset;
     }}
     .class-preprocess-thumb.defined {{
       background: rgba(30, 142, 62, 0.14);
@@ -3764,14 +3766,14 @@ def _render_tm_old_frontend_html(
       display: inline-flex;
       gap: 6px;
       padding: 4px;
-      border-radius: 999px;
-      background: rgba(26,115,232,0.08);
+      border-radius: 0;
+      background: rgba(245,131,49,0.10);
     }}
     .preview-mode-tab {{
       border: 0;
       background: transparent;
       color: var(--muted);
-      border-radius: 999px;
+      border-radius: 0;
       padding: 6px 8px;
       font-size: 11px;
       font-weight: 700;
@@ -3855,7 +3857,7 @@ def _render_tm_old_frontend_html(
       flex-wrap: wrap;
     }}
     .class-preprocess-status-chip {{
-      border-radius: 999px;
+      border-radius: 0;
       padding: 4px 10px;
       font-size: 11px;
       font-weight: 700;
@@ -3948,7 +3950,7 @@ def _render_tm_old_frontend_html(
       font-weight: 700;
       line-height: 1;
       padding: 5px 10px 5px 8px;
-      border-radius: 999px;
+      border-radius: 0;
       cursor: pointer;
       user-select: none;
       transition: background 0.15s ease, border-color 0.15s ease;
@@ -3982,6 +3984,8 @@ def _render_tm_old_frontend_html(
       color: var(--muted);
     }}
     .source-actions {{
+      flex-wrap: wrap;
+      row-gap: 8px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -4141,7 +4145,7 @@ def _render_tm_old_frontend_html(
       width: 22px;
       height: 22px;
       border: 0;
-      border-radius: 999px;
+      border-radius: 0;
       background: rgba(32, 33, 36, 0.82);
       color: var(--text-inverse);
       display: inline-flex;
@@ -4566,7 +4570,7 @@ def _render_tm_old_frontend_html(
     .tm-tour-head-top {{ display: flex; align-items: center; gap: 8px; }}
     .tm-tour-phase {{
       display: inline-flex; align-items: center;
-      padding: 3px 9px; border-radius: 999px;
+      padding: 3px 9px; border-radius: 0;
       background: color-mix(in srgb, var(--blue) 14%, transparent);
       color: var(--blue);
       font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
@@ -4628,7 +4632,7 @@ def _render_tm_old_frontend_html(
     .tm-tour-foot {{ padding: 10px 15px 13px; border-top: 1px solid var(--line); }}
     .tm-tour-chapters {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 9px; }}
     .tm-tour-chapter {{
-      padding: 3px 9px; border-radius: 999px;
+      padding: 3px 9px; border-radius: 0;
       border: 1px solid var(--line); background: var(--surface-soft);
       color: var(--muted); font-size: 10.5px; font-weight: 700; cursor: pointer;
     }}
@@ -4810,7 +4814,7 @@ def _render_tm_old_frontend_html(
   .signseq-note {{ font-size: 12px; color: #525252; line-height: 1.45; }}
   /* "Slots 1 & 3": which positions of the sign this one class is matched in. */
   .signslot-badge {{
-    margin-left: 8px; padding: 2px 7px; border-radius: 999px;
+    margin-left: 8px; padding: 2px 7px; border-radius: 0;
     background: rgba(245,131,49,0.14); color: #1a1c1c; font-size: 10px; font-weight: 700;
     letter-spacing: 0.3px; vertical-align: middle;
   }}
@@ -5064,8 +5068,8 @@ def _render_tm_old_frontend_html(
             <div id="advReadingOrderRow" class="train-adv-row" style="display:none">
               <span>Sign Reading Direction <span class="tm-help" data-tooltip="Which way the characters on a road sign are read. Left to Right for signs like &quot;L 50&quot;; Right to Left for signs whose glyphs run the other way, such as Arabic or Hebrew signage.">?</span></span>
               <select id="advReadingOrder">
-                <option value="ltr">Left to Right (L ➔ R)</option>
-                <option value="rtl">Right to Left (R ➔ L)</option>
+                <option value="ltr">Left to Right (L→R)</option>
+                <option value="rtl">Right to Left (R→L)</option>
               </select>
             </div>
             <div class="train-adv-row"><span>Image Size <span class="tm-help" data-tooltip="Width &amp; height of the square input the model is trained on; larger sizes capture more detail but cost memory and latency on device.">?</span></span><input id="advImgSizeInline" type="number" min="8" max="512" step="4"/></div>
@@ -16051,7 +16055,7 @@ def _render_ocr_project_page() -> None:
     st.markdown(
         '''
         <div class="tm-start-panel" style="background-color:#f9f9f8;border:1px solid #e2e2e2;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;">
-            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#1a1c1c;">🔠 OCR / Character Project</h1>
+            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:28px;font-weight:800;color:#1a1c1c;">OCR / Character Project</h1>
             <p class="tm-start-panel-sub" style="margin:0;max-width:860px;line-height:1.6;color:#525252;font-size:15px;">
                 Character recognition for the ESP32-P4. Samples are captured exactly like the image project,
                 then each one is reduced to a glyph tensor by an integer-exact pipeline whose Python and C
@@ -16085,7 +16089,7 @@ def _render_sign_ocr_project_page() -> None:
     st.markdown(
         '''
         <div class="tm-start-panel" style="background-color:#f9f9f8;border:1px solid #e2e2e2;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;">
-            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#1a1c1c;">🛑🏷️ Road Sign Project (3-Char)</h1>
+            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:28px;font-weight:800;color:#1a1c1c;">Road Sign Project (3-Char)</h1>
             <p class="tm-start-panel-sub" style="margin:0;max-width:860px;line-height:1.6;color:#525252;font-size:15px;">
                 A sign is one frame holding three characters in a fixed reading order.
                 Set the target sequence, train one class per CHARACTER — a repeated
