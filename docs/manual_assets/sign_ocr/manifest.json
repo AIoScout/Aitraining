@@ -1,10 +1,11 @@
 {
-  "generated_at": "2026-10-24 09:21:27",
+  "generated_at": "2026-10-28 20:27:03",
   "project_type": "sign_ocr",
   "screenshots": [
     "docs/manual_assets/sign_ocr/01_start_page.png",
     "docs/manual_assets/sign_ocr/02_workspace_overview.png",
     "docs/manual_assets/sign_ocr/03_target_sequence_and_dedup.png",
+    "docs/manual_assets/sign_ocr/03b_license_list_modal.png",
     "docs/manual_assets/sign_ocr/04a_settings_emnist_autofill.png",
     "docs/manual_assets/sign_ocr/04b_capture_drawer.png",
     "docs/manual_assets/sign_ocr/05_sample_worktable_edit.png",
@@ -14,7 +15,7 @@
     "docs/manual_assets/sign_ocr/08_export_and_save.png"
   ],
   "docx": [
-    "/Users/koil/Google-Teachable-Machine-TFLite-model-training/Lab_Manual_Car_Sign.docx",
+    "/Users/koil/Lab_Manual_Car_Sign.docx",
     "/Users/koil/Library/CloudStorage/OneDrive-HKUSTConnect/Student_Helper/TF Lite Training Manual - Car Sign.docx"
   ]
 }

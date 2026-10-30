@@ -153,6 +153,44 @@ def serve(html: str) -> Iterator[str]:
         thread.join(timeout=5)
 
 
+@contextmanager
+def serve_routes(routes: Dict[str, str]) -> Iterator[str]:
+    """Serve several paths from ONE localhost origin; yields the base URL.
+
+    Used to reproduce the Streamlit page shape: a parent document carrying
+    the hero card plus an `<iframe>` of the workspace SPA.  Same origin keeps
+    `iframe.contentDocument` readable and localStorage usable.
+    """
+    encoded = {p: body.encode("utf-8") for p, body in routes.items()}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            body = encoded.get(path)
+            if body is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 # Every network call the page makes, recorded so a test can assert on the
 # request the SPA actually issued rather than on the code that built it.
 STUB_FETCH = """

@@ -1190,6 +1190,10 @@ class RecordController:
             )
             reading_raw = (qs.get("reading") or [""])[0]
             match_min_raw = (qs.get("match_min") or [""])[0]
+            # The live predict loop sends compact=1: a small JPEG thumbnail
+            # instead of a full-resolution PNG per tick.  Upload/synth and
+            # the API keep the lossless image.
+            compact_preview = str((qs.get("compact") or [""])[0]).strip() == "1"
             bg_dark_thresh = int(bg_dark_raw) if str(bg_dark_raw).strip() != "" else None
             bg_lum_thresh  = int(bg_lum_raw)  if str(bg_lum_raw).strip()  != "" else None
             sign_match_min = float(match_min_raw) if str(match_min_raw).strip() != "" else None
@@ -1234,6 +1238,7 @@ class RecordController:
                         ood_entropy_ratio_max=ood_entropy_ratio_max,
                         preprocess_frame_side=GLYPH_PREPROCESS_FRAME_SIDE,
                         source=source,
+                        compact=compact_preview,
                     )
                 else:
                     pred = self._preview_predict(
@@ -1247,6 +1252,7 @@ class RecordController:
                         ood_max_prob_min=ood_max_prob_min,
                         ood_entropy_ratio_max=ood_entropy_ratio_max,
                         source=source,
+                        compact=compact_preview,
                     )
             except Exception as e:
                 _send_json(req, {"ok": "0", "error": str(e)}, status=400, cors=True)
@@ -1262,10 +1268,15 @@ class RecordController:
                     "sign_pct": float(pred.get("sign_pct") or 0.0),
                     "max_prob": float(pred.get("max_prob") or 0.0),
                     "entropy_ratio": float(pred.get("entropy_ratio") or 0.0),
-                    "image_b64": base64.b64encode(preview_png).decode("ascii"),
+                    "image_b64": (
+                        _png_bytes_to_compact_jpeg_b64(preview_png)
+                        if compact_preview
+                        else base64.b64encode(preview_png).decode("ascii")
+                    ),
                     "processed_image_b64": str(pred.get("processed_image_b64") or ""),
                     "crop_image_b64": str(pred.get("crop_image_b64") or ""),
                     "full_image_b64": str(pred.get("full_image_b64") or ""),
+                    "compact": "1" if compact_preview else "0",
                     "processed_variant": str(pred.get("processed_variant") or ""),
                     "crop": pred.get("crop"),
                     "model_source": str(pred.get("model_source") or "latest"),
@@ -5423,6 +5434,22 @@ class RecordController:
         # /preview/predict and freeze the preview on the old model, so any
         # invalid pin falls back to the latest training.
         deployed = cfg.dataset_root.parent / "deployed.json"
+        # FAST PATH: at 12.5 fps the old code re-read deployed.json,
+        # re-parsed the run meta and stat()ed the .tflite on EVERY preview
+        # frame just to discover the cached interpreter was still valid.
+        # Two stats are enough to know nothing changed; the expensive
+        # lookup below then runs only after a retrain/export/reset.
+        try:
+            stamp = (
+                float(deployed.stat().st_mtime) if deployed.exists() else 0.0,
+                float(latest.stat().st_mtime) if latest.exists() else 0.0,
+            )
+        except Exception:
+            stamp = (0.0, 0.0)
+        with self._lock:
+            fast = self._preview.get(session_id)
+        if fast is not None and fast.get("stamp") == stamp and fast.get("interpreter") is not None:
+            return fast
         src = None
         meta: Dict[str, Any] = {}
         if deployed.exists():
@@ -5498,6 +5525,7 @@ class RecordController:
             "interpreter": interpreter,
             "input_details": input_details,
             "output_details": output_details,
+            "stamp": stamp,
         }
         with self._lock:
             self._preview[session_id] = cur
@@ -5515,8 +5543,10 @@ class RecordController:
         ood_max_prob_min: Optional[float] = None,
         ood_entropy_ratio_max: Optional[float] = None,
         source: str = "",
+        compact: bool = False,
     ) -> Dict[str, Any]:
         model = self._preview_load_model(session_id=session_id)
+        encode_preview = _to_preview_jpeg_bytes if compact else _to_png_bytes
         interpreter = model["interpreter"]
         input_details = model["input_details"]
         output_details = model["output_details"]
@@ -5790,17 +5820,17 @@ class RecordController:
         # Crop-only preview (no threshold)
         if "crop_preview" in prepared:
             crop_arr = np.asarray(prepared["crop_preview"])
-            crop_png = _to_png_bytes(_model_input_array_to_preview_image(crop_arr))
+            crop_png = encode_preview(_model_input_array_to_preview_image(crop_arr))
         else:
             crop_png = None
         # Full-frame thresholded preview (no crop) — for the Orig view
         if "full_preview" in prepared:
             full_arr = np.asarray(prepared["full_preview"])
-            full_png = _to_png_bytes(_model_input_array_to_preview_image(full_arr))
+            full_png = encode_preview(_model_input_array_to_preview_image(full_arr))
         else:
             full_png = None
         processed_img = _model_input_array_to_preview_image(processed_arr)
-        processed_png = _to_png_bytes(processed_img)
+        processed_png = encode_preview(processed_img)
         # Auto search box (normalized 0-1) for the preview ROI overlay —
         # same contract as the class-edit page ("crop" field).
         search_box: Any = None
@@ -6136,6 +6166,7 @@ class RecordController:
         ood_entropy_ratio_max: Optional[float] = None,
         preprocess_frame_side: Optional[int] = None,
         source: str = "",
+        compact: bool = False,
     ) -> Dict[str, Any]:
         """Read a whole road sign: locate, split, one inference per glyph.
 
@@ -6149,6 +6180,7 @@ class RecordController:
         each must clear `match_min_prob`.  A sign reader that says YES when
         two of three characters matched is worse than one that says no.
         """
+        encode_preview = _to_preview_jpeg_bytes if compact else _to_png_bytes
         order = str(reading_order or "").strip().lower()
         if order not in ("ltr", "rtl"):
             order = "ltr"
@@ -6536,9 +6568,9 @@ class RecordController:
         # on the full view — not a re-cleaned mask.  Same array, same slice:
         # whatever is visible inside the box unchecked is visible checked.
         processed_display = full_display[ry1:ry2, rx1:rx2].copy()
-        full_png = _to_png_bytes(Image.fromarray(full_display, mode="L"))
-        processed_png = _to_png_bytes(Image.fromarray(processed_display, mode="L"))
-        raw_crop_png = _to_png_bytes(Image.fromarray(roi_gray, mode="L"))
+        full_png = encode_preview(Image.fromarray(full_display, mode="L"))
+        processed_png = encode_preview(Image.fromarray(processed_display, mode="L"))
+        raw_crop_png = encode_preview(Image.fromarray(roi_gray, mode="L"))
 
         return {
             "labels": slot_labels,
@@ -8369,6 +8401,62 @@ def _to_png_bytes(img: Image.Image) -> bytes:
     bio = io.BytesIO()
     img.save(bio, format="PNG")
     return bio.getvalue()
+
+
+# Live-preview frames are re-encoded every tick.  A full-resolution PNG of
+# the camera frame is the single largest thing on the wire (hundreds of KB)
+# and the most expensive thing for the browser to decode, which is what made
+# image/ocr previews stutter while the sign verdict (a few tiny nodes) looked
+# smooth.  Downscaling to preview size and using JPEG turns each frame into a
+# few KB and a sub-millisecond decode.
+_PREVIEW_JPEG_MAX_SIDE = 160
+_PREVIEW_JPEG_QUALITY = 82
+
+
+def _to_preview_jpeg_bytes(
+    img: Image.Image,
+    max_side: int = 192,
+    quality: int = _PREVIEW_JPEG_QUALITY,
+) -> bytes:
+    """Downscale a display image and encode JPEG for the live preview."""
+    import io
+
+    try:
+        w, h = img.size
+        scale = min(1.0, float(max_side) / float(max(w, h) or 1))
+        if scale < 1.0:
+            img = img.resize(
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                Image.BILINEAR,
+            )
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        bio = io.BytesIO()
+        img.save(bio, format="JPEG", quality=int(quality), optimize=False)
+        return bio.getvalue()
+    except Exception:
+        return _to_png_bytes(img)
+
+
+def _png_bytes_to_compact_jpeg_b64(
+    png: bytes,
+    max_side: int = _PREVIEW_JPEG_MAX_SIDE,
+    quality: int = _PREVIEW_JPEG_QUALITY,
+) -> str:
+    import io
+
+    try:
+        img = Image.open(io.BytesIO(png))
+        img.load()
+    except Exception:
+        # A frame we cannot decode is still better than no frame at all.
+        return base64.b64encode(png).decode("ascii")
+    try:
+        return base64.b64encode(
+            _to_preview_jpeg_bytes(img, max_side=max_side, quality=quality)
+        ).decode("ascii")
+    except Exception:
+        return base64.b64encode(png).decode("ascii")
 
 
 def _model_input_array_to_preview_image(arr: np.ndarray) -> Image.Image:

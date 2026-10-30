@@ -17,13 +17,15 @@ What this script does
    TFLiteTraining app workflow (open project -> four areas -> target
    license & samples -> Edit-page preprocessing -> training -> preview &
    export), following the bullet style and table formats of the reference
-   manual's Task 2.  Section 5 ends with the physical car/checkpoint
-   placement (reserved photo placeholder boxes) and the on-car Serial
-   Monitor verification.  No hardware kit walkthrough (Task 0), no
-   Arduino IDE setup steps (Task 1), no MCU flashing guide (Task 3).
-5. Writes the .docx to the repository root and to the OneDrive Student_Helper
-   folder.  The reference "TF Lite Training Manual.docx" is never opened,
-   read or modified.
+   manual's Task 2.  Section 5 ends with the preview & export; Section 6
+   is the dedicated Car & Checkpoint Physical Placement Specification
+   (reserved photo placeholder boxes) and Section 7 the on-car
+   TFLite_Sign verification including the 9-byte UART protocol.  No
+   hardware kit walkthrough (Task 0), no Arduino IDE setup steps
+   (Task 1), no MCU flashing guide (Task 3).
+5. Writes the .docx to ~/Lab_Manual_Car_Sign.docx and to the OneDrive
+   Student_Helper folder (byte-identical copies).  The reference
+   "TF Lite Training Manual.docx" is never opened, read or modified.
 
 Usage
 -----
@@ -69,10 +71,9 @@ except ImportError as exc:  # pragma: no cover - actionable message for students
 
 
 APP_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = APP_DIR.parent
 ASSET_DIR = APP_DIR / "docs" / "manual_assets" / "sign_ocr"
 BUILD_LOG = ASSET_DIR / "build.log"
-LOCAL_DOCX = REPO_ROOT / "Lab_Manual_Car_Sign.docx"
+LOCAL_DOCX = Path("/Users/koil/Lab_Manual_Car_Sign.docx")
 ONEDRIVE_DOCX = Path(
     "/Users/koil/Library/CloudStorage/OneDrive-HKUSTConnect/"
     "Student_Helper/TF Lite Training Manual - Car Sign.docx"
@@ -582,7 +583,7 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
         add_callouts(
             ws,
             [
-                {"number": 1, "selectors": ["#menuFileBtn", "#navSettings", "#navTutorial", "#navReturn"], "pad": 6},
+                {"number": 1, "selectors": ["#menuFileBtn", "#navSettings", "#navLicenseList", "#navTutorial", "#navReturn"], "pad": 6},
                 {"number": 2, "selectors": ["#signSeqBar"], "pad": 5},
                 {"number": 3, "selectors": [".class-card"], "pad": 5},
                 {"number": 4, "selectors": ["#trainCard"], "pad": 5},
@@ -610,6 +611,44 @@ def capture_walkthrough(app: StreamlitApp) -> Dict[str, Path]:
         snap(page, shots["03_target_sequence_and_dedup"])
         clear_callouts(ws)
         set_sequence(["A", "1", "2"])
+
+        # ── 03b License List modal ───────────────────────────────────────
+        click_js(ws, "document.getElementById('navLicenseList').click()")
+        ws.wait_for_selector("#licenseListRows [data-license-row='0']", timeout=20_000)
+        page.wait_for_timeout(400)
+        click_js(ws, "document.getElementById('licenseListAdd').click()")
+        page.wait_for_timeout(400)
+        ws.evaluate(
+            """() => {
+              const row = document.querySelector("#licenseListRows [data-license-row='1']");
+              const inputs = row.querySelectorAll('input.signseq-slot');
+              ['B', '1', '8'].forEach((ch, i) => {
+                inputs[i].value = ch;
+                inputs[i].dispatchEvent(new Event('input', {bubbles: true}));
+              });
+            }"""
+        )
+        ws.wait_for_function(
+            "() => { const h = document.getElementById('licenseListHint');"
+            " return h && h.textContent.includes('B 8'); }",
+            timeout=20_000,
+        )
+        page.wait_for_timeout(400)
+        add_callouts(
+            ws,
+            [
+                {"number": 1, "selectors": ["#licenseListRows"], "pad": 5},
+                {"number": 2, "selectors": ["#licenseListAdd"], "pad": 4},
+                {"number": 3, "selectors": ["#licenseListHint"], "pad": 4},
+                {"number": 4, "selectors": ["#licenseListSave"], "pad": 4},
+            ],
+        )
+        shots["03b_license_list_modal"] = ASSET_DIR / "03b_license_list_modal.png"
+        snap_element(ws, "#licenseListModal .tm-settings-card", shots["03b_license_list_modal"])
+        clear_callouts(ws)
+        # Cancel discards the draft whitelist; the walkthrough keeps A12 only.
+        click_js(ws, "document.getElementById('licenseListCancel').click()")
+        page.wait_for_timeout(500)
 
         # ── 04a Settings: source + EMNIST auto-fill ───────────────────────
         click_js(ws, "openGlobalSettings()")
@@ -1311,9 +1350,13 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "If your license uses the same character twice (like A 1 A), the app automatically keeps just one A card with a “Slots 1 & 3” badge so you only need to collect samples for A once!")
     _figure(doc, assets["03_target_sequence_and_dedup"], "Figure 3 — The Target Sign Bar: typing characters, the ◀ / ▶ swap buttons and the duplicate-character badge.")
     _para(doc, "Want your AI “gatekeeper” to accept more than one license plate?", bold=True)
-    _bullet(doc, "Besides typing a single 3-character plate (A ▸ 1 ▸ 2), you can click the 🪪 License List button next to ⚙ Settings in the top bar and add one or more allowed license plates — just like a parking-lot gatekeeper that remembers multiple authorized cars (for example A 1 2 and B 1 8)!", bold_prefix="🪪 License List")
-    _bullet(doc, "Shared characters are automatically merged: a character like 1 that appears on several plates becomes ONE Sample Area card, so you only collect samples for each unique character once!")
+    _bullet(doc, "🪪 License List (#navLicenseList): besides typing a single 3-character plate (A ▸ 1 ▸ 2), click this button next to ⚙ Settings in the top bar. The Allowed License Plates modal holds one or more valid 3-character plates — just like a parking-lot gatekeeper that remembers several authorized cars (for example A 1 2 and B 1 8)!", bold_prefix="🪪 License List (#navLicenseList)")
+    _bullet(doc, "The allowed plates are stored in the sign_sequences setting — a list of 3-character strings, for example [\"A12\", \"B18\"]. The first plate on the list is the Primary one.")
+    _bullet(doc, "Shared characters are automatically merged: the app takes the union of the unique characters of every plate, so [\"A12\", \"B18\"] becomes the five training classes ['A', '1', '2', 'B', '8'] — a character like 1 that appears on several plates becomes ONE Sample Area card, so you only collect its samples once!")
     _bullet(doc, "In Preview, the app shows 🟢 YES — MATCH whenever ANY plate on your allowed list is seen!")
+    _figure(doc, assets["03b_license_list_modal"], "Figure 3b — 🪪 License List: add more allowed plates (e.g. B18), then click Save & Sync Classes; the hint shows the unique-character union (A 1 2 B 8).")
+    _para(doc, "Settings keyboard tip:", bold=True)
+    _bullet(doc, "While ⚙ Settings is open, press Enter to save your changes and Esc to exit Settings (Esc always cancels without saving).")
     _para(doc, "Collecting Samples for Each Character Card:", bold=True)
     _callout_box(
         doc,
@@ -1330,7 +1373,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "Click “Upload” — choose one or more image files from your computer.", bold_prefix="Click “Upload”")
     _bullet(doc, "Click “Device” — captures images streamed from the smart car camera over USB serial (select the serial port in ⚙ Settings).", bold_prefix="Click “Device”")
     _figure(doc, assets["04b_capture_drawer"], "Figure 4b — The capture drawer on a character card: Webcam / Upload / Device tiles, Capture / Hold to Capture and Close.")
-    _bullet(doc, "Quick Auto-Fill Option (⚙ Settings): If you want to test the software right away without a camera, click ⚙ Settings in the top bar, expand ▸ Advanced Settings, and check Auto-fill empty classes with EMNIST template samples (24 / class) (or click Fill Empty Classes with EMNIST Samples Now), then click Save changes. Each empty character card immediately gets 24 handwriting samples!", bold_prefix="Quick Auto-Fill Option (⚙ Settings)")
+    _bullet(doc, "Quick Auto-Fill Option (⚙ Settings): If you want to test the software right away without a camera, click ⚙ Settings in the top bar, expand ▸ Advanced Settings, and check Auto-fill empty classes with EMNIST template samples (24 / class) (or click Fill Empty Classes with EMNIST Samples Now), then click Save changes. Each empty character card immediately gets 24 handwriting samples in the model's 28×28 glyph format!", bold_prefix="Quick Auto-Fill Option (⚙ Settings)")
     _figure(doc, assets["04a_settings_emnist_autofill"], "Figure 4a — ⚙ Settings: the Auto-fill 24 EMNIST samples option (left: Preview source, right: Advanced Settings).")
 
     # ── 4. Sample Area Part B: the Edit page ────────────────────────────
@@ -1338,13 +1381,15 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _para(
         doc,
         "On each character card header there are small icons: the Edit button opens the image "
-        "processing page, and the eraser icon clears all the samples on that card.",
+        "processing page (the app calls it the #classPreprocessModal), and the eraser icon "
+        "clears all the samples on that card.",
     )
     _para(doc, "The “Edit” page is composed of two parts: Image Viewer (Left) and Sample Worktable (Right):")
     _bullet(doc, "In the Image Viewer, we can see two images: Original Sample and Processed Preview.", bold_prefix="In the Image Viewer")
-    _bullet(doc, "For the Original Sample: A green (Auto) or blue (Manual ROI) ROI (Region of Interest) box is shown. This ROI defines the area that will be cropped and passed for further processing.", bold_prefix="For the Original Sample")
+    _bullet(doc, "For the Original Sample: In Auto (find sign) mode the app scans the photo and locks a green ROI (Region of Interest) box onto the character it finds; in Manual ROI mode you drag a blue box yourself. This ROI defines the area that will be cropped and passed for further processing.", bold_prefix="For the Original Sample")
     _bullet(doc, "For the Processed Preview: Pixels in the original image whose brightness falls below the Darkness Threshold (Dark Thr) or above the Luminosity Threshold (Lum Thr) are converted to pure white (Brightness: 255), leaving the dark character cleanly isolated on a white background.", bold_prefix="For the Processed Preview")
     _bullet(doc, "In the Sample Worktable, you can adjust the parameters to fine-tune the processing effect and minimize background noise:", bold_prefix="In the Sample Worktable")
+    _bullet(doc, "Tuning recipe: keep Preprocess Mode on Auto so the box locks onto the character, then lower Lum Thr until stray bright background turns white in the Processed Preview; click Save Sample (#classPreprocessSave) to write the crop and the thresholds onto this sample.", bold_prefix="Tuning recipe")
     _figure(doc, assets["05_sample_worktable_edit"], "Figure 5 — The Edit page: Image Viewer (left) and Sample Worktable (right), with the dark letter on a pure white (255) Processed Preview.")
     _add_table(
         doc,
@@ -1393,7 +1438,7 @@ def build_docx(assets: Dict[str, Path]) -> Path:
             ["6", "Validation Split", "0.25", "0–0.5", "The part of your photos kept secret for testing."],
             ["7", "Learning Rate", "0.0016", "0 or more", "How big each learning step is. Small steps = careful but slow."],
             ["8", "Mix EMNIST into every class", "On", "on / off", "Mixes built-in handwriting examples with your photos so the AI learns from more variety."],
-            ["9", "Use _background noise class to replace OOD rejection", "Off", "on / off", "Default is Off for the Car License Project so the AI focuses purely on your 3 characters and uses standard OOD/confidence checks; turn On only if you want an extra “no letter” class to replace OOD."],
+            ["9", "Use _background noise class to replace OOD rejection", "Off", "on / off", "Default is False (Off) for the Car License Project so the AI focuses purely on your 3 characters and uses standard OOD/confidence checks; turn On only if you want an extra “no letter” class to replace OOD."],
             ["10", "Fine-tune pre-trained backbone", "On", "on / off", "Starts from a smart pre-learned letter reader so your model trains fast and accurately even with just 20 photos!"],
         ],
         widths=[0.3, 1.55, 1.3, 1.0, 2.35],
@@ -1423,7 +1468,13 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     _bullet(doc, "The app slices the detected license horizontally into 3 character slots in your chosen reading direction.")
     _bullet(doc, "Each slot card shows WANT <character>, the character read by the AI, the 28×28 image fed to the model, and the confidence percentage (%).")
     _bullet(doc, "When all 3 slots match your target characters with at least 60% confidence, the banner turns green: 🟢 YES — MATCH. If any slot reads a different character, is below 60%, or is blank (_background), the banner turns red: 🔴 NO — NOT MATCH and explains which slot failed.")
-    _para(doc, "Positioning the Smart Car and Checkpoint on the Map:", bold=True)
+    _para(doc, "Exporting the Model & Saving Your Project:", bold=True)
+    _bullet(doc, "Click Export Model at the top-right of the Preview card to export the C/C++ model files (tm_model_data.cpp/.h, model_resolver.h, model_settings.cpp/.h, tm.tflite, labels.txt).")
+    _bullet(doc, "The export packs in everything the car needs: the trained weights, the img_size scaling parameters, the _background / OOD settings, and the full list of your allowed license plates — all into model_settings.h. When the car sees a plate, the ESP32-P4 checks it against the list and tells the ESP32-S3 which specific plate number matched!")
+    _bullet(doc, "Click File ▾ → Save (or Save as) at the top-left menu to save your project as a .tmproj file.")
+    _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model on the Preview card and File ▾ → Save / Save as.")
+    # ── 6. Car & checkpoint physical placement ──────────────────────────
+    _heading(doc, "6. Car & Checkpoint Physical Placement Specification (小车与检查站物理摆放规范)", 3)
     _para(
         doc,
         "Before testing with the real car camera, place the car and the checkpoint stand "
@@ -1451,21 +1502,50 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     )
     _reserved_image_box(doc, "[Reserved Image 3 — Photo of Checkpoint Acrylic Base Tangent to the Black Line at 45°]")
 
-    _para(doc, "Exporting the Model & Saving Your Project:", bold=True)
-    _bullet(doc, "Click Export Model at the top-right of the Preview card to export the C/C++ model files (tm_model_data.cpp/.h, model_resolver.h, model_settings.cpp/.h, tm.tflite, labels.txt).")
-    _bullet(doc, "The export packs in everything the car needs: the trained weights, the img_size scaling parameters, the _background / OOD settings, and the full list of your allowed license plates — all into model_settings.h. When the car sees a plate, the ESP32-P4 checks it against the list and tells the ESP32-S3 which specific plate number matched!")
-    _bullet(doc, "Click File ▾ → Save (or Save as) at the top-left menu to save your project as a .tmproj file.")
-    _figure(doc, assets["08_export_and_save"], "Figure 8 — Export Model on the Preview card and File ▾ → Save / Save as.")
-    _para(doc, "On-Car Verification (Arduino Serial Monitor):", bold=True)
+    # ── 7. On-car verification & the 9-byte UART protocol ────────────────
+    _heading(doc, "7. On-Car Verification — TFLite_Sign Firmware & the 9-Byte UART Protocol", 3)
     _para(
         doc,
         "After exporting the model into the TFLite_Sign/ folder and uploading TFLite_Sign.ino "
-        "to the ESP32-P4, open the Arduino IDE Serial Monitor (921600 baud). When the car "
-        "reads a license plate, you will see an output line like this:",
+        "to the ESP32-P4, the P4 sends every verdict to the ESP32-S3 over a hardware UART: "
+        "921600 baud, 8 data bits, no parity, 1 stop bit (8N1). On the ESP32-P4 the UART1 "
+        "pins are RX = GPIO10 and TX = GPIO11; the ESP32-S3 receiver uses RX = GPIO44 and "
+        "TX = GPIO43 (P4 TX → S3 RX, P4 RX ← S3 TX).",
     )
+    _para(doc, "Every verdict is one 9-byte frame:", bold=True)
+    _code_line(doc, "[0xAA, 0x55, 0x01, frame_lo, frame_hi, label_id, confidence, flags, xor_checksum]")
+    _add_table(
+        doc,
+        ["Byte", "Value", "Meaning"],
+        [
+            ["0", "0xAA", "Frame sync byte 1"],
+            ["1", "0x55", "Frame sync byte 2"],
+            ["2", "0x01", "Message type — inference frame (P4 → S3)"],
+            ["3–4", "frame_lo, frame_hi", "16-bit frame counter, little-endian"],
+            ["5", "label_id", "Verdict-dependent — see the verdict table below"],
+            ["6", "confidence", "Weakest slot's best raw score (a MATCH needs every slot strong)"],
+            ["7", "flags", "Verdict flags — see the verdict table below"],
+            ["8", "xor_checksum", "XOR of bytes 0–7"],
+        ],
+        widths=[0.55, 1.55, 4.4],
+        font_size=8.5,
+    )
+    _add_table(
+        doc,
+        ["flags", "Verdict", "label_id", "Meaning"],
+        [
+            ["0x02", "MATCH", "plate index (0 … kTargetSignCount-1)", "All three slots matched ONE allowed plate — label_id tells the ESP32-S3 which plate number matched (e.g. 0 = the primary plate, A12)."],
+            ["0xE2", "MISMATCH", "0xFE", "A sign is present, but at least one slot disagreed with every allowed plate."],
+            ["0xF2", "NO SIGN", "0xFF", "The frame has no ink at all — nothing to read."],
+        ],
+        widths=[0.55, 0.95, 1.75, 3.25],
+        font_size=8.5,
+    )
+    _para(doc, "Open the Arduino IDE Serial Monitor (921600 baud). When the car reads a license plate, you will see an output line like this:")
     _code_line(doc, "SIGN: MATCH (YES) plate=A12 [0] 'A'->A 0.95 [1] '1'->1 0.86 [2] '2'->2 0.78")
     _bullet(doc, "Each slot [0], [1], [2] prints the character the AI predicted and its confidence score — for example [1] '1'->1 0.86 means slot 1 read the character '1' with 86% confidence.")
     _bullet(doc, "The verdict MATCH (flags=0x02) tells the ESP32-S3 which authorized license plate matched (plate=A12), so the car can execute the corresponding action!")
+    _bullet(doc, "On a MISMATCH (flags=0xE2) the label_id is 0xFE; on NO SIGN (flags=0xF2) the label_id is 0xFF.")
     _reserved_image_box(doc, "[Reserved Image 4 — Screenshot of Arduino IDE TFLite_Sign.ino Serial Monitor Output]")
     _para(
         doc,
@@ -1498,9 +1578,9 @@ def build_docx(assets: Dict[str, Path]) -> Path:
     ):
         if banned.lower() in all_text.lower():
             raise RuntimeError(f"manual scope violation: contains {banned!r}")
-    if len(doc.inline_shapes) != 10:
+    if len(doc.inline_shapes) != 11:
         raise RuntimeError(
-            f"expected exactly 10 figures, found {len(doc.inline_shapes)}"
+            f"expected exactly 11 figures, found {len(doc.inline_shapes)}"
         )
 
     LOCAL_DOCX.parent.mkdir(parents=True, exist_ok=True)
@@ -1526,6 +1606,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     expected = [
         "01_start_page", "02_workspace_overview", "03_target_sequence_and_dedup",
+        "03b_license_list_modal",
         "04a_settings_emnist_autofill", "04b_capture_drawer", "05_sample_worktable_edit",
         "06_training_and_advanced", "07a_preview_synth_match",
         "07b_preview_synth_mismatch", "08_export_and_save",
