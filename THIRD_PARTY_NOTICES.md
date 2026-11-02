@@ -63,9 +63,9 @@ obligations (retaining copyright notices and license texts).
 | certifi | 2026.5.20 | MPL-2.0 |
 | charset-normalizer | 3.4.7 | MIT |
 | click | 8.4.1 | BSD-3-Clause |
-| dmgbuild | 1.6.7 | 见包内 LICENSE 文件 |
+| dmgbuild | 1.6.7 | See bundled LICENSE file |
 | docx2pdf | 0.1.8 | MIT |
-| ds_store | 1.3.2 | 见包内 LICENSE 文件 |
+| ds_store | 1.3.2 | See bundled LICENSE file |
 | flatbuffers | 25.12.19 | Apache-2.0 |
 | gast | 0.7.0 | BSD-3-Clause |
 | gitdb | 4.0.12 | BSD-3-Clause |
@@ -75,9 +75,9 @@ obligations (retaining copyright notices and license texts).
 | grpcio | 1.80.0 | Apache-2.0 |
 | h11 | 0.16.0 | MIT |
 | h5py | 3.14.0 | BSD-3-Clause |
-| httptools | 0.7.1 | 见包内 LICENSE 文件 |
+| httptools | 0.7.1 | See bundled LICENSE file |
 | idna | 3.15 | BSD-3-Clause |
-| iniconfig | 2.3.1 | 见包内 LICENSE 文件 |
+| iniconfig | 2.3.1 | See bundled LICENSE file |
 | itsdangerous | 2.2.0 | BSD-3-Clause |
 | Jinja2 | 3.1.6 | BSD-3-Clause |
 | jsonschema | 4.26.0 | MIT |
@@ -85,12 +85,12 @@ obligations (retaining copyright notices and license texts).
 | keras | 3.14.1 | Apache-2.0 |
 | libclang | 18.1.1 | Apache-2.0 |
 | lxml | 6.1.3 | BSD-3-Clause |
-| mac_alias | 2.2.3 | 见包内 LICENSE 文件 |
+| mac_alias | 2.2.3 | See bundled LICENSE file |
 | macholib | 1.16.4 | MIT |
 | markdown-it-py | 4.2.0 | MIT |
 | MarkupSafe | 3.0.3 | BSD-3-Clause |
 | mdurl | 0.1.2 | MIT |
-| ml_dtypes | 0.5.4 | 见包内 LICENSE 文件 |
+| ml_dtypes | 0.5.4 | See bundled LICENSE file |
 | namex | 0.1.0 | MIT |
 | narwhals | 2.21.2 | MIT |
 | networkx | 3.6.1 | BSD-3-Clause |
@@ -99,8 +99,8 @@ obligations (retaining copyright notices and license texts).
 | optree | 0.19.1 | Apache-2.0 |
 | packaging | 26.2 | Apache-2.0 / BSD-2-Clause |
 | pandas | 3.0.3 | BSD-3-Clause |
-| pip | 26.2 | 见包内 LICENSE 文件 |
-| playwright | 1.64.0 | 见包内 LICENSE 文件 |
+| pip | 26.2 | See bundled LICENSE file |
+| playwright | 1.64.0 | See bundled LICENSE file |
 | pluggy | 1.7.0 | MIT |
 | protobuf | 7.35.0 | BSD-3-Clause |
 | proxy_tools | 0.1.0 | MIT |
@@ -111,8 +111,8 @@ obligations (retaining copyright notices and license texts).
 | Pygments | 2.20.0 | BSD-2-Clause |
 | pyinstaller-hooks-contrib | 2026.5 | Apache-2.0 / GPL-2.0-with-exception |
 | pymupdf | 2.0 | GPL-3.0 |
-| pymupdf4llm | 2.0 | 见包内 LICENSE 文件 |
-| pymupdf_layout | 2.0 | 见包内 LICENSE 文件 |
+| pymupdf4llm | 2.0 | See bundled LICENSE file |
+| pymupdf_layout | 2.0 | See bundled LICENSE file |
 | pyobjc-core | 12.2 | MIT |
 | pyobjc-framework-Cocoa | 12.2 | MIT |
 | pyobjc-framework-CoreAudio | 12.2 | MIT |
@@ -121,7 +121,7 @@ obligations (retaining copyright notices and license texts).
 | pyobjc-framework-Security | 12.1 | MIT |
 | pyobjc-framework-UniformTypeIdentifiers | 12.1 | MIT |
 | pyobjc-framework-WebKit | 12.1 | MIT |
-| pytest | 9.1.1 | 见包内 LICENSE 文件 |
+| pytest | 9.1.1 | See bundled LICENSE file |
 | python-dateutil | 2.9.0.post0 | Apache-2.0 / BSD-3-Clause |
 | python-docx | 1.2.0 | MIT |
 | python-multipart | 0.0.29 | Apache-2.0 |
@@ -133,15 +133,15 @@ obligations (retaining copyright notices and license texts).
 | setuptools | 82.0.1 | MIT |
 | six | 1.17.0 | MIT |
 | smmap | 5.0.3 | BSD-3-Clause |
-| starlette | 1.0.1 | 见包内 LICENSE 文件 |
-| tabulate | 0.10.0 | 见包内 LICENSE 文件 |
+| starlette | 1.0.1 | See bundled LICENSE file |
+| tabulate | 0.10.0 | See bundled LICENSE file |
 | tenacity | 9.1.4 | Apache-2.0 |
 | termcolor | 3.3.0 | MIT |
 | toml | 0.10.2 | MIT |
 | tqdm | 4.70.1 | MPL-2.0 |
-| typing_extensions | 4.15.0 | 见包内 LICENSE 文件 |
+| typing_extensions | 4.15.0 | See bundled LICENSE file |
 | urllib3 | 2.7.0 | MIT |
-| uvicorn | 0.47.0 | 见包内 LICENSE 文件 |
+| uvicorn | 0.47.0 | See bundled LICENSE file |
 | watchdog | 6.0.0 | Apache-2.0 |
 | websockets | 16.0 | BSD-3-Clause |
 | wheel | 0.47.0 | MIT |
@@ -345,7 +345,7 @@ this project is reproduced below:
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
-   Copyright [2026] [AIoScout]
+   Copyright 2026 AIoScout
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.

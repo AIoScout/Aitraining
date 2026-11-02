@@ -131,8 +131,10 @@ _TM_OPENABLE_PROJECT_TYPES = (
 )
 
 
-# AIoScouts logo (200x200 PNG) embedded as base64 for the topnav menu
-_AIO_SCOUTS_LOGO_B64 = "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"
+# AIoScout brand mark — the official single-path asset (assets/logo.svg).
+# fill="currentColor" and the theme supplies #f58331 (light) / #5b5ba8
+# (dark surfaces); never recolour it with black/white/gradients/shadows.
+_AIO_SCOUTS_LOGO_PATH_D = "M405.08 0H90C40.3 0 0 40.3 0 90V405.07C0 454.78 40.3 495.07 90 495.07H405.07C454.78 495.07 495.07 454.77 495.07 405.07V90C495.07 40.29 454.77 0 405.07 0H405.08ZM123.27 376.8L71.73 428.34C68.15 431.92 62.35 431.92 58.77 428.34L52.94 422.51C49.36 418.93 49.36 413.13 52.94 409.55L104.48 358.01C108.06 354.43 113.86 354.43 117.44 358.01L123.27 363.84C126.85 367.42 126.85 373.22 123.27 376.8ZM333.43 339.2C299.8 383.22 241.33 404.16 184.14 386.85C141.32 373.89 107.18 339.56 94.09 296.78C68.1 211.82 127.9 127.92 211.74 119.91C258.02 115.48 303.39 135.01 332.08 171.26C334.42 174.22 333.69 178.54 330.62 180.73L319.95 188.33C317.06 190.39 313.01 189.7 310.78 186.93C284.58 154.43 240.46 137.51 195.13 149.9C151.62 161.79 119.21 200.5 115.21 245.42C108.91 316.34 168.12 372.24 235.49 365.8C266.82 362.8 293.89 346.91 311.82 323.86C314 321.05 318.04 320.29 320.97 322.3L331.82 329.76C334.92 331.89 335.72 336.19 333.44 339.19L333.43 339.2ZM161.83 279.24C170.03 302.03 190.77 318.93 214.75 322.31C264.21 329.28 303.07 283.83 289.48 236.56C283.54 215.9 267.34 198.96 246.98 192.08C230.95 186.66 215.22 187.6 201.69 192.55C198.52 193.71 194.86 192.45 193.41 189.41L188.24 178.56C185.95 173.75 187.43 169.58 191 168.2C199.01 165.09 207.44 163.08 216.04 162.26C273.49 156.77 324.62 205.4 318.27 265.97C314.41 302.86 288 334.8 252.48 345.49C194.29 363 137.01 322.05 131.52 264.64C130.7 256.04 131.07 247.39 132.61 238.93C133.3 235.17 137.11 232.92 140.81 233.88C144.81 234.92 149.84 236.23 153.72 237.24C157.15 238.13 159.07 241.5 158.52 245C156.79 255.83 157.61 267.45 161.85 279.24H161.83ZM387.56 427.04C365.14 422.51 349.66 401.8 349.66 378.93C349.66 309.15 349.66 109.74 349.66 70.73C349.66 67.05 352.64 64.06 356.33 64.06H369.57C373.25 64.06 376.24 67.04 376.24 70.73V378.97C376.24 389.59 383.46 399.46 393.94 401.18C405.44 403.07 415.61 395.64 418.15 385.25C418.83 382.46 421.84 380.19 424.71 380.19H438.13C442.28 380.19 445.37 383.98 444.69 388.08C440.42 413.87 415.53 432.69 387.57 427.04H387.56Z"
 
 
 #region debug-point capture-webcam-source-helper
@@ -1387,9 +1389,9 @@ def _tm_notice_opened_project(path: Path, state: Any, project_type: str) -> None
 
 
 _TM_PROJECT_TYPE_LABELS = {
-    "image": "Image Project",
+    "image": "● Image Project",
     "ocr": "OCR / Character Project",
-    "sign_ocr": "🚗 Car License Project",
+    "sign_ocr": "● Car License Project",
     "image_classified_import": "Classified Import",
 }
 
@@ -1545,7 +1547,7 @@ def _render_new_project() -> None:
         </div>
         </div>
         </div>
-        <div class="tm-start-hero-watermark" style="position:absolute;right:20px;top:40px;width:280px;height:280px;opacity:0.04;z-index:1;pointer-events:none;">
+        <div class="tm-start-hero-watermark" style="position:absolute;right:32px;top:50%;transform:translateY(-50%);width:240px;height:240px;opacity:1;z-index:1;pointer-events:none;">
         __HERO_ICON__
         </div>
         </div>
@@ -1628,7 +1630,7 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div class="tm-start-card-headrow">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:17px;font-weight:800;">Image Project</h3>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:17px;font-weight:800;">● Image Project</h3>
             <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
             </div>
             <p>Build an image classification model from images, webcam, or ESP32-P4 device stream. Great for classroom demos and local training for tinyML MCU deployment.</p>
@@ -1667,7 +1669,7 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div class="tm-start-card-headrow">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:17px;font-weight:800;">🔤 OCR Character</h3>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:17px;font-weight:800;">● OCR Character</h3>
             <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
             </div>
             <p>Train a highly optimized INT8 character recognition model for ESP32. Features EMNIST dataset mixing, bit-exact Vertical Projection, and OOD rejection.</p>
@@ -1702,7 +1704,7 @@ def _render_new_project() -> None:
             <div class="tm-start-card">
             <div class="tm-start-card-head">
             <div class="tm-start-card-headrow">
-            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:17px;font-weight:800;">🚗 Car License</h3>
+            <h3 class="tm-start-card-title" style="margin:0;padding:0;font-size:17px;font-weight:800;">● Car License</h3>
             <span class="tm-start-ready-badge" style="background:#E8F5E9;color:#2E7D32;padding:2px 6px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.5px;">READY NOW</span>
             </div>
             <p>Train a 3-character license plate reader with target sequence matching, automatic 3-way glyph splitting, and live MATCH / NO MATCH preview.</p>
@@ -2238,6 +2240,10 @@ def _render_tm_old_frontend_html(
       --surface-frost: rgba(255,255,255,0.72);
       --shadow: 0 2px 8px rgba(0,0,0,0.08);
       --blue: #1a73e8;
+      /* Brand mark: orange is the main (light) colour. */
+      --brand-orange: #f58331;
+      --brand-purple: #5b5ba8;
+      --logo-color: var(--brand-orange);
       --blue-bg: #e8f0fe;
       --blue-bg-hover: #d2e3fc;
       --text: #202124;
@@ -2262,6 +2268,8 @@ def _render_tm_old_frontend_html(
         --surface-frost: rgba(24,32,42,0.88);
         --shadow: 0 10px 30px rgba(0,0,0,0.32);
         --blue: #8ab4f8;
+        /* Dark surfaces use the canonical brand purple #5b5ba8. */
+        --logo-color: var(--brand-purple);
         --blue-bg: rgba(138,180,248,0.16);
         --blue-bg-hover: rgba(138,180,248,0.24);
         --text: #e8eaed;
@@ -2402,6 +2410,11 @@ def _render_tm_old_frontend_html(
     }}
     .tm-toolbar-brand img {{
       width: 22px; height: 22px; object-fit: contain; border-radius: 4px; display:block;
+    }}
+    /* The single-path mark: the theme colour comes from --logo-color. */
+    .tm-toolbar-brand .tm-brand-mark {{
+      width: 22px; height: 22px; display: block; flex: 0 0 auto;
+      color: var(--logo-color);
     }}
     .tm-toolbar-menu {{
       position: relative;
@@ -5403,7 +5416,7 @@ def _render_tm_old_frontend_html(
 <div class="toast" id="toast"></div>
 <div class="topnav" id="goHome">
   <div class="tm-toolbar-brand">
-    <img src="data:image/png;base64,{_AIO_SCOUTS_LOGO_B64}" alt="AIoScout"/>
+    <svg class="tm-brand-mark" viewBox="0 0 496 496" role="img" aria-label="AIoScout" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="{_AIO_SCOUTS_LOGO_PATH_D}"/></svg>
     <span>AIoScout</span>
   </div>
   <div class="tm-toolbar-menu" id="menuFile">
@@ -15562,9 +15575,6 @@ mountReflowTimers.push(window.setTimeout(() => {{
   var WELCOME_DELAY_MS = 1200;
   var TOUR_TYPE = 'image';
   var PHASES = [];
-  /* OCR's walkthrough is strictly linear: every step is either explained
-     (Next suffices) or a hard-gated action.  No "Skip step" escape. */
-  var STRICT_NO_SKIP = false;
   var STEPS = [];
 
   function byId(id) {{ return document.getElementById(id); }}
@@ -15708,7 +15718,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
   /* Idempotent, and only ever used as a FALLBACK: the curriculum's own Open
      checkpoint is the user pressing ⚙ Settings.  This is what puts the
      modal back when the guide is entered from somewhere else — a chapter
-     pill, `Skip step →`, or a step resumed out of order — so the inner
+     pill, or a step resumed out of order — so the inner
      checkpoints still have a visible screen to land on. */
   function openSettingsModal() {{
     var modal = byId('globalSettingsModal');
@@ -15735,7 +15745,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
      Every Open / Inner / Close checkpoint asks one of these.  A step
      whose screen is shut falls back to the button that OPENS it rather
      than spotlighting a control the modal is covering, which is what
-     keeps a chapter jump or a `Skip step →` from stranding the user on a
+     keeps a chapter jump from stranding the user on a
      slide with nothing to click. */
   function settingsOpen() {{
     var modal = byId('globalSettingsModal');
@@ -16784,25 +16794,30 @@ mountReflowTimers.push(window.setTimeout(() => {{
     {{
       chapter: 2,
       mode: 'handson',
-      title: 'Settings ④: Zero-Hardware EMNIST Auto-Fill &amp; _background',
-      target: '#settingsEmnistGroup, #advOcrPanel',
-      aimGroup: '#settingsEmnistGroup, #advOcrPanel',
+      title: 'Settings ④: Developer EMNIST Template Samples',
+      /* This walkthrough step is about the Advanced > Developer EMNIST
+         template block, not the training hyperparameter rows above it.
+         Keep the spotlight tight on that single CSS block so the arrow,
+         dim layer, and card all agree on the same destination. */
+      target: '#settingsEmnistGroup',
+      aimGroup: '#settingsEmnistGroup',
       arrowTarget: '#settingsAutoSeedEmnist',
-      fallback: ['#settingsEmnistGroup', '#advOcrPanel', '.tm-settings-card'],
+      fallback: ['#settingsEmnistGroup', '.tm-settings-card'],
       placement: 'left',
       onEnter: function () {{ openSettingsModal(); unfoldSettingsAdvanced(); }},
       advanceAlso: ['#settingsSave', '#settingsCancel'],
       keepCardOpenOnInteract: true,
       inSettings: true,
       settingsPhase: true,
+      noFooterNext: true,
       startLabel: '✓ Confirm Current Setting',
-      cue: 'Leave <b>Auto-fill 24 EMNIST</b> on for a no-camera rehearsal, then press <b>Next →</b>.',
-      orbPrompt: '[[settings]] EMNIST auto-fill & _background (Click Next → when done)',
+      cue: 'Leave <b>Auto-fill 24 EMNIST</b> on for a no-camera rehearsal, then click <b>Save changes</b>.',
+      orbPrompt: '[[settings]] Confirm EMNIST template auto-fill, then Save changes',
       body: '<p class="tm-tour-goal"><b>[[goal]] Goal:</b> Get usable training data even before your camera is wired up.</p>' +
         '<ul class="tm-tour-param-list">' +
         '<li><b>Auto-fill 24 EMNIST samples</b><span class="tm-tour-param-val">28×28</span>Seeds 24 standard character glyphs per class — perfect for a first rehearsal.</li>' +
-        '<li><b>Use _background noise class</b>Adds a “not a character” class trained on empty and noisy crops.</li>' +
-        '<li><b>Save changes</b>Keeps the choice for the next training run.</li>' +
+        '<li><b>Fill Empty Classes with EMNIST Samples Now</b>Immediately seeds every empty character class for a dry run.</li>' +
+        '<li><b>Save changes</b>Keeps the developer template setting for the next training run.</li>' +
         '</ul>'
     }},
     {{
@@ -17165,7 +17180,6 @@ mountReflowTimers.push(window.setTimeout(() => {{
     TOUR_TYPE = activeProjectType();
     STEPS = CURRICULA[TOUR_TYPE] || IMAGE_STEPS;
     PHASES = PHASES_BY_TYPE[TOUR_TYPE] || PHASES_BY_TYPE.image;
-    STRICT_NO_SKIP = (TOUR_TYPE === 'ocr');
     SEEN_KEY = 'tm_tour_seen_' + TOUR_TYPE + '_v1';
     AUTOSKIP_KEY = 'tm_tour_autoskip_' + TOUR_TYPE + '_v1';
     /* Re-entrant by design (boot, start, project switch).  Load the saved
@@ -17511,7 +17525,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
   }}
 
   /* The one way a step is ever left.  Called from the orb, from Next →,
-     from Skip step →, from a chapter chip, from the arrow keys and from a
+     from a chapter chip, from the arrow keys and from a
      satisfied `advanceWhen` — never from a workspace event. */
   function advanceQuietly(delay) {{
     if (advTimer) window.clearTimeout(advTimer);
@@ -18604,8 +18618,12 @@ mountReflowTimers.push(window.setTimeout(() => {{
     }}
     var readyNow = !!st.ready && !flashing;
     if (goNode) {{
-      var goHtml = readyNow ? '&#9989; Next Step &rarr;' : 'Next Step &rarr;';
-      if (goNode.innerHTML !== goHtml) goNode.innerHTML = goHtml;
+      var allowOrbNext = !step.noFooterNext;
+      goNode.style.display = allowOrbNext ? '' : 'none';
+      if (allowOrbNext) {{
+        var goHtml = readyNow ? '&#9989; Next Step &rarr;' : 'Next Step &rarr;';
+        if (goNode.innerHTML !== goHtml) goNode.innerHTML = goHtml;
+      }}
     }}
     if (!orb.classList.contains('on')) orb.classList.add('on');
     if (readyNow !== lastOrbReady) {{
@@ -19862,16 +19880,6 @@ mountReflowTimers.push(window.setTimeout(() => {{
     if (closeOverview) closeOverview.onclick = function () {{ endTour('close'); }};
     var restartBtn = byId('tmTourRestart');
     if (restartBtn) restartBtn.onclick = function () {{ restartTour(); }};
-    var skipBtn = byId('tmTourSkip');
-    /* Secondary escape hatch, not the exit: `Skip step →` steps over the one
-       checkpoint the user cannot or does not want to perform and leaves the
-       guide running.  Dropping out entirely is the × in the card's head, or
-       Esc.  Either way the step's onEnter/onLeave hooks put the workspace
-       back in the state the next slide expects. */
-    if (skipBtn) skipBtn.onclick = function () {{
-      ensureDestinationUiOnForward(tourIndex, Math.min(STEPS.length - 1, tourIndex + 1));
-      goStep(tourIndex + 1);
-    }};
     var backBtn = byId('tmTourBack');
     if (backBtn) backBtn.onclick = function () {{
       /* Inside the OCR Classes ② picker, ← Back means "close this modal",
@@ -20009,10 +20017,10 @@ mountReflowTimers.push(window.setTimeout(() => {{
       /* Footer contract:
          · `← Back` is ALWAYS present when tourIndex > 0 — even on the
            first visit to a locked action step, so nobody is trapped;
-         · `Next Step →` (and Skip) appear only when the step is UNLOCKED:
-           a concept slide, a completed step, or any step behind the
-           frontier (tourIndex < maxReachedIndex).  Revisiting a step you
-           already passed therefore never forces the action twice;
+         · `Next Step →` appears only when the step is UNLOCKED: a concept
+           slide, a completed step, or any step behind the frontier
+           (tourIndex < maxReachedIndex).  Revisiting a step you already
+           passed therefore never forces the action twice;
          · the frontier's first uncompleted action step shows the orange
            «🛠️ …» bar (handson) and/or the waiting pill instead. */
       var unlocked = isStepUnlocked(tourIndex);
@@ -20024,14 +20032,14 @@ mountReflowTimers.push(window.setTimeout(() => {{
       /* HARD GATE — Collect and Preprocess are all-or-nothing scenes.
          Until EVERY class has ≥20 samples (Collect) or EVERY sampled class
          has been tuned (Preprocess), the card offers no way past the
-         step: no «Skip step →», no «Next Step →».  The floating pill's
-         own Next stays as the deliberate escape hatch. */
+         step: no «Next Step →».  The floating pill's own Next stays as
+         the deliberate escape hatch. */
       var gatePending = stepGatePending(step);
       /* Steps whose own cue says "press Next →" (or whose editing is
          optional) always show Next — even on the first visit — so the
          footer never contradicts the card.  The hard gate wins over all
          of them. */
-      var nextAlways = !!(step.nextAlways || step.settingsPhase ||
+      var nextAlways = !!(step.nextAlways || (step.settingsPhase && !step.noFooterNext) ||
         (step.keepCardOpenOnInteract && !step.live) || !!step.completeOn);
       /* A live scene whose criteria are ALREADY satisfied offers Next even
          on the first visit: an EMNIST-filled OCR project starts with every
@@ -20039,9 +20047,7 @@ mountReflowTimers.push(window.setTimeout(() => {{
          Collect ② for work that is already done. */
       var sceneReadyNext = (step.live === 'samples' && allClassesCollected()) ||
         (step.live === 'thresholds' && tmAllTuned());
-      var showNext = !gatePending && (unlocked || nextAlways || sceneReadyNext);
-      var showSkip = !gatePending && !STRICT_NO_SKIP &&
-        (unlocked || step.mode === 'concept') && step.mode !== 'concept';
+      var showNext = !step.noFooterNext && !gatePending && (unlocked || nextAlways || sceneReadyNext);
       if (step.mode === 'handson' && (step.target || step.phaseTarget)) {{
         html += '<div class="tm-tour-actions">';
         html += '<button type="button" class="tm-tour-btn primary wide" id="tmTourStart">' +
@@ -20056,9 +20062,6 @@ mountReflowTimers.push(window.setTimeout(() => {{
         html += '<span></span>';
       }}
       html += '<span class="tm-tour-spacer"></span>';
-      if (showSkip) {{
-        html += '<button type="button" class="tm-tour-btn ghost tm-tour-skip" id="tmTourSkip"' + (last ? ' disabled' : '') + '>Skip step &rarr;</button>';
-      }}
       if (gatePending) {{
         /* The lock state lives INSIDE the nav row: a second pill row made
            the tallest scene cards overflow their 520px budget. */
@@ -21074,7 +21077,7 @@ def _render_ocr_project_page() -> None:
     st.markdown(
         '''
         <div class="tm-start-panel" style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;width:min(1648px, calc(100% - 80px));max-width:100%;margin-left:auto;margin-right:auto;box-sizing:border-box;">
-            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🔠 OCR / Character Project</h1>
+            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">● OCR / Character Project</h1>
             <p class="tm-start-panel-sub" style="margin:0;max-width:100%;width:100%;line-height:1.6;color:#475569;font-size:15px;">
                 Character recognition for the ESP32-P4. Samples are captured exactly like the image project,
                 then each one is reduced to a glyph tensor by an integer-exact pipeline whose Python and C
@@ -21108,7 +21111,7 @@ def _render_sign_ocr_project_page() -> None:
     st.markdown(
         '''
         <div class="tm-start-panel" style="background-color:#F8FAFC;border:1px solid #E2E8F0;border-radius:16px;padding:24px 32px;margin-bottom:1.5rem;margin-top:1rem;width:min(1648px, calc(100% - 80px));max-width:100%;margin-left:auto;margin-right:auto;box-sizing:border-box;">
-            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">🚗 Car License Project</h1>
+            <h1 class="tm-start-panel-title" style="margin:0 0 10px 0;font-size:2.2rem;font-weight:800;color:#0F172A;">● Car License Project</h1>
             <p class="tm-start-panel-sub" style="margin:0;max-width:100%;width:100%;line-height:1.6;color:#475569;font-size:15px;">
                 A license plate is one frame holding three characters in a fixed
                 reading order. Set the target sequence, train one class per CHARACTER

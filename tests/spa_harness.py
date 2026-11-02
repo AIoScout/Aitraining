@@ -31,7 +31,15 @@ APP_PY = Path(__file__).resolve().parents[1] / "app.py"
 
 # The four values the f-string interpolates.  Three are constants of the page;
 # `data` is the boot payload and is supplied per test.
-_LOGO = ""
+def _logo_path_d() -> str:
+    """The official single-path mark, read from the app so the served page
+    carries the real logo instead of an empty placeholder."""
+    src = APP_PY.read_text(encoding="utf-8")
+    m = re.search(r'_AIO_SCOUTS_LOGO_PATH_D = "([^"]+)"', src)
+    return m.group(1) if m else ""
+
+
+_LOGO_PATH_D = _logo_path_d()
 _EMNIST_SPLIT_OPTIONS = "[]"
 _BACKGROUND_CLASS_NAME = "_background"
 
@@ -54,7 +62,7 @@ def build_spa_html(payload: Dict[str, Any]) -> str:
     # braces collapse, and the four real fields are substituted.
     code = compile("f'''" + body + "'''", str(APP_PY), "eval")
     names = {
-        "_AIO_SCOUTS_LOGO_B64": _LOGO,
+        "_AIO_SCOUTS_LOGO_PATH_D": _LOGO_PATH_D,
         "emnist_split_options": _EMNIST_SPLIT_OPTIONS,
         "BACKGROUND_CLASS_NAME": _BACKGROUND_CLASS_NAME,
         "data": json.dumps(payload),

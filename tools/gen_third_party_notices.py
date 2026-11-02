@@ -274,7 +274,7 @@ def _license_id(raw: str) -> str:
     s = str(raw or "").strip()
     low = s.lower()
     if not s:
-        return "见包内 LICENSE 文件"
+        return "See bundled LICENSE file"
     if "apache" in low or "asl" in low:
         return "Apache-2.0"
     if "mit" in low:
@@ -308,7 +308,7 @@ def _license_id(raw: str) -> str:
     if "nvidia" in low:
         return "NVIDIA-SLA"
     if "copyright" in low and "redistribution" in low:
-        return "BSD-风格(见全文)"
+        return "BSD-style (see full text)"
     return s[:60]
 
 

@@ -311,11 +311,11 @@ def test_background_toggle_on_trains_the_rejector_and_still_reads_a12():
 def test_ui_display_name_is_car_license():
     import app
 
-    assert app._tm_project_type_label("sign_ocr") == "🚗 Car License Project"
+    assert app._tm_project_type_label("sign_ocr") == "● Car License Project"
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "🛑 Road Sign (3-Char)" not in source
     assert "Road Sign Project (3-Char)" not in source
-    assert "🚗 Car License Project" in source
+    assert "● Car License Project" in source
     # Internal key is unchanged.
     assert "sign_ocr" in source
 

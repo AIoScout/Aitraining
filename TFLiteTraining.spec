@@ -2,7 +2,15 @@
 import sys
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app.py', '.'), ('camera_permission.py', '.'), ('dataset_io.py', '.'), ('trainer.py', '.'), ('ui_styles.py', '.'), ('serial_device.py', '.'), ('record_controller.py', '.'), ('image_preprocess.py', '.'), ('mac_camera.py', '.'), ('ocr_dataset.py', '.'), ('ocr_preprocess.py', '.'), ('ocr_trainer.py', '.'), ('templates', 'templates')]
+datas = [('app.py', '.'), ('camera_permission.py', '.'), ('dataset_io.py', '.'), ('trainer.py', '.'), ('ui_styles.py', '.'), ('serial_device.py', '.'), ('record_controller.py', '.'), ('image_preprocess.py', '.'), ('mac_camera.py', '.'),
+         # OCR/sign runtime modules — imported by app.py, trainer.py and
+         # record_controller.py (some lazily).  Missing these made the
+         # packaged app die with ModuleNotFoundError: ocr_dataset.
+         ('ocr_dataset.py', '.'), ('ocr_preprocess.py', '.'), ('ocr_trainer.py', '.'),
+         # Workshop template projects (car_sign_template.tmproj etc.) — the
+         # Start Page "Workshop" buttons open these. Without the folder the
+         # buttons ship broken in the packaged app.
+         ('templates', 'templates')]
 # App resources that must ship INSIDE the bundle: the hero icon, the
 # licensing artifacts (first-launch EULA, third-party notices, Apache text)
 # and the optional EMNIST template bank.  Without these the packaged app
